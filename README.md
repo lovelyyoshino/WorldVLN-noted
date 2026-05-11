@@ -23,7 +23,7 @@ The current codebase is organized into three major components:
 | --- | --- |
 | [Train_WAM/](./Train_WAM) | Training package for backbone finetuning and the latent-to-action **action decoder** (training, batch inference, evaluation). |
 | [infer/](./infer) | Online inference service for serving the model as an API. |
-| [posttrain/](./posttrain) | StageA rollout collection and StageB post-training workflows, including simulator-backed rollout support. |
+| [posttrain/](./posttrain) | Post-training workflows: **rollout** collection and **train** (optimization), including simulator-backed rollout support. |
 
 At a high level, `Train_WAM/` covers model training and offline prediction utilities, `infer/` covers deployment-oriented inference, and `posttrain/` covers the later-stage optimization pipeline.
 
@@ -72,9 +72,9 @@ Depending on the workflow, you may also need additional runtime assets that are 
 | Shared T5 and VAE assets | `CHECKPOINTS_DIR` | `posttrain/` and local inference flows |
 | Action-head checkpoint | `ACTIONHEAD_CKPT` | `infer/`, `posttrain/` |
 | Action-head config | `ACTIONHEAD_RUN_CONFIG` | `infer/`, `posttrain/` |
-| Rollout manifest JSON | `SRC_JSON` | `posttrain` StageA |
+| Rollout manifest JSON | `SRC_JSON` | `posttrain` rollout |
 | UAV-Flow task JSON root | `UAVFLOW_TASK_JSON_ROOT` | `posttrain` remote simulator rollout |
-| Replay metadata | `REPLAY_META_DIR` | `posttrain` StageB |
+| Replay metadata | `REPLAY_META_DIR` | `posttrain` train |
 
 Notes:
 
@@ -84,6 +84,8 @@ Notes:
 ## Inference
 
 The repository currently provides two main inference surfaces.
+
+![WorldVLN model](./assets/model.png)
 
 ### Online Inference Service
 
@@ -234,21 +236,21 @@ bash Train_WAM/action_decoder/scripts/train_stage2_ddp.sh
 
 ### Post-Training
 
-The post-training workflow is located under [posttrain/](./posttrain) and is organized into StageA and StageB.
+The post-training workflow is located under [posttrain/](./posttrain) and is organized into two steps: **rollout** and **train**.
 
-- StageA rollout collection: [posttrain/scripts/run_stagea_collect.sh](./posttrain/scripts/run_stagea_collect.sh)
-- StageB partial-freeze optimization: [posttrain/scripts/run_stageb_partialfreeze.sh](./posttrain/scripts/run_stageb_partialfreeze.sh)
+- Rollout collection: [posttrain/scripts/run_stagea_collect.sh](./posttrain/scripts/run_stagea_collect.sh)
+- Train (partial-freeze optimization): [posttrain/scripts/run_stageb_partialfreeze.sh](./posttrain/scripts/run_stageb_partialfreeze.sh)
 - Remote simulator service wrapper: [posttrain/scripts/run_remote_sim_service.sh](./posttrain/scripts/run_remote_sim_service.sh)
-- Local inference launcher used by StageA: [posttrain/run_infer_server.sh](./posttrain/run_infer_server.sh)
+- Local inference launcher used by rollout: [posttrain/run_infer_server.sh](./posttrain/run_infer_server.sh)
 
 At a high level:
 
-- StageA consumes rollout sources and model assets, then generates rollout caches and replay metadata.
-- StageB consumes replay metadata and runs post-training to produce updated checkpoints and logs.
+- Rollout consumes rollout sources and model assets, then generates rollout caches and replay metadata.
+- Train consumes replay metadata and runs post-training to produce updated checkpoints and logs.
 
-#### Quick start (StageA + StageB)
+#### Quick start (rollout + train)
 
-Start the local inference service used by StageA:
+Start the local inference service used by rollout:
 
 ```bash
 INFINITY_CKPT=/path/to/infinity/global_step_xxx.pth \
@@ -258,7 +260,7 @@ ACTIONHEAD_RUN_CONFIG=/path/to/actionhead/run_config.json \
 bash posttrain/run_infer_server.sh
 ```
 
-Run StageA rollout collection:
+Run rollout collection:
 
 ```bash
 SRC_JSON=/path/to/reference_video_full_49f_trajectory_prompts.json \
@@ -272,12 +274,12 @@ UAVFLOW_TASK_JSON_ROOT=/path/to/UAV-Flow-Eval/test_jsons \
 bash posttrain/scripts/run_stagea_collect.sh RUN_ID=remote_sim_smoke TOP_N=1 K_CAND=1 STAGEA_NPROC=1
 ```
 
-Run StageB partial-freeze optimization:
+Run train (partial-freeze optimization):
 
 ```bash
 CHECKPOINTS_DIR=/path/to/checkpointsinf \
 RUSH_RESUME=/path/to/infinity/global_step_xxx.pth \
-REPLAY_META_DIR=/path/to/replay_meta_stagea_smoke \
+REPLAY_META_DIR=/path/to/replay_meta_rollout_smoke \
 bash posttrain/scripts/run_stageb_partialfreeze.sh PARTIAL_FREEZE_MODE=smoke RUN_ID=stageb_smoke
 ```
 
@@ -285,10 +287,4 @@ For simulator-backed rollout details, see [posttrain/docs/remote_sim.md](./postt
 
 ## License
 
-Please review the license files within each subdirectory before use:
-
-- `Train_WAM/LICENSE`
-- `Train_WAM/action_decoder/LICENSE`
-- `infer/InfinityStar-main/LICENSE`
-- `posttrain/InfinityStar-main/LICENSE`
-- `posttrain/TSformer-VO-main/LICENSE`
+This project is released under the MIT License. See `LICENSE`.

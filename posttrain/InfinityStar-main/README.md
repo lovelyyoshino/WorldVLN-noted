@@ -184,4 +184,4 @@ If our work assists your research, feel free to give us a star ⭐ or cite us us
 ```
 
 ## License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License.
