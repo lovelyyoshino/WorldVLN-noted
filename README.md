@@ -1,4 +1,6 @@
-# WorldVLN
+# WorldVLN: Autoregressive World Action Model for Aerial Vision-Language Navigation
+
+![WorldVLN framework](./assets/framework.png)
 
 This is the official code repository for WorldVLN. The repository includes the main code paths used for backbone training, action decoding, inference serving, and post-training workflows.
 

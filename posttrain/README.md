@@ -6,7 +6,7 @@ This directory contains the WorldVLN post-training workflows used for StageA rol
 
 The post-training pipeline is organized around two stages.
 
-- StageA collects candidate rollouts from either offline reference videos or a remote simulator-backed environment.
+- StageA collects candidate rollouts through a remote simulator-backed online RL workflow.
 - StageB consumes the replay metadata produced by StageA and continues optimization from a pretrained checkpoint.
 
 This package also includes the local inference service used by StageA and the simulator-side runtime needed for remote simulator rollout.
@@ -42,13 +42,13 @@ This package does not ship private checkpoints or dataset payloads. You must pro
 
 ## StageA: Rollout Collection
 
-StageA builds rollouts and replay metadata from a rollout manifest plus model assets.
+StageA builds rollouts and replay metadata for the online RL pipeline from a rollout manifest plus model assets.
 
 ### Inputs
 
 - A rollout source manifest provided through `SRC_JSON`
 - Model checkpoints and shared assets
-- Optional simulator connection settings when using `remote_sim`
+- Simulator connection settings for `remote_sim`
 
 ### Outputs
 
@@ -66,18 +66,7 @@ ACTIONHEAD_RUN_CONFIG=/path/to/actionhead/run_config.json \
 bash run_infer_server.sh
 ```
 
-### Run StageA with Offline Reference Videos
-
-```bash
-SRC_JSON=/path/to/reference_video_full_49f_trajectory_prompts.json \
-INFINITY_CKPT=/path/to/infinity/global_step_xxx.pth \
-CHECKPOINTS_DIR=/path/to/checkpointsinf \
-ACTIONHEAD_CKPT=/path/to/actionhead/checkpoint_last.pth \
-ACTIONHEAD_RUN_CONFIG=/path/to/actionhead/run_config.json \
-bash scripts/run_stagea_collect.sh RUN_ID=stagea_smoke TOP_N=1 K_CAND=1
-```
-
-### Run StageA with a Remote Simulator
+### Run StageA
 
 ```bash
 SRC_JSON=/path/to/reference_video_full_49f_trajectory_prompts.json \
