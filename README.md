@@ -1,8 +1,20 @@
 # WorldVLN: Autoregressive World Action Model for Aerial Vision-Language Navigation
 
-![WorldVLN framework](./assets/framework.png)
 
 This is the official code repository for WorldVLN. The repository includes the main code paths used for backbone training, action decoding, inference serving, and post-training workflows.
+![WorldVLN framework](./assets/framework.png)
+
+## Demo
+
+The following examples illustrate representative WorldVLN behaviors in both generated and real-world settings.
+
+### Generated World Modeling Demo
+
+![WorldVLN generated world modeling demo](./assets/background-video-grid.gif)
+
+### Real-World Navigation Demo
+
+![WorldVLN real-world navigation demo](./assets/realexp.png)
 
 ## Overview
 
