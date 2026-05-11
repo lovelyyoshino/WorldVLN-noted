@@ -543,6 +543,105 @@ def _safe_torch_load_any(path: str) -> object:
         return torch.load(path, map_location="cpu", weights_only=False)
 
 
+def _is_safetensors_shard_dir(path: str | Path) -> bool:
+    path = Path(path)
+    if not path.is_dir():
+        return False
+    return any(path.glob("*.safetensors")) or any(path.glob("*.safetensors.index.json"))
+
+
+def _nested_dict_get(obj: object, dotted_path: str) -> object | None:
+    current = obj
+    for part in dotted_path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+def _load_state_dict_from_safetensors_dir(path: str | Path, device: str | torch.device = "cpu") -> Dict[str, torch.Tensor]:
+    from safetensors import safe_open
+
+    path = Path(path).expanduser().resolve()
+    target_device = str(device)
+    state_dict: Dict[str, torch.Tensor] = {}
+    alias_map: Dict[str, str] = {}
+
+    def _merge_alias_metadata(metadata: object) -> None:
+        if not isinstance(metadata, dict):
+            return
+        for key, value in metadata.items():
+            if key == "format":
+                continue
+            if isinstance(key, str) and isinstance(value, str):
+                alias_map[key] = value
+
+    index_files = sorted(path.glob("*.safetensors.index.json"))
+    if index_files:
+        index_data = json.loads(index_files[0].read_text())
+        _merge_alias_metadata(index_data.get("metadata"))
+        shard_names = list(dict.fromkeys(index_data.get("weight_map", {}).values()))
+        for shard_name in shard_names:
+            shard_path = path / shard_name
+            with safe_open(str(shard_path), framework="pt", device=target_device) as handle:
+                _merge_alias_metadata(handle.metadata())
+                for key in handle.keys():
+                    state_dict[key] = handle.get_tensor(key)
+    else:
+        safetensors_files = sorted(path.glob("*.safetensors"))
+        if not safetensors_files:
+            raise FileNotFoundError(f"No .safetensors files found in {path}")
+        for shard_path in safetensors_files:
+            with safe_open(str(shard_path), framework="pt", device=target_device) as handle:
+                _merge_alias_metadata(handle.metadata())
+                for key in handle.keys():
+                    state_dict[key] = handle.get_tensor(key)
+
+    for alias_key, canonical_key in alias_map.items():
+        if alias_key not in state_dict and canonical_key in state_dict:
+            state_dict[alias_key] = state_dict[canonical_key]
+    return state_dict
+
+
+def _load_model_weights_from_path(
+    model: torch.nn.Module,
+    *,
+    path: str | Path,
+    label: str,
+    preferred_state_dict_paths: Tuple[str, ...] = (),
+    strict: bool = False,
+) -> None:
+    path = Path(path).expanduser().resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"{label} weights not found: {path}")
+
+    if _is_safetensors_shard_dir(path):
+        print(f"[{label}] loading sharded weights from {path}")
+        state_dict = _load_state_dict_from_safetensors_dir(path, device="cpu")
+        result = model.load_state_dict(state_dict, strict=strict)
+        if result is not None:
+            missing, unexpected = result
+            print(f"[{label}] shard load strict={strict}, missing={len(missing)} unexpected={len(unexpected)}")
+        return
+
+    loaded = _safe_torch_load_any(str(path))
+    state_dict = None
+    for dotted_path in preferred_state_dict_paths:
+        candidate = _nested_dict_get(loaded, dotted_path)
+        if isinstance(candidate, dict) and len(candidate) > 0:
+            state_dict = candidate
+            break
+    if state_dict is None and isinstance(loaded, dict):
+        state_dict = loaded
+    if not isinstance(state_dict, dict) or len(state_dict) == 0:
+        raise ValueError(f"[{label}] unable to locate a state_dict in {path}")
+
+    result = model.load_state_dict(state_dict, strict=strict)
+    if result is not None:
+        missing, unexpected = result
+        print(f"[{label}] load_state_dict strict={strict}, missing={len(missing)} unexpected={len(unexpected)}")
+
+
 def _purge_sysmodules(pkg: str) -> None:
     """Delete pkg and its submodules from sys.modules."""
     for k in list(sys.modules.keys()):
@@ -1102,6 +1201,15 @@ def _init_models(
 
     text_tokenizer, text_encoder = load_tokenizer(t5_path=a.text_encoder_ckpt)  # type: ignore[misc]
     vae = load_visual_tokenizer(a).float().to(_DEVICE)  # type: ignore[misc]
+    vae_model_path = str(getattr(a, "vae_model_path", "") or "").strip()
+    if vae_model_path:
+        _load_model_weights_from_path(
+            vae,
+            path=vae_model_path,
+            label="InfinityVAE",
+            preferred_state_dict_paths=("trainer.vae_local", "vae_state_dict", "vae"),
+            strict=False,
+        )
     infinity = load_transformer(vae, a).to(_DEVICE)  # type: ignore[misc]
     infinity.eval().requires_grad_(False)
     self_correction = SelfCorrection(vae, a)  # type: ignore[misc]

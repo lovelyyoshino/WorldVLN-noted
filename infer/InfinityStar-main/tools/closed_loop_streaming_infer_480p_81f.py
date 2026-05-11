@@ -44,6 +44,41 @@ from tools.infinity_streaming_session import InfinityStreamingSession
 from tools.run_infinity import load_tokenizer, load_transformer, load_visual_tokenizer, save_video, transform
 
 
+def _is_safetensors_shard_dir(path: str) -> bool:
+    if not path or not osp.isdir(path):
+        return False
+    return bool(glob.glob(osp.join(path, "*.safetensors"))) or bool(glob.glob(osp.join(path, "*.safetensors.index.json")))
+
+
+def _resolve_checkpoint_layout(ckpt: str) -> dict[str, str]:
+    ckpt = osp.abspath(ckpt)
+
+    gpt_dir = osp.join(ckpt, "gpt")
+    vae_dir = osp.join(ckpt, "vae")
+    if osp.isdir(ckpt) and _is_safetensors_shard_dir(gpt_dir) and _is_safetensors_shard_dir(vae_dir):
+        return {
+            "checkpoint_layout": "hf_repo",
+            "checkpoint_type": "torch_shard",
+            "model_path": gpt_dir,
+            "vae_model_path": vae_dir,
+        }
+
+    if _is_safetensors_shard_dir(ckpt):
+        return {
+            "checkpoint_layout": "torch_shard",
+            "checkpoint_type": "torch_shard",
+            "model_path": ckpt,
+            "vae_model_path": "",
+        }
+
+    return {
+        "checkpoint_layout": "torch",
+        "checkpoint_type": "torch",
+        "model_path": ckpt,
+        "vae_model_path": "",
+    }
+
+
 def _sorted_images(image_dir: str) -> List[str]:
     exts = ("*.png", "*.jpg", "*.jpeg", "*.webp", "*.bmp")
     files: List[str] = []
@@ -80,6 +115,7 @@ def _make_args(
     tau_video: float,
 ) -> SimpleNamespace:
     ckpt_dir = osp.join(REPO_ROOT, "checkpoint")
+    ckpt_layout = _resolve_checkpoint_layout(ckpt)
     # Prefer the repo's Args (has a complete set of defaults) to avoid missing-field crashes.
     # Fallback to SimpleNamespace if Tap/Args is unavailable in current python env.
     try:
@@ -103,8 +139,10 @@ def _make_args(
     a.tlen = 512
     a.simple_text_proj = 1
     a.model_type = "infinity_qwen8b"
-    a.model_path = ckpt
-    a.checkpoint_type = "torch"
+    a.model_path = ckpt_layout["model_path"]
+    a.checkpoint_type = ckpt_layout["checkpoint_type"]
+    a.checkpoint_layout = ckpt_layout["checkpoint_layout"]
+    a.vae_model_path = ckpt_layout["vae_model_path"]
 
     # match finetune schedule family
     a.dynamic_scale_schedule = dynamic_scale_schedule
