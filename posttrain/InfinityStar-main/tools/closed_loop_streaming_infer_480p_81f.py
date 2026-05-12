@@ -233,7 +233,7 @@ def _make_args(
     a.frames_inner_clip = 4
     a.context_from_largest_no = 0
 
-    # inference knobs (match tools/infer_video_480p.py & our finetune inference script)
+    # inference knobs aligned with the legacy standalone inference defaults
     a.use_flex_attn = True
     a.bf16 = 1
     a.use_apg = 1

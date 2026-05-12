@@ -553,7 +553,7 @@ class InfinityTrainer(object):
             # the replay graph can exceed 80G even on A100.
             trainer_type = str(getattr(args, "trainer_type", "sft") or "sft").strip().lower()
             # Optional per-batch hybrid override (works best with video_batch_size=1):
-            # allow switching between offline_grpo and sft based on dataset-provided role.
+            # allow switching between GRPO and sft based on dataset-provided role.
             if isinstance(hybrid_roles, list) and len(hybrid_roles) > 0:
                 uniq = {str(x or "").strip().lower() for x in hybrid_roles}
                 uniq.discard("")
@@ -562,8 +562,8 @@ class InfinityTrainer(object):
                     if role0 == "sft":
                         trainer_type = "sft"
                     elif role0 == "grpo":
-                        trainer_type = "offline_grpo"
-            use_grpo = trainer_type == "offline_grpo"
+                        trainer_type = "grpo"
+            use_grpo = trainer_type == "grpo"
             new_mode = str(getattr(args, "grpo_new_logprob_mode", "trace_replay") or "trace_replay").strip().lower()
             aux = float(getattr(args, "grpo_aux_sft_coef", 0.0) or 0.0)
             pg_only_flag = int(getattr(args, "grpo_pg_only", 1) or 0) == 1
@@ -637,14 +637,14 @@ class InfinityTrainer(object):
                 if bool(int(getattr(args, "grpo_require_old_logprob", 1))):
                     if oldlp_t is None:
                         raise RuntimeError(
-                            "offline_grpo strict mode requires grpo_old_logprob per sample; got missing/length-mismatch list."
+                            "GRPO strict mode requires grpo_old_logprob per sample; got missing/length-mismatch list."
                         )
                     if isinstance(grpo_trace_files, list) and len(grpo_trace_files) == n_s:
                         for i_tf, tf in enumerate(grpo_trace_files):
                             if not isinstance(tf, list) or len(tf) <= 0:
-                                raise RuntimeError(f"offline_grpo strict mode requires grpo_trace_files; sample[{i_tf}] missing")
+                                raise RuntimeError(f"GRPO strict mode requires grpo_trace_files; sample[{i_tf}] missing")
                     else:
-                        raise RuntimeError("offline_grpo strict mode requires grpo_trace_files list aligned with batch")
+                        raise RuntimeError("GRPO strict mode requires grpo_trace_files list aligned with batch")
                 # Preferred path: consume StageA-precomputed final advantage directly.
                 # Legacy fallback: reconstruct weights from reward levels inside the current batch.
                 if isinstance(grpo_adv_finals, list) and len(grpo_adv_finals) == n_s:
@@ -819,7 +819,7 @@ class InfinityTrainer(object):
                 if oldlp_t is not None:
                     oldlp_t = torch.nan_to_num(oldlp_t, nan=0.0, posinf=0.0, neginf=0.0)
                 # Strict PPO/GRPO ratio needs logprob_new computed on the SAME sampled token trace.
-                # Default to trace replay (see rl/clip_level_offline_grpo.md).
+                # Default to trace replay in the GRPO replay path.
                 newlp_t: Optional[torch.Tensor] = None
                 new_mode = str(getattr(args, "grpo_new_logprob_mode", "trace_replay") or "trace_replay").strip().lower()
                 if oldlp_t is not None and weight_t is not None and new_mode in ("trace_replay", "trace_ce"):

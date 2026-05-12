@@ -54,14 +54,14 @@ class Args(Tap):
     cfg: float = 0.1  # Classifier-free guidance dropout probability
     rand_uncond: bool = False  # Whether to use random, unlearnable unconditional embedding
     twoclip_alternatingtraining: int = 0  # Whether to use two-clip alternating training
-    trainer_type: str = 'sft'  # sft | offline_grpo
+    trainer_type: str = 'sft'  # sft | GRPO
     wp_it: int = 100  # Warm-up iterations
 
     # ==================================================================================================================
     # ============================================= Hybrid GRPO + SFT (optional) =======================================
     # ==================================================================================================================
     # Dataset-level shuffle of formed batches (IterableDataset). Disable to preserve deterministic ordering patterns,
-    # e.g. 12 offline_grpo clips + 1 sft anchor per trajectory.
+    # e.g. 12 GRPO clips + 1 sft anchor per trajectory.
     shuffle_batches: int = 1
     # If set (e.g. "sft"), override stepping schedule: optimizer step is taken only when the current batch role matches.
     # Requires dataset to provide `hybrid_roles` in each yielded batch.

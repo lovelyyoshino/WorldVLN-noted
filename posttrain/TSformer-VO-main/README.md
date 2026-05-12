@@ -80,29 +80,11 @@ pip install -r requirements.txt
 
 ## 4. Usage
 
-**PS**: So far we are changing the settings and hyperparameters directly in the variables and dictionaries. As further work, we will use pre-set configurations with the `argparse` module to make a user-friendly interface.
+This directory is kept in the open-source posttrain package only for the TSformer action-head runtime pieces still needed by StageA remote_sim and related serving paths.
 
-### 4.1. Training
+Standalone helper scripts for one-off inference, plotting, token extraction, and dataset reshaping were moved out of the package during cleanup. If you need to recover them later, restore them from the backup batches under /ML-vePFS/research_gen/vln_uav/tmp/backup.
 
-In `train.py`:
-- Manually set configuration in `args` (python dict);
-- Manually set the model hyperparameters in `model_params` (python dict);
-- Save and run the code `train.py`.
-
-### 4.2. Inference
-
-In `predict_poses.py`:
-- Manually set the variables to read the checkpoint and sequences.
-
-| **Variables**   | **Info**                                                                                                             |
-|-----------------|----------------------------------------------------------------------------------------------------------------------|
-| checkpoint_path | String with the path to the trained model you want to use for inference.  Ex: checkpoint_path = "checkpoints/Model1" |
-| checkpoint_name | String with the name of the desired checkpoint (name of the .pth file).  Ex: checkpoint_name = "checkpoint_model2_exp19" |
-| sequences       | List with strings representing the KITTI sequences.  Ex: sequences = ["03", "04", "10"]                              |
-
-### 4.3. Visualize Trajectories
-In `plot_results.py`:
-- Manually set the variables to the checkpoint and desired sequences, similarly to [Inference](#42-inference)
+The remaining training-oriented files in this directory are preserved conservatively because they may still be useful for internal experiments or future migration, but they are not treated as part of the minimal maintained posttrain workflow.
 
 
 ## 5. Evaluation

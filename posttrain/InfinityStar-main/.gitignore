@@ -56,4 +56,3 @@ tmp_videos
 shm
 wget-log
 data/interactive_toy_data
-tools/infer_interact_480p.py.bk

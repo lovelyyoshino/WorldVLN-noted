@@ -952,7 +952,7 @@ def _infer_summed_codes_for_step(
         len(sched.scale_schedule) - int(sched.tower_split_index)
     )
 
-    # Match `tools/infer_v2v_segments_49f_clip16.py`: use gen_one_example() style wrapper,
+    # Use the legacy standalone inference wrapper style via gen_one_example(),
     # which internally normalizes cfg/tau lists and handles prompt encoding per-call.
     try:
         trace_sample_logprob = 0.0

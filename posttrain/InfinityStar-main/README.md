@@ -127,23 +127,9 @@ We introduce InfinityStar, a unified spacetime autoregressive framework for high
 We provide a comprehensive workflow for training and finetuning our model, covering data organization, feature extraction, and training scripts. For detailed instructions, please refer to `data/README.md`.
 
 ## Inference
-*   **720p Video Generation:** 
-    Use `tools/infer_video_720p.py` to generate 5-second videos at 720p resolution. Due to the high computational cost of training, our released 720p model is trained for 5-second video generation. This script also supports image-to-video generation by specifying an image path.
-    ```bash
-    python3 tools/infer_video_720p.py
-    ```
+Standalone inference and interactive demo scripts were removed from this maintained posttrain package during cleanup.
 
-*   **480p Variable-Length Video Generation:**
-    We also provide an intermediate checkpoint for 480p resolution, capable of generating videos of 5 and 10 seconds. Since this model is not specifically optimized for Text-to-Video (T2V), we recommend using the experimental Image-to-Video (I2V) and Video-to-Video (V2V) modes for better results. To specify the video duration, you can edit the `generation_duration` variable in `tools/infer_video_480p.py` to either 5 or 10. This script also supports image-to-video and video continuation by providing a path to an image or a video.
-    ```bash
-    python3 tools/infer_video_480p.py
-    ```
-
-*   **480p Long Interactive Video Generation:**
-    Use `tools/infer_interact_480p.py` to generate a long interactive video in 480p. This script supports interactive video generation. You can provide a reference video and multiple prompts. The model will generate a video interactively with your assistance. 
-    ```bash
-    python3 tools/infer_interact_480p.py
-    ```
+The remaining files under `tools/` are kept for the supported training/runtime paths, especially the remote_sim StageA workflow and StageB training workflow used by the posttrain package.
 
 ## Citation
 If our work assists your research, feel free to give us a star ⭐ or cite us using:
