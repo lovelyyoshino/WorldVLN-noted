@@ -73,50 +73,27 @@ Common environment variables:
 - Configuration: [infer/config.json](./infer/config.json)
 - Windows-side client: [infer/client.py](./infer/client.py)
 
-### Batch Latent-to-Action Inference
+#### Autoregressive I/O contract (how clients talk to the server)
 
-This path is intended for **offline** inference and evaluation on route-level data (as opposed to online serving).
+WorldVLN runs in an **autoregressive** closed-loop protocol over a trajectory `session_id`:
 
-The batch inference entrypoints live under `train/action_decoder/tools/`:
+- **Input (per call)**: `images_base64` (RGB frames) + an optional `instruction` on the first call.
+  - First call typically sends **1 warmup frame**.
+  - Next calls send **`step` frames** (default 16) to advance the session timeline.
+- **State (server-side)**: the server stores history by `session_id` and maintains a streaming world-model session.
+- **Output (per call)**: `actions` as delta actions in **cm/deg** with order `[dx, dy, dz, droll, dyaw, dpitch]`.
+  - In the default `tsformer_latent` mode, the server emits **one segment worth of actions** whenever enough frames have been received.
 
-- Inference: [train/action_decoder/tools/predict_pose.py](./train/action_decoder/tools/predict_pose.py)
-- Evaluation: [train/action_decoder/tools/eval_endpoints.py](./train/action_decoder/tools/eval_endpoints.py)
+Example (strict closed-loop, enable `allow_future_segments=1`):
 
-#### 1) Prepare route folders
+- Send **(1 real frame + instruction/prompt)** → get the next **`step` actions** (typically 16).
+- Execute them, collect the next **`step` real frames**, send them → get the next **`step` actions**.
+- Repeat with the same `session_id` until the trajectory ends.
 
-Each route directory under `--data_root` should contain:
+Clients in this repo follow the same pattern:
 
-```text
-<route>/
-  latents.pt
-  preprocessed_logs.json
-```
-
-`preprocessed_logs.json` is a list of poses with layout `[x, y, z, roll, yaw, pitch]` (angles are treated as degrees by default).
-
-#### 2) Run batch inference
-
-From the repository root:
-
-```bash
-python train/action_decoder/tools/predict_pose.py \
-  --ckpt <path/to/stage2_checkpoint>.pth \
-  --data_root <route_root_dir> \
-  --out_dir <output_root_dir> \
-  --infinitystar_root <path/to/Worldmodel/runtime> \
-  --infinitystar_vae_path <path/to/infinitystar_videovae.pth>
-```
-
-Outputs are written per-route under `--out_dir/<route>/` and include `pred_actions.json` and `pred_path.json` for downstream evaluation or integration.
-
-#### 3) Evaluate endpoints (optional)
-
-```bash
-python train/action_decoder/tools/eval_endpoints.py \
-  --gt_root <gt_route_root_dir> \
-  --pred_root <output_root_dir> \
-  --out_root <eval_out_dir>
-```
+- **`infer/client.py`** (simulation / dataset example): sends `1, step, step, ...` frames under a stable `session_id`, and writes per-segment `*_actions.json` / `*_poses.json`.
+- **`action_aware_grpo/windows_client.py`** (Windows-side rollout integration / debugging): uses the same session protocol and output format, but is packaged as a Win-friendly client for action-aware GRPO workflows.
 
 ## Training
 
@@ -151,10 +128,10 @@ The backbone finetuning workflow is located under [train/](./train).
 
 ```bash
 # Stage A: adapter distillation
-bash train/action_decoder/scripts/train_stage1_ddp.sh
+bash train/action_decoder/scripts/train_stageA_ddp.sh
 
 # Stage B: latent-to-action training
-bash train/action_decoder/scripts/train_stage2_ddp.sh
+bash train/action_decoder/scripts/train_stageB_ddp.sh
 ```
 
 #### Details
@@ -163,9 +140,9 @@ The action decoder workflow is located under [Worldmodel/action_decoder/src/](./
 
 The action decoder training entrypoints live under [train/action_decoder/](./train/action_decoder) and are organized into two steps:
 
-- Stage A adapter distillation: [train/action_decoder/scripts/train_stage1_ddp.sh](./train/action_decoder/scripts/train_stage1_ddp.sh)
-- Stage B latent-to-action training: [train/action_decoder/scripts/train_stage2_ddp.sh](./train/action_decoder/scripts/train_stage2_ddp.sh)
-- Main scripts: [train/action_decoder/tools/train_stage1_ddp.py](./train/action_decoder/tools/train_stage1_ddp.py), [train/action_decoder/tools/train_stage2_ddp.py](./train/action_decoder/tools/train_stage2_ddp.py)
+- Stage A adapter distillation: [train/action_decoder/scripts/train_stageA_ddp.sh](./train/action_decoder/scripts/train_stageA_ddp.sh)
+- Stage B latent-to-action training: [train/action_decoder/scripts/train_stageB_ddp.sh](./train/action_decoder/scripts/train_stageB_ddp.sh)
+- Main scripts: [train/action_decoder/tools/train_stageA_ddp.py](./train/action_decoder/tools/train_stageA_ddp.py), [train/action_decoder/tools/train_stageB_ddp.py](./train/action_decoder/tools/train_stageB_ddp.py)
 
 This workflow trains the mapping from visual latent features to 6-DoF motion outputs.
 
@@ -192,7 +169,7 @@ Stage A required environment variables:
 Run Stage A:
 
 ```bash
-bash train/action_decoder/scripts/train_stage1_ddp.sh
+bash train/action_decoder/scripts/train_stageA_ddp.sh
 ```
 
 Stage B required environment variables:
@@ -205,7 +182,7 @@ Stage B required environment variables:
 Run Stage B:
 
 ```bash
-bash train/action_decoder/scripts/train_stage2_ddp.sh
+bash train/action_decoder/scripts/train_stageB_ddp.sh
 ```
 
 ### Stage 2: Action-aware GRPO

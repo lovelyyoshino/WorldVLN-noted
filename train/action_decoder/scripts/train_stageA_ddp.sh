@@ -89,7 +89,7 @@ exec > >(tee -a "${STDOUT_STDERR_LOG}") 2>&1
 echo "[log] stdout/stderr -> ${STDOUT_STDERR_LOG}"
 
 ${TORCHRUN_BIN} --nproc_per_node="${NPROC_PER_NODE}" --master_addr="${MASTER_ADDR}" --master_port="${MASTER_PORT}" \
-  "${REPO_ROOT}/tools/train_stage1_ddp.py" \
+  "${REPO_ROOT}/tools/train_stageA_ddp.py" \
   --out_dir "${OUT_DIR}" \
   --tqdm --log_file "train.log" --log_dir "${LOG_DIR}" \
   --manifest_json "${MANIFEST_JSON}" \

@@ -102,7 +102,7 @@ if [[ -n "${LABEL_STATS_JSON}" ]]; then
 fi
 
 torchrun --nproc_per_node="${NPROC_PER_NODE}" --master_addr="${MASTER_ADDR}" --master_port="${MASTER_PORT}" \
-  "${PROJ_ROOT}/tools/train_stage2_ddp.py" \
+  "${PROJ_ROOT}/tools/train_stageB_ddp.py" \
   --manifest_json "${MANIFEST_JSON}" \
   --items_key "${ITEMS_KEY}" \
   --tsformer_pretrained "${TSFORMER_PRETRAINED}" \
