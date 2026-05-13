@@ -259,6 +259,7 @@ bash action_aware_grpo/scripts/run_stageb_partialfreeze.sh PARTIAL_FREEZE_MODE=s
 The action-aware GRPO workflow is located under [action_aware_grpo/](./action_aware_grpo) and is organized into two steps: **rollout** and **train**.
 
 - Server entry point: [action_aware_grpo/grpo_server.py](./action_aware_grpo/grpo_server.py)
+- Windows-side client (for action-aware GRPO rollout integration / debugging): [action_aware_grpo/windows_client.py](./action_aware_grpo/windows_client.py)
 - Rollout collection: [action_aware_grpo/scripts/run_stagea_collect.sh](./action_aware_grpo/scripts/run_stagea_collect.sh)
 - Train (partial-freeze optimization): [action_aware_grpo/scripts/run_stageb_partialfreeze.sh](./action_aware_grpo/scripts/run_stageb_partialfreeze.sh)
 - Remote simulator service wrapper: [action_aware_grpo/scripts/run_remote_sim_service.sh](./action_aware_grpo/scripts/run_remote_sim_service.sh)
