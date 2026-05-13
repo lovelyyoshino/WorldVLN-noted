@@ -1,7 +1,7 @@
 # WorldVLN: Autoregressive World Action Model for Aerial Vision-Language Navigation
 
 
-This is the official code repository for WorldVLN. The repository includes the main code paths used for backbone training, action decoding, inference serving, and action-aware GRPO workflows.
+This repository provides the reference implementation for WorldVLN. It includes an autoregressive inference for closed-loop action prediction, as well as two-stage training pipelines: (1) supervised backbone and action decoder training, and (2) action-aware GRPO–based optimization.
 
 ## Installation
 
@@ -32,9 +32,9 @@ pip install -r requirements.txt
 
 ### Model Weights
 
-Official WorldVLN backbone weights are available on Hugging Face:
+Official WorldVLN weights are available on Hugging Face:
 
-- [WorldVLN backbone weights](https://huggingface.co/anonymous-WorldVLN/WorldVLN/tree/main/WorldVLN_backbone)
+- [WorldVLN weights](https://huggingface.co/anonymous-WorldVLN/WorldVLN/tree/main/WorldVLN_backbone)
 
 Download the weights to your preferred checkpoint directory and configure the relevant training or inference scripts to point to them.
 
