@@ -254,6 +254,26 @@ At a high level:
 
 For simulator-backed rollout details, see [action_aware_grpo/docs/remote_sim.md](./action_aware_grpo/docs/remote_sim.md).
 
+## Acknowledgement
+
+We sincerely thank the following work for their exceptional effort: InfinityStar, TSformer-vo.
+
+## Citation
+
+If you find this work useful, please cite the WorldVLN paper.
+
+```bibtex
+@misc{zhao2026worldvln,
+      title={WorldVLN: Autoregressive World Action Model for Aerial Vision-Language Navigation}, 
+      author={Baining Zhao and Jiacheng Xu and Weicheng Feng and Xin Zhang and Zhaolu Wang and Haoyang Wang and Shilong Ji and Ziyou Wang and Jianjie Fang and Zhiheng Zheng and Weichen Zhang and Yu Shang and Wei Wu and Chen Gao and Xinlei Chen and Yong Li},
+      year={2026},
+      eprint={2605.15964},
+      archivePrefix={arXiv},
+      primaryClass={cs.RO},
+      url={https://arxiv.org/abs/2605.15964}, 
+}
+```
+
 ## License
 
 This project is released under the MIT License. See `LICENSE`.
