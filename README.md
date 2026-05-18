@@ -3,6 +3,10 @@
 
 This repository provides the reference implementation for WorldVLN. It includes an autoregressive inference for closed-loop action prediction, as well as two-stage training pipelines: (1) supervised backbone and action decoder training, and (2) action-aware GRPO–based optimization.
 
+[![arXiv](https://img.shields.io/badge/arXiv-2605.15964-b31b1b.svg)](https://arxiv.org/abs/2605.15964)
+[![Website](https://img.shields.io/badge/Project-Website-blue.svg)](https://embodiedcity.github.io/WorldVLN/)
+[![Hugging Face](https://img.shields.io/badge/Hugging%20Face-Model%20weights-yellow.svg)](https://huggingface.co/EmbodiedCity/WorldVLN)
+
 ## Installation
 
 We recommend using a single Python 3.10 environment for the released workflows. In our validated launch scripts, the Python interpreter is passed explicitly through `PYTHON_BIN`, so after activating your environment it is recommended to export:
@@ -256,11 +260,11 @@ For simulator-backed rollout details, see [action_aware_grpo/docs/remote_sim.md]
 
 ## Acknowledgement
 
-We sincerely thank the following work for their exceptional effort: InfinityStar, TSformer-vo.
+We sincerely thank the following projects for their exceptional effort: [InfinityStar](https://github.com/FoundationVision/InfinityStar), [TSformer-VO](https://github.com/aofrancani/TSformer-VO).
 
 ## Citation
 
-If you find this work useful, please cite the WorldVLN paper.
+If you find this work useful, welcome to cite the WorldVLN paper:
 
 ```bibtex
 @misc{zhao2026worldvln,
@@ -276,4 +280,4 @@ If you find this work useful, please cite the WorldVLN paper.
 
 ## License
 
-This project is released under the MIT License. See `LICENSE`.
+This project is released under the **CC BY 4.0** license. See `LICENSE`.
