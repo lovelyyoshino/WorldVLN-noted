@@ -1,11 +1,11 @@
 # WorldVLN: Autoregressive World Action Model for Aerial Vision-Language Navigation
 
-
-This repository provides the reference implementation for WorldVLN. It includes an autoregressive inference for closed-loop action prediction, as well as two-stage training pipelines: (1) supervised backbone and action decoder training, and (2) action-aware GRPO–based optimization.
-
 [![arXiv](https://img.shields.io/badge/arXiv-2605.15964-b31b1b.svg)](https://arxiv.org/abs/2605.15964)
 [![Website](https://img.shields.io/badge/Project-Website-blue.svg)](https://embodiedcity.github.io/WorldVLN/)
 [![Hugging Face](https://img.shields.io/badge/Hugging%20Face-Model%20weights-yellow.svg)](https://huggingface.co/EmbodiedCity/WorldVLN)
+
+This repository provides the reference implementation for WorldVLN. It includes an autoregressive inference for closed-loop action prediction, as well as two-stage training pipelines: (1) supervised backbone and action decoder training, and (2) action-aware GRPO–based optimization.
+
 
 ## Installation
 
