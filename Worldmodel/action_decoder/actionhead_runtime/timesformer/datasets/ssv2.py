@@ -20,45 +20,42 @@ logger = logging.get_logger(__name__)
 @DATASET_REGISTRY.register()
 class Ssv2(torch.utils.data.Dataset):
     """
-    Something-Something v2 (SSV2) video loader. Construct the SSV2 video loader,
-    then sample clips from the videos. For training and validation, a single
-    clip is randomly sampled from every video with random cropping, scaling, and
-    flipping. For testing, multiple clips are uniformaly sampled from every
-    video with uniform cropping. For uniform cropping, we take the left, center,
-    and right crop if the width is larger than height, or take top, center, and
-    bottom crop if the height is larger than the width.
+        Something-Something v2 (SSV2) 视频加载器。
+        它先构建视频帧列表，再从视频中采样 clip。训练和验证时，每个视频随机采样
+        一个 clip，并配合随机裁剪、缩放和翻转。测试时，每个视频均匀采样多个
+        clip，并做固定裁剪：宽大于高时取左、中、右，反之取上、中、下。
+
     """
 
     def __init__(self, cfg, mode, num_retries=10):
         """
-        Load Something-Something V2 data (frame paths, labels, etc. ) to a given
-        Dataset object. The dataset could be downloaded from Something-Something
-        official website (https://20bn.com/datasets/something-something).
-        Please see datasets/DATASET.md for more information about the data format.
-        Args:
-            cfg (CfgNode): configs.
-            mode (string): Options includes `train`, `val`, or `test` mode.
-                For the train and val mode, the data loader will take data
-                from the train or val set, and sample one clip per video.
-                For the test mode, the data loader will take data from test set,
-                and sample multiple clips per video.
-            num_retries (int): number of retries for reading frames from disk.
+                加载 Something-Something V2 的帧路径、标签等信息到 Dataset 对象。
+                数据集可从 Something-Something 官网下载：
+                引用/来源：https://20bn.com/datasets/something-something。
+                数据格式说明见 datasets/DATASET.md。
+
+                参数：
+                    cfg (CfgNode): 配置对象。
+                    mode (string): 取值包括 `train`、`val` 或 `test`。
+                        train/val 模式从对应集合读取数据，每个视频采样一个 clip；
+                        test 模式从测试集合读取数据，每个视频采样多个 clip。
+                    num_retries (int): 从磁盘读取帧失败后的重试次数。
+
         """
-        # Only support train, val, and test mode.
+        # 仅支持 train、val 和 test 三种模式。
         assert mode in [
             "train",
             "val",
             "test",
-        ], "Split '{}' not supported for Something-Something V2".format(mode)
+        ], "Something-Something V2 不支持 split='{}'".format(mode)
         self.mode = mode
         self.cfg = cfg
 
         self._video_meta = {}
         self._num_retries = num_retries
-        # For training or validation mode, one single clip is sampled from every
-        # video. For testing, NUM_ENSEMBLE_VIEWS clips are sampled from every
-        # video. For every clip, NUM_SPATIAL_CROPS is cropped spatially from
-        # the frames.
+        # 训练或验证时，每个视频只采样一个 clip。
+        # 测试时，每个视频采样 NUM_ENSEMBLE_VIEWS 个 clip；
+        # 每个 clip 再按 NUM_SPATIAL_CROPS 做空间裁剪。
         if self.mode in ["train", "val"]:
             self._num_clips = 1
         elif self.mode in ["test"]:
@@ -66,14 +63,14 @@ class Ssv2(torch.utils.data.Dataset):
                 cfg.TEST.NUM_ENSEMBLE_VIEWS * cfg.TEST.NUM_SPATIAL_CROPS
             )
 
-        logger.info("Constructing Something-Something V2 {}...".format(mode))
+        logger.info("正在构建 Something-Something V2 {} 数据集...".format(mode))
         self._construct_loader()
 
     def _construct_loader(self):
         """
-        Construct the video loader.
+        构建视频加载列表。
         """
-        # Loading label names.
+        # 加载标签名称。
         with PathManager.open(
             os.path.join(
                 self.cfg.DATA.PATH_TO_DATA_DIR,
@@ -83,7 +80,7 @@ class Ssv2(torch.utils.data.Dataset):
         ) as f:
             label_dict = json.load(f)
 
-        # Loading labels.
+        # 加载标签。
         label_file = os.path.join(
             self.cfg.DATA.PATH_TO_DATA_DIR,
             "something-something-v2-{}.json".format(
@@ -108,7 +105,7 @@ class Ssv2(torch.utils.data.Dataset):
             self.cfg.DATA.PATH_TO_DATA_DIR,
             "{}.csv".format("train" if self.mode == "train" else "val"),
         )
-        assert PathManager.exists(path_to_file), "{} dir not found".format(
+        assert PathManager.exists(path_to_file), "未找到 {} 目录".format(
             path_to_file
         )
 
@@ -122,7 +119,7 @@ class Ssv2(torch.utils.data.Dataset):
         )
 
 
-        # From dict to list.
+        # 从 dict 转成按样本顺序排列的 list。
         new_paths, new_labels = [], []
         for index in range(len(self._video_names)):
             if self._video_names[index] in self._path_to_videos:
@@ -132,7 +129,7 @@ class Ssv2(torch.utils.data.Dataset):
         self._labels = new_labels
         self._path_to_videos = new_paths
 
-        # Extend self when self._num_clips > 1 (during testing).
+        # 测试阶段 self._num_clips > 1 时，按 clip 数扩展样本列表。
         self._path_to_videos = list(
             chain.from_iterable(
                 [[x] * self._num_clips for x in self._path_to_videos]
@@ -150,31 +147,32 @@ class Ssv2(torch.utils.data.Dataset):
             )
         )
         logger.info(
-            "Something-Something V2 dataloader constructed "
-            " (size: {}) from {}".format(
-                len(self._path_to_videos), path_to_file
+            "已从 {} 构建 Something-Something V2 数据加载列表，样本数为 {}".format(
+                path_to_file, len(self._path_to_videos)
             )
         )
 
     def __getitem__(self, index):
         """
-        Given the video index, return the list of frames, label, and video
-        index if the video frames can be fetched.
-        Args:
-            index (int): the video index provided by the pytorch sampler.
-        Returns:
-            frames (tensor): the frames of sampled from the video. The dimension
-                is `channel` x `num frames` x `height` x `width`.
-            label (int): the label of the current video.
-            index (int): the index of the video.
+                按视频索引读取采样帧、标签和视频索引。
+
+                参数：
+                    index (int): PyTorch 采样器提供的视频索引。
+
+                返回：
+                    frames (tensor): 从视频采样到的帧，维度为
+                        说明：`channel` x `num frames` x `height` x `width`。
+                    label (int): 当前视频的标签。
+                    index (int): 当前视频索引。
+
         """
         short_cycle_idx = None
-        # When short cycle is used, input index is a tupple.
+        # 使用 short cycle 时，输入 index 是一个 tuple。
         if isinstance(index, tuple):
             index, short_cycle_idx = index
 
-        if self.mode in ["train", "val"]: #or self.cfg.MODEL.ARCH in ['resformer', 'vit']:
-            # -1 indicates random sampling.
+        if self.mode in ["train", "val"]: # 中文说明：or self.cfg.MODEL.ARCH in ['resformer', 'vit']:
+            # -1 表示随机采样。
             spatial_sample_index = -1
             min_scale = self.cfg.DATA.TRAIN_JITTER_SCALES[0]
             max_scale = self.cfg.DATA.TRAIN_JITTER_SCALES[1]
@@ -185,10 +183,9 @@ class Ssv2(torch.utils.data.Dataset):
                         self.cfg.MULTIGRID.SHORT_CYCLE_FACTORS[short_cycle_idx]
                         * self.cfg.MULTIGRID.DEFAULT_S
                     )
-                )
+            )
             if self.cfg.MULTIGRID.DEFAULT_S > 0:
-                # Decreasing the scale is equivalent to using a larger "span"
-                # in a sampling grid.
+                # 减小 scale 等价于在采样网格中使用更大的 span。
                 min_scale = int(
                     round(
                         float(min_scale)
@@ -197,9 +194,9 @@ class Ssv2(torch.utils.data.Dataset):
                     )
                 )
         elif self.mode in ["test"]:
-            # spatial_sample_index is in [0, 1, 2]. Corresponding to left,
-            # center, or right if width is larger than height, and top, middle,
-            # or bottom if height is larger than width.
+            # `spatial_sample_index` 取 [0, 1, 2]。
+            # 宽大于高时分别表示左、中、右；
+            # 高大于宽时分别表示上、中、下。
             spatial_sample_index = (
                 self._spatial_temporal_idx[index]
                 % self.cfg.TEST.NUM_SPATIAL_CROPS
@@ -208,13 +205,11 @@ class Ssv2(torch.utils.data.Dataset):
                 spatial_sample_index = 1
 
             min_scale, max_scale, crop_size = [self.cfg.DATA.TEST_CROP_SIZE] * 3
-            # The testing is deterministic and no jitter should be performed.
-            # min_scale, max_scale, and crop_size are expect to be the same.
+            # 测试阶段是确定性的，不应做随机抖动。
+            # min_scale、max_scale 和 crop_size 应保持相同。
             assert len({min_scale, max_scale, crop_size}) == 1
         else:
-            raise NotImplementedError(
-                "Does not support {} mode".format(self.mode)
-            )
+            raise NotImplementedError("不支持 {} 模式".format(self.mode))
 
         label = self._labels[index]
 
@@ -239,12 +234,12 @@ class Ssv2(torch.utils.data.Dataset):
             )
         )
 
-        # Perform color normalization.
+        # 执行颜色归一化。
         frames = utils.tensor_normalize(
             frames, self.cfg.DATA.MEAN, self.cfg.DATA.STD
         )
 
-        # T H W C -> C T H W.
+        # 将张量维度从 `T H W C` 调整为 `C T H W`。
         frames = frames.permute(3, 0, 1, 2)
         frames = utils.spatial_sampling(
             frames,
@@ -255,11 +250,11 @@ class Ssv2(torch.utils.data.Dataset):
             random_horizontal_flip=self.cfg.DATA.RANDOM_FLIP,
             inverse_uniform_sampling=self.cfg.DATA.INV_UNIFORM_SAMPLE,
         )
-        #if not self.cfg.RESFORMER.ACTIVE:
+        # 保留的上游调试/兼容代码：if not self.cfg.RESFORMER.ACTIVE:
         if not self.cfg.MODEL.ARCH in ['vit']:
             frames = utils.pack_pathway_output(self.cfg, frames)
         else:
-            # Perform temporal sampling from the fast pathway.
+            # 从快速通路中执行时间采样。
             frames = torch.index_select(
                  frames,
                  1,
@@ -272,7 +267,8 @@ class Ssv2(torch.utils.data.Dataset):
 
     def __len__(self):
         """
-        Returns:
-            (int): the number of videos in the dataset.
+                返回：
+                    (int): 数据集中的视频数量。
+
         """
         return len(self._path_to_videos)

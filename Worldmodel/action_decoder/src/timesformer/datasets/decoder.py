@@ -9,17 +9,17 @@ import torchvision.io as io
 
 def temporal_sampling(frames, start_idx, end_idx, num_samples):
     """
-    Given the start and end frame index, sample num_samples frames between
-    the start and end with equal interval.
-    Args:
-        frames (tensor): a tensor of video frames, dimension is
-            `num video frames` x `channel` x `height` x `width`.
-        start_idx (int): the index of the start frame.
-        end_idx (int): the index of the end frame.
-        num_samples (int): number of frames to sample.
-    Returns:
-        frames (tersor): a tensor of temporal sampled video frames, dimension is
-            `num clip frames` x `channel` x `height` x `width`.
+        给定起止帧索引，在两者之间等间隔采样 `num_samples` 帧。
+        参数：
+            frames (tensor): 视频帧张量，维度为
+                说明：`num video frames` x `channel` x `height` x `width`。
+            start_idx (int): 起始帧索引。
+            end_idx (int): 结束帧索引。
+            num_samples (int): 要采样的帧数。
+        返回：
+            frames (tersor): 时序采样后的视频帧张量，维度为
+                说明：`num clip frames` x `channel` x `height` x `width`。
+
     """
     index = torch.linspace(start_idx, end_idx, num_samples)
     index = torch.clamp(index, 0, frames.shape[0] - 1).long()
@@ -29,30 +29,25 @@ def temporal_sampling(frames, start_idx, end_idx, num_samples):
 
 def get_start_end_idx(video_size, clip_size, clip_idx, num_clips):
     """
-    Sample a clip of size clip_size from a video of size video_size and
-    return the indices of the first and last frame of the clip. If clip_idx is
-    -1, the clip is randomly sampled, otherwise uniformly split the video to
-    num_clips clips, and select the start and end index of clip_idx-th video
-    clip.
-    Args:
-        video_size (int): number of overall frames.
-        clip_size (int): size of the clip to sample from the frames.
-        clip_idx (int): if clip_idx is -1, perform random jitter sampling. If
-            clip_idx is larger than -1, uniformly split the video to num_clips
-            clips, and select the start and end index of the clip_idx-th video
-            clip.
-        num_clips (int): overall number of clips to uniformly sample from the
-            given video for testing.
-    Returns:
-        start_idx (int): the start frame index.
-        end_idx (int): the end frame index.
+    从长度为 `video_size` 的视频中截取长度为 `clip_size` 的片段，并返回
+    片段首尾帧索引。若 `clip_idx` 为 -1，则随机采样；否则把视频均匀切成
+    `num_clips` 份，并选择第 `clip_idx` 个片段的起止位置。
+    参数：
+        video_size (int): 视频总帧数。
+        clip_size (int): 要采样的片段长度。
+        clip_idx (int): 若为 -1，则执行随机抖动采样；若大于 -1，则把视频均匀
+            切成 `num_clips` 份，并选择第 `clip_idx` 个片段的起止索引。
+        num_clips (int): 测试时从给定视频中均匀采样的片段总数。
+    返回：
+        start_idx (int): 起始帧索引。
+        end_idx (int): 结束帧索引。
     """
     delta = max(video_size - clip_size, 0)
     if clip_idx == -1:
-        # Random temporal sampling.
+        # 随机时序采样。
         start_idx = random.uniform(0, delta)
     else:
-        # Uniformly sample the clip with the given index.
+        # 按给定索引均匀采样片段。
         start_idx = delta * clip_idx / num_clips
     end_idx = start_idx + clip_size - 1
     return start_idx, end_idx
@@ -62,22 +57,21 @@ def pyav_decode_stream(
     container, start_pts, end_pts, stream, stream_name, buffer_size=0
 ):
     """
-    Decode the video with PyAV decoder.
-    Args:
-        container (container): PyAV container.
-        start_pts (int): the starting Presentation TimeStamp to fetch the
-            video frames.
-        end_pts (int): the ending Presentation TimeStamp of the decoded frames.
-        stream (stream): PyAV stream.
-        stream_name (dict): a dictionary of streams. For example, {"video": 0}
-            means video stream at stream index 0.
-        buffer_size (int): number of additional frames to decode beyond end_pts.
-    Returns:
-        result (list): list of frames decoded.
-        max_pts (int): max Presentation TimeStamp of the video sequence.
+        使用 PyAV 解码视频。
+        参数：
+            container (container): PyAV 容器对象。
+            start_pts (int): 读取视频帧的起始 PTS 时间戳。
+            end_pts (int): 解码帧的结束 PTS 时间戳。
+            stream (stream): PyAV 视频流对象。
+            stream_name (dict): 流字典。例如 `{"video": 0}` 表示
+                索引为 0 的视频流。
+            buffer_size (int): 超过 `end_pts` 后额外继续解码的帧数。
+        返回：
+            result (list): 解码得到的帧列表。
+            max_pts (int): 该视频序列中的最大 PTS 时间戳。
+
     """
-    # Seeking in the stream is imprecise. Thus, seek to an ealier PTS by a
-    # margin pts.
+    # 流上的 seek 并不精确，因此向前预留一段 margin PTS 再开始 seek。
     margin = 1024
     seek_offset = max(start_pts - margin, 0)
 
@@ -112,42 +106,37 @@ def torchvision_decode(
     max_spatial_scale=0,
 ):
     """
-    If video_meta is not empty, perform temporal selective decoding to sample a
-    clip from the video with TorchVision decoder. If video_meta is empty, decode
-    the entire video and update the video_meta.
-    Args:
-        video_handle (bytes): raw bytes of the video file.
-        sampling_rate (int): frame sampling rate (interval between two sampled
-            frames).
-        num_frames (int): number of frames to sample.
-        clip_idx (int): if clip_idx is -1, perform random temporal
-            sampling. If clip_idx is larger than -1, uniformly split the
-            video to num_clips clips, and select the clip_idx-th video clip.
-        video_meta (dict): a dict contains VideoMetaData. Details can be found
-            at `pytorch/vision/torchvision/io/_video_opt.py`.
-        num_clips (int): overall number of clips to uniformly sample from the
-            given video.
-        target_fps (int): the input video may has different fps, convert it to
-            the target video fps.
-        modalities (tuple): tuple of modalities to decode. Currently only
-            support `visual`, planning to support `acoustic` soon.
-        max_spatial_scale (int): the maximal resolution of the spatial shorter
-            edge size during decoding.
-    Returns:
-        frames (tensor): decoded frames from the video.
-        fps (float): the number of frames per second of the video.
-        decode_all_video (bool): if True, the entire video was decoded.
+        若 `video_meta` 非空，则使用 TorchVision 执行时序选择性解码并采样片段；
+        若为空，则解码整段视频并回填 `video_meta`。
+        参数：
+            video_handle (bytes): 视频文件的原始字节流。
+            sampling_rate (int): 帧采样率（两帧采样之间的间隔）。
+            num_frames (int): 要采样的帧数。
+            clip_idx (int): 若为 -1，则执行随机时序采样；若大于 -1，则把视频均匀
+                切成 `num_clips` 段，并选择第 `clip_idx` 个片段。
+            video_meta (dict): 包含 VideoMetaData 的字典。详见
+                说明：`pytorch/vision/torchvision/io/_video_opt.py`。
+            num_clips (int): 从给定视频中均匀采样的片段总数。
+            target_fps (int): 输入视频 fps 可能不同，先转换到目标 fps。
+            modalities (tuple): 要解码的模态元组。目前仅支持 `visual`，
+                未来计划支持 `acoustic`。
+            max_spatial_scale (int): 解码时短边的最大分辨率。
+        返回：
+            frames (tensor): 视频解码帧。
+            fps (float): 视频帧率。
+            decode_all_video (bool): 若为 True，表示整段视频都已被解码。
+
     """
-    # Convert the bytes to a tensor.
+    # 把原始字节转换成 tensor。
     video_tensor = torch.from_numpy(np.frombuffer(video_handle, dtype=np.uint8))
 
     decode_all_video = True
     video_start_pts, video_end_pts = 0, -1
-    # The video_meta is empty, fetch the meta data from the raw video.
+    # video_meta 为空时，从原始视频中提取元数据。
     if len(video_meta) == 0:
-        # Tracking the meta info for selective decoding in the future.
+        # 保存元数据，供后续选择性解码复用。
         meta = io._probe_video_from_memory(video_tensor)
-        # Using the information from video_meta to perform selective decoding.
+        # 利用 video_meta 中的信息执行选择性解码。
         video_meta["video_timebase"] = meta.video_timebase
         video_meta["video_numerator"] = meta.video_timebase.numerator
         video_meta["video_denominator"] = meta.video_timebase.denominator
@@ -167,18 +156,18 @@ def torchvision_decode(
         and video_meta["video_denominator"] > 0
         and video_meta["video_duration"] > 0
     ):
-        # try selective decoding.
+        # 尝试选择性解码。
         decode_all_video = False
         clip_size = sampling_rate * num_frames / target_fps * fps
         start_idx, end_idx = get_start_end_idx(
             fps * video_meta["video_duration"], clip_size, clip_idx, num_clips
         )
-        # Convert frame index to pts.
+        # 把帧索引转换成 pts。
         pts_per_frame = video_meta["video_denominator"] / fps
         video_start_pts = int(start_idx * pts_per_frame)
         video_end_pts = int(end_idx * pts_per_frame)
 
-    # Decode the raw video with the tv decoder.
+    # 使用 TorchVision 解码原始视频。
     v_frames, _ = io._read_video_from_memory(
         video_tensor,
         seek_frame_margin=1.0,
@@ -192,7 +181,7 @@ def torchvision_decode(
     )
 
     if v_frames.shape == torch.Size([0]):
-        # failed selective decoding
+        # 选择性解码失败。
         decode_all_video = True
         video_start_pts, video_end_pts = 0, -1
         v_frames, _ = io._read_video_from_memory(
@@ -214,33 +203,25 @@ def pyav_decode(
     container, sampling_rate, num_frames, clip_idx, num_clips=10, target_fps=30, start=None, end=None
 , duration=None, frames_length=None):
     """
-    Convert the video from its original fps to the target_fps. If the video
-    support selective decoding (contain decoding information in the video head),
-    the perform temporal selective decoding and sample a clip from the video
-    with the PyAV decoder. If the video does not support selective decoding,
-    decode the entire video.
+        将视频从原始 fps 映射到 `target_fps`。若视频支持选择性解码
+        （即视频头中包含解码信息），则使用 PyAV 执行时序选择性解码并采样
+        片段；否则解码整段视频。
 
-    Args:
-        container (container): pyav container.
-        sampling_rate (int): frame sampling rate (interval between two sampled
-            frames.
-        num_frames (int): number of frames to sample.
-        clip_idx (int): if clip_idx is -1, perform random temporal sampling. If
-            clip_idx is larger than -1, uniformly split the video to num_clips
-            clips, and select the clip_idx-th video clip.
-        num_clips (int): overall number of clips to uniformly sample from the
-            given video.
-        target_fps (int): the input video may has different fps, convert it to
-            the target video fps before frame sampling.
-    Returns:
-        frames (tensor): decoded frames from the video. Return None if the no
-            video stream was found.
-        fps (float): the number of frames per second of the video.
-        decode_all_video (bool): If True, the entire video was decoded.
+        参数：
+            container (container): PyAV 容器对象。
+            sampling_rate (int): 帧采样率（两次采样之间的间隔）。
+            num_frames (int): 要采样的帧数。
+            clip_idx (int): 若为 -1，则执行随机时序采样；若大于 -1，则把视频均匀
+                切成 `num_clips` 段，并选择第 `clip_idx` 个片段。
+            num_clips (int): 从给定视频中均匀采样的片段总数。
+            target_fps (int): 输入视频 fps 可能不同，先转换到目标 fps 后再采样。
+        返回：
+            frames (tensor): 视频解码帧；若未找到视频流则返回 None。
+            fps (float): 视频帧率。
+            decode_all_video (bool): 若为 True，表示整段视频都已被解码。
+
     """
-    # Try to fetch the decoding information from the video head. Some of the
-    # videos does not support fetching the decoding information, for that case
-    # it will get None duration.
+    # 尝试从视频头获取解码信息。部分视频不支持，此时 duration 会为 None。
     fps = float(container.streams.video[0].average_rate)
 
     orig_duration = duration
@@ -251,11 +232,11 @@ def pyav_decode(
        duration = orig_duration / tb
 
     if duration is None:
-        # If failed to fetch the decoding information, decode the entire video.
+        # 若无法取得解码信息，则退回到整段解码。
         decode_all_video = True
         video_start_pts, video_end_pts = 0, math.inf
     else:
-        # Perform selective decoding.
+        # 执行选择性解码。
         decode_all_video = False
         start_idx, end_idx = get_start_end_idx(
             frames_length,
@@ -271,7 +252,7 @@ def pyav_decode(
         decode_all_video = False
 
     frames = None
-    # If video stream was found, fetch video frames from the video.
+    # 若存在视频流，则从中取出视频帧。
     if container.streams.video:
         if start is None and end is None:
             video_frames, max_pts = pyav_decode_stream(
@@ -316,32 +297,27 @@ def decode(
     frames_length=None,
 ):
     """
-    Decode the video and perform temporal sampling.
-    Args:
-        container (container): pyav container.
-        sampling_rate (int): frame sampling rate (interval between two sampled
-            frames).
-        num_frames (int): number of frames to sample.
-        clip_idx (int): if clip_idx is -1, perform random temporal
-            sampling. If clip_idx is larger than -1, uniformly split the
-            video to num_clips clips, and select the
-            clip_idx-th video clip.
-        num_clips (int): overall number of clips to uniformly
-            sample from the given video.
-        video_meta (dict): a dict contains VideoMetaData. Details can be find
-            at `pytorch/vision/torchvision/io/_video_opt.py`.
-        target_fps (int): the input video may have different fps, convert it to
-            the target video fps before frame sampling.
-        backend (str): decoding backend includes `pyav` and `torchvision`. The
-            default one is `pyav`.
-        max_spatial_scale (int): keep the aspect ratio and resize the frame so
-            that shorter edge size is max_spatial_scale. Only used in
-            `torchvision` backend.
-    Returns:
-        frames (tensor): decoded frames from the video.
+        解码视频并执行时序采样。
+        参数：
+            container (container): PyAV 容器对象。
+            sampling_rate (int): 帧采样率（两次采样之间的间隔）。
+            num_frames (int): 要采样的帧数。
+            clip_idx (int): 若为 -1，则执行随机时序采样；若大于 -1，则把视频均匀
+                切成 `num_clips` 段，并选择第 `clip_idx` 个片段。
+            num_clips (int): 从给定视频中均匀采样的片段总数。
+            video_meta (dict): 包含 VideoMetaData 的字典。详见
+                说明：`pytorch/vision/torchvision/io/_video_opt.py`。
+            target_fps (int): 输入视频 fps 可能不同，先转换到目标 fps 后再采样。
+            backend (str): 解码后端，支持 `pyav` 与 `torchvision`，
+                默认使用 `pyav`。
+            max_spatial_scale (int): 保持宽高比，并把短边缩放到
+                `max_spatial_scale`。仅 `torchvision` 后端使用。
+        返回：
+            frames (tensor): 解码得到的视频帧。
+
     """
-    # Currently support two decoders: 1) PyAV, and 2) TorchVision.
-    assert clip_idx >= -1, "Not valied clip_idx {}".format(clip_idx)
+    # 当前支持两种解码器：1) PyAV；2) TorchVision。
+    assert clip_idx >= -1, "无效的 clip_idx {}".format(clip_idx)
     try:
         if backend == "pyav":
             frames, fps, decode_all_video = pyav_decode(
@@ -370,13 +346,13 @@ def decode(
             )
         else:
             raise NotImplementedError(
-                "Unknown decoding backend {}".format(backend)
+                "未知的视频解码后端 {}".format(backend)
             )
     except Exception as e:
-        print("Failed to decode by {} with exception: {}".format(backend, e))
+        print("使用 {} 解码失败，异常信息：{}".format(backend, e))
         return None
 
-    # Return None if the frames was not decoded successfully.
+    # 若帧未成功解码，则返回 None。
     if frames is None or frames.size(0) == 0:
         return None
 
@@ -387,6 +363,6 @@ def decode(
         clip_idx if decode_all_video else 0,
         num_clips if decode_all_video else 1,
     )
-    # Perform temporal sampling from the decoded video.
+    # 对解码后的视频执行时序采样。
     frames = temporal_sampling(frames, start_idx, end_idx, num_frames)
     return frames

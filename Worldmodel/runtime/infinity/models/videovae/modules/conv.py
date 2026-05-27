@@ -12,13 +12,15 @@ from infinity.models.videovae.utils.context_parallel import dist_conv_cache_send
 
 
 class DCDownBlock3d(nn.Module):
-    def __init__(self, 
-        in_channels: int, 
-        out_channels: int, 
-        shortcut: bool = True, 
+    """3D 下采样残差块。"""
+    def __init__(self,
+        in_channels: int,
+        out_channels: int,
+        shortcut: bool = True,
         group_norm=False,
         compress_time=False,
     ) -> None:
+        """构造 3D 下采样残差块。"""
         super().__init__()
         self.shortcut = shortcut
         self.compress_time = compress_time
@@ -34,29 +36,34 @@ class DCDownBlock3d(nn.Module):
         assert out_channels % out_ratio == 0
         out_channels = out_channels // out_ratio
 
-        # self.conv = nn.Conv3d(
-        #     in_channels,
-        #     out_channels,
-        #     kernel_size=3,
-        #     stride=(1, 1, 1),
-        #     padding=0,
+        # 代码/形状说明：self.conv = nn.Conv3d(
+        # 中文说明：in_channels,
+        # 中文说明：out_channels,
+        # 中文说明：kernel_size=3,
+        # 中文说明：stride=(1, 1, 1),
+        # 中文说明：padding=0,
         # )
         self.conv = CogVideoXCausalConv3d(in_channels, out_channels, kernel_size=3, pad_mode="first")
 
     def forward(self, hidden_states: torch.Tensor, conv_cache: Optional[Dict[str, torch.Tensor]] = None, temporal_compress = True) -> torch.Tensor:
+        """执行 3D 下采样。
+
+        空间维会按 `2x2` patch 重排到通道维；若 `temporal_compress=True`，
+        时间维还会按 `pt` 分组后做平均。
+        """
         new_conv_cache = {}
         conv_cache = conv_cache or {}
 
         x = hidden_states
         x = self.nonlinearity(self.norm(x))
-        assert x.ndim == 5, f"x.ndim must be (B C T H W)"
+        assert x.ndim == 5, f"x.ndim 必须对应 (B C T H W)"
 
-        ### use nn.Conv3d
-        # x = F.pad(x, (1, 1, 1, 1, 2, 0))  # causal pad (left, right, top, bottom, front, back)
-        # x[:, :, :2, 1:-1, 1:-1] = x[:, :, 2:3, 1:-1, 1:-1].clone() # broadcast the first value
-        # x = self.conv(x)
+        ### 旧的 `nn.Conv3d` 路径保留在注释中，便于对照。
+        # 代码/形状说明：x = F.pad(x, (1, 1, 1, 1, 2, 0))  # 因果 padding（左、右、上、下、前、后）
+        # 代码/形状说明：x[:, :, :2, 1:-1, 1:-1] = x[:, :, 2:3, 1:-1, 1:-1].clone() # 把第一个有效值广播到前两帧
+        # 代码/形状说明：x = self.conv(x)
 
-        ### use CogVideoXCausalConv3d
+        ### 当前实现使用带缓存的因果 3D 卷积。
         x, new_conv_cache["conv"] = self.conv(x, conv_cache=conv_cache.get("conv"))
 
         if x.shape[2] > 1:
@@ -97,6 +104,7 @@ class DCDownBlock3d(nn.Module):
         return hidden_states, new_conv_cache
 
 class DCUpBlock3d(nn.Module):
+    """3D 上采样残差块。"""
     def __init__(
         self,
         in_channels: int,
@@ -106,6 +114,7 @@ class DCUpBlock3d(nn.Module):
         group_norm=False,
         compress_time=False
     ) -> None:
+        """构造 3D 上采样残差块。"""
         super().__init__()
 
         self.compress_time = compress_time
@@ -120,12 +129,13 @@ class DCUpBlock3d(nn.Module):
         self.spatial_factor = 2
         self.temporal_factor = int(compress_time) if compress_time else 1
         out_channels = out_channels * self.spatial_factor**2 * self.temporal_factor
-        # self.conv = nn.Conv3d(in_channels, out_channels, 3, (1, 1, 1), 0)
+        # 代码/形状说明：self.conv = nn.Conv3d(in_channels, out_channels, 3, (1, 1, 1), 0)
         self.conv = CogVideoXCausalConv3d(in_channels, out_channels, kernel_size=3, pad_mode="first")
         assert out_channels % in_channels == 0
         self.repeats = out_channels // in_channels
 
     def forward(self, hidden_states: torch.Tensor, conv_cache: Optional[Dict[str, torch.Tensor]] = None) -> torch.Tensor:
+        """执行 3D 上采样并恢复时空分辨率。"""
         new_conv_cache = {}
         conv_cache = conv_cache or {}
 
@@ -135,20 +145,20 @@ class DCUpBlock3d(nn.Module):
         compress_first = False
         if x.shape[2] % 2 == 1:
             compress_first = True
-        
-        ### use nn.Conv3d
-        # x = F.pad(x, (1, 1, 1, 1, 2, 0))  # causal pad (left, right, top, bottom, front, back)
-        # x[:, :, :2, 1:-1, 1:-1] = x[:, :, 2:3, 1:-1, 1:-1].clone() # broadcast the first value
-        # x = self.conv(x)
 
-        ### use CogVideoXCausalConv3d
+        ### 旧的 `nn.Conv3d` 路径保留在注释中，便于对照。
+        # 代码/形状说明：x = F.pad(x, (1, 1, 1, 1, 2, 0))  # 因果 padding（左、右、上、下、前、后）
+        # 代码/形状说明：x[:, :, :2, 1:-1, 1:-1] = x[:, :, 2:3, 1:-1, 1:-1].clone() # 把第一个有效值广播到前两帧
+        # 代码/形状说明：x = self.conv(x)
+
+        ### 当前实现使用带缓存的因果 3D 卷积。
         x, new_conv_cache["conv"] = self.conv(x, conv_cache=conv_cache.get("conv"))
 
         x = rearrange(x, "b (pt ph pw c) t h w -> b c (t pt) (h ph) (w pw)", pt=self.temporal_factor, ph=self.spatial_factor, pw=self.spatial_factor)
         y = repeat(hidden_states, "b c t h w -> b (r c) t h w", r=self.repeats)
         y = rearrange(y, "b (pt ph pw c) t h w -> b c (t pt) (h ph) (w pw)", pt=self.temporal_factor, ph=self.spatial_factor, pw=self.spatial_factor)
-        
-        # convert pt+pt*n -> 1+pt*n
+
+        # 若首帧被单独保留，则把时间展开后的前 `pt` 帧压回 1 帧。
         if self.temporal_factor > 1 and compress_first:
             if x.shape[2] > 1:
                 x_first, x_rest = x[:, :, :self.temporal_factor, ...], x[:, :, self.temporal_factor:, ...]
@@ -168,13 +178,15 @@ class DCUpBlock3d(nn.Module):
         return hidden_states, new_conv_cache
 
 class DCDownBlock2d(nn.Module):
-    def __init__(self, 
-        in_channels: int, 
-        out_channels: int, 
-        downsample: bool = False, 
-        shortcut: bool = True, 
+    """2D 下采样残差块。"""
+    def __init__(self,
+        in_channels: int,
+        out_channels: int,
+        downsample: bool = False,
+        shortcut: bool = True,
         group_norm=False,
     ) -> None:
+        """构造 2D 下采样残差块。"""
         super().__init__()
         if group_norm:
             self.norm = nn.GroupNorm(num_channels=in_channels, num_groups=32, eps=1e-6, affine=True)
@@ -202,6 +214,11 @@ class DCDownBlock2d(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """执行 2D 下采样。
+
+        当 `downsample=True` 时，主分支和捷径分支都会通过 `pixel_unshuffle`
+        把 `2x2` 空间块重排到通道维。
+        """
         x = self.nonlinearity(self.norm(hidden_states))
         x = self.conv(x)
         if self.downsample:
@@ -218,6 +235,7 @@ class DCDownBlock2d(nn.Module):
         return hidden_states
 
 class DCUpBlock2d(nn.Module):
+    """2D 上采样残差块。"""
     def __init__(
         self,
         in_channels: int,
@@ -227,6 +245,7 @@ class DCUpBlock2d(nn.Module):
         interpolation_mode: str = "nearest",
         group_norm=False,
     ) -> None:
+        """构造 2D 上采样残差块。"""
         super().__init__()
 
         if group_norm:
@@ -249,6 +268,10 @@ class DCUpBlock2d(nn.Module):
         self.conv = nn.Conv2d(in_channels, out_channels, 3, 1, 1)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """执行 2D 上采样。
+
+        若 `interpolate=False`，会先卷积再 `pixel_shuffle`；否则先插值再卷积。
+        """
         x = self.nonlinearity(self.norm(hidden_states))
         if self.interpolate:
             x = F.interpolate(x, scale_factor=self.factor, mode=self.interpolation_mode)
@@ -267,16 +290,18 @@ class DCUpBlock2d(nn.Module):
         return hidden_states
 
 class CogVideoXSafeConv3d(nn.Conv3d):
-    r"""
-    A 3D convolution layer that splits the input tensor into smaller parts to avoid OOM in CogVideoX Model.
+    r"""安全版 3D 卷积。
+
+    当输入张量过大时，沿时间维切块卷积再拼接，以降低峰值显存。
     """
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        """在必要时分块执行卷积，避免 OOM。"""
         memory_count = (
             (input.shape[1] * input.shape[2] * input.shape[3] * input.shape[4]) * 2 / 1024**3
         )
 
-        # Set to 2GB, suitable for CuDNN
+        # 以约 2GB 激活量为阈值切块，兼顾 CuDNN 效率与稳定性。
         if memory_count > 2:
             kernel_size = self.kernel_size[0]
             part_num = int(memory_count / 2) + 1
@@ -298,15 +323,9 @@ class CogVideoXSafeConv3d(nn.Conv3d):
 
 
 class CogVideoXCausalConv3d(nn.Module):
-    r"""A 3D causal convolution layer that pads the input tensor to ensure causality in CogVideoX Model.
+    r"""因果 3D 卷积。
 
-    Args:
-        in_channels (`int`): Number of channels in the input tensor.
-        out_channels (`int`): Number of output channels produced by the convolution.
-        kernel_size (`int` or `Tuple[int, int, int]`): Kernel size of the convolutional kernel.
-        stride (`int`, defaults to `1`): Stride of the convolution.
-        dilation (`int`, defaults to `1`): Dilation rate of the convolution.
-        pad_mode (`str`, defaults to `"constant"`): Padding mode.
+    时间维只向左补齐，因此当前时刻的输出只依赖历史帧和当前帧，不依赖未来帧。
     """
 
     def __init__(
@@ -318,6 +337,7 @@ class CogVideoXCausalConv3d(nn.Module):
         dilation: int = 1,
         pad_mode: str = "constant",
     ):
+        """预计算时空 padding，并构造底层安全卷积。"""
         super().__init__()
 
         if isinstance(kernel_size, int):
@@ -351,6 +371,7 @@ class CogVideoXCausalConv3d(nn.Module):
     def fake_context_parallel_forward(
         self, inputs: torch.Tensor, conv_cache: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
+        """拼接缓存的历史帧，补足因果卷积所需的上下文。"""
         kernel_size = self.time_kernel_size
 
         if cp.cp_on():
@@ -362,6 +383,7 @@ class CogVideoXCausalConv3d(nn.Module):
         return inputs
 
     def forward(self, inputs: torch.Tensor, conv_cache: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """执行带缓存的因果卷积。"""
         inputs = self.fake_context_parallel_forward(inputs, conv_cache)
 
         if cp.cp_on():
@@ -377,11 +399,13 @@ class CogVideoXCausalConv3d(nn.Module):
         return output, conv_cache
 
 class FluxConv(nn.Module):
+    """兼容 2D/3D 的分片卷积包装器。"""
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, cnn_type="2d", cnn_slice_seq_len=17, causal_offset=0, temporal_down=False):
+        """构造兼容 2D/3D 的分片卷积包装器。"""
         super().__init__()
         self.cnn_type = cnn_type
         self.slice_seq_len = cnn_slice_seq_len
-        
+
         if cnn_type == "2d":
             self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride=stride, padding=padding)
         if cnn_type == "3d":
@@ -393,15 +417,16 @@ class FluxConv(nn.Module):
             if isinstance(kernel_size, int):
                 kernel_size = (kernel_size, kernel_size, kernel_size)
             self.padding = (
-                kernel_size[0] - 1 + causal_offset,  # Temporal causal padding
-                padding,  # Height padding
-                padding  # Width padding
+                kernel_size[0] - 1 + causal_offset,  # 时间维因果 padding
+                padding,  # 高度方向 padding
+                padding  # 宽度方向 padding
             )
         self.causal_offset = causal_offset
         self.stride = stride
         self.kernel_size = kernel_size
-        
+
     def forward(self, x):
+        """根据 `cnn_type` 选择 2D 或 3D 卷积路径。"""
         if self.cnn_type == "2d":
             if type(x) == list:
                 for i in range(len(x)):
@@ -417,24 +442,24 @@ class FluxConv(nn.Module):
                 return self.conv(x)
         if self.cnn_type == "3d":
             if x.ndim == 5:
-                assert self.stride[0] == 1 or self.stride[0] == 2, f"only temporal stride = 1 or 2 are supported"
+                assert self.stride[0] == 1 or self.stride[0] == 2, f"仅支持 temporal stride = 1 或 2"
                 if self.stride[0] == 1:
                     for i in reversed(range(0, x.shape[2], self.slice_seq_len+self.stride[0]-1)):
                         st = i
                         en = min(i+self.slice_seq_len, x.shape[2])
                         _x = x[:,:,st:en,:,:]
                         if i == 0:
-                            _x = F.pad(_x, (self.padding[2], self.padding[2],  # Width
-                                    self.padding[1], self.padding[1],   # Height
-                                    self.padding[0], 0))                # Temporal
+                            _x = F.pad(_x, (self.padding[2], self.padding[2],  # 宽度维。
+                                    self.padding[1], self.padding[1],   # 高度维。
+                                    self.padding[0], 0))                # 时间维。
                             _x[:,:,:self.padding[0],
                                 self.padding[1]:_x.shape[-2]-self.padding[1],
-                                self.padding[2]:_x.shape[-1]-self.padding[2]] = x[:,:,0:1,:,:].clone() # broadcast the first value
+                                self.padding[2]:_x.shape[-1]-self.padding[2]] = x[:,:,0:1,:,:].clone() # 广播第一个时间值。
                         else:
                             padding_0 = self.kernel_size[0] - 1
-                            _x = F.pad(_x, (self.padding[2], self.padding[2],  # Width
-                                    self.padding[1], self.padding[1],   # Height
-                                    padding_0, 0))                      # Temporal
+                            _x = F.pad(_x, (self.padding[2], self.padding[2],  # 宽度维。
+                                    self.padding[1], self.padding[1],   # 高度维。
+                                    padding_0, 0))                      # 时间维。
                             _x[:,:,:padding_0,
                                 self.padding[1]:_x.shape[-2]-self.padding[1],
                                 self.padding[2]:_x.shape[-1]-self.padding[2]] = x[:,:,i-padding_0:i,:,:].clone()
@@ -457,17 +482,17 @@ class FluxConv(nn.Module):
                         en = min(i+self.slice_seq_len, x.shape[2])
                         _x = x[:,:,st:en,:,:]
                         if i == 0:
-                            _x = F.pad(_x, (self.padding[2], self.padding[2],  # Width
-                                    self.padding[1], self.padding[1],   # Height
-                                    self.padding[0], 0))                # Temporal
+                            _x = F.pad(_x, (self.padding[2], self.padding[2],  # 宽度维。
+                                    self.padding[1], self.padding[1],   # 高度维。
+                                    self.padding[0], 0))                # 时间维。
                             _x[:,:,:self.padding[0],
                                 self.padding[1]:_x.shape[-2]-self.padding[1],
-                                self.padding[2]:_x.shape[-1]-self.padding[2]] = x[:,:,0:1,:,:].clone() # broadcast the first value
+                                self.padding[2]:_x.shape[-1]-self.padding[2]] = x[:,:,0:1,:,:].clone() # 广播第一个时间值。
                         else:
                             padding_0 = self.kernel_size[0] - 1
-                            _x = F.pad(_x, (self.padding[2], self.padding[2],  # Width
-                                    self.padding[1], self.padding[1],   # Height
-                                    padding_0, 0))                      # Temporal
+                            _x = F.pad(_x, (self.padding[2], self.padding[2],  # 宽度维。
+                                    self.padding[1], self.padding[1],   # 高度维。
+                                    padding_0, 0))                      # 时间维。
                             _x[:,:,:padding_0,
                                 self.padding[1]:_x.shape[-2]-self.padding[1],
                                 self.padding[2]:_x.shape[-1]-self.padding[2]] = x[:,:,i-padding_0:i,:,:].clone()
@@ -482,8 +507,8 @@ class FluxConv(nn.Module):
                         torch.cuda.empty_cache()
                         x = torch.cat([_x for _x in xs], dim=2).to(device=device)
             else:
-                x = F.pad(x, (self.padding[2], self.padding[2],  # Width
-                            self.padding[1], self.padding[1]))   # Height
+                x = F.pad(x, (self.padding[2], self.padding[2],  # 宽度维。
+                            self.padding[1], self.padding[1]))   # 高度维。
                 weight = torch.sum(self.conv.weight, dim=2)
                 bias = self.conv.bias
                 x = F.conv2d(x, weight=weight, bias=bias,stride=self.conv.stride[1:])

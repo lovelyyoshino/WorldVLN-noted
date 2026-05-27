@@ -1,9 +1,11 @@
 """
-Binary Spherical Quantization
-Proposed in https://arxiv.org/abs/2406.07548
+双塔多尺度有限标量量化（双塔多尺度 FSQ）。
 
-In the simplest setup, each dimension is quantized into {-1, 1}.
-An entropy penalty is used to encourage utilization.
+虽然文件名沿用了 BSQ 系列结构，但底层量化器换成了 FSQ：
+
+- 每个维度被量化到有限个标量等级，而不是显式 codebook embedding。
+- 外层仍然维护两座金字塔的多尺度残差量化调度。
+- 各尺度的等级索引可以通过 `indices_to_codes` 恢复成连续码并叠加重建。
 """
 
 import random
@@ -25,26 +27,28 @@ import numpy as np
 
 from einops import rearrange, reduce, pack, unpack
 
-# from einx import get_at
+# 中文标题：from einx import get_at
 
 from infinity.models.videovae.utils.dynamic_resolution import predefined_HW_Scales_dynamic
 from infinity.models.videovae.utils.dynamic_resolution_two_pyramid import dynamic_resolution_thw, total_pixels2scales
 from infinity.models.videovae.modules.quantizer.finite_scalar_quantization import FSQ
-# print(f"{dynamic_resolution_thw=}")
+# 代码/形状说明：print(f"{dynamic_resolution_thw=}")
 
-# constants
+# 常量区。
 
 Return = namedtuple('Return', ['quantized', 'indices', 'entropy_aux_loss'])
 
 LossBreakdown = namedtuple('LossBreakdown', ['per_sample_entropy', 'batch_entropy', 'commitment'])
 
-# distributed helpers
+# 分布式辅助函数。
 
 @cache
 def is_distributed():
+    """判断当前是否处于已初始化的分布式训练环境。"""
     return dist.is_initialized() and dist.get_world_size() > 1
 
 def maybe_distributed_mean(t):
+    """分布式下执行 all-reduce 均值；单卡时直接返回。"""
     if not is_distributed():
         return t
 
@@ -52,59 +56,73 @@ def maybe_distributed_mean(t):
     t = t / dist.get_world_size()
     return t
 
-# helper functions
+# 辅助函数。
 
 def exists(v):
+    """返回值是否不是 `None`。"""
     return v is not None
 
 def identity(t):
+    """恒等映射，占位用。"""
     return t
 
 def default(*args):
+    """返回第一个有效参数；若该参数可调用则先执行。"""
     for arg in args:
         if exists(arg):
             return arg() if callable(arg) else arg
     return None
 
 def round_up_multiple(num, mult):
+    """把 `num` 向上补齐为 `mult` 的整数倍。"""
     return ceil(num / mult) * mult
 
 def pack_one(t, pattern):
+    """对单个张量执行 `einops.pack`。"""
     return pack([t], pattern)
 
 def unpack_one(t, ps, pattern):
+    """把 `pack_one` 的结果按原始形状还原。"""
     return unpack(t, ps, pattern)[0]
 
 def l2norm(t):
+    """沿最后一维做 L2 归一化。"""
     return F.normalize(t, dim = -1)
 
-# entropy
+# 熵相关计算。
 
 def log(t, eps = 1e-5):
+    """带数值保护的对数。"""
     return t.clamp(min = eps).log()
 
 def entropy(prob):
+    """计算熵 `H(p) = -sum(p * log(p))`。"""
     return (-prob * log(prob)).sum(dim=-1)
 
-# cosine sim linear
+# 余弦相似度线性层。
 
 class CosineSimLinear(Module):
+    """先归一化输入和权重，再做余弦相似度线性投影。"""
+
     def __init__(
         self,
         dim_in,
         dim_out,
         scale = 1.
     ):
+        """初始化余弦相似度线性层。"""
         super().__init__()
         self.scale = scale
         self.weight = nn.Parameter(torch.randn(dim_in, dim_out))
 
     def forward(self, x):
+        """返回归一化输入与权重的点积结果。"""
         x = F.normalize(x, dim = -1)
         w = F.normalize(self.weight, dim = 0)
         return (x @ w) * self.scale
 
 def repeat_schedule(scale_schedule, repeat_scales_num, times):
+    """把前若干个尺度重复多次，生成更密集的量化日程。"""
     new_scale_schedule = []
     for i in range(repeat_scales_num):
         new_scale_schedule.extend([scale_schedule[i] for _ in range(times)])
@@ -113,6 +131,7 @@ def repeat_schedule(scale_schedule, repeat_scales_num, times):
 
 
 def get_latent2scale_schedule(T: int, H: int, W: int, mode="original", last_scale_repeat_n=0):
+    """根据输入时空大小生成双塔量化的 `(t, h, w)` 日程表。"""
     predefined_HW_Scales = {}
     if mode.startswith("infinity_video_two_pyramid"):
         if 'elegant' in mode:
@@ -121,6 +140,7 @@ def get_latent2scale_schedule(T: int, H: int, W: int, mode="original", last_scal
             video_scale_repetition = [5, 5, 5, 5, 5, 5, 5, 5, 4, 3, 2] + [1] * 10
             base_scale_schedule = copy.deepcopy(dynamic_resolution_thw[(H, W)]['scales'])
             def repeat_scales(base_scale_schedule, scale_repetition):
+                """按重复次数展开基础尺度表。"""
                 scale_schedule = []
                 for i in range(len(base_scale_schedule)):
                     scale_schedule.extend([base_scale_schedule[i] for _ in range(scale_repetition[i])])
@@ -132,9 +152,9 @@ def get_latent2scale_schedule(T: int, H: int, W: int, mode="original", last_scal
             if T > 1:
                 scale_schedule = repeat_scales(base_scale_schedule, video_scale_repetition)
                 spatial_time_schedule.extend([(T-1, h, w) for i, (_, h, w) in enumerate(scale_schedule)])
-            # double h and w
+            # 中文标题：将 h 和 w 翻倍
             tower_split_index = firstframe_scalecnt
-            # print(f'{spatial_time_schedule=}')
+            # 代码/形状说明：print(f'{spatial_time_schedule=}')
             return spatial_time_schedule, tower_split_index
         if "motion_boost_v2" in mode:
             times = 6
@@ -147,7 +167,7 @@ def get_latent2scale_schedule(T: int, H: int, W: int, mode="original", last_scal
                 scale_schedule = repeat_schedule(base_scale_schedule, 7, times)
                 predefined_t = [T - 1 for _ in range(len(scale_schedule))]
                 spatial_time_schedule.extend([(min(int(np.round(predefined_t[i])), T - 1), h, w) for i, (_, h, w) in enumerate(scale_schedule)])
-            # double h and w
+            # 中文标题：将 h 和 w 翻倍
             spatial_time_schedule_double = [(t, 2*h, 2*w) for (t, h, w) in spatial_time_schedule]
             tower_split_index = firstframe_scalecnt
             return spatial_time_schedule_double, tower_split_index
@@ -155,14 +175,14 @@ def get_latent2scale_schedule(T: int, H: int, W: int, mode="original", last_scal
         spatial_time_schedule.extend(spatial_time_schedule[-1:] * last_scale_repeat_n)
         tower_split_index = dynamic_resolution_thw[(H, W)]['tower_split_index'] + last_scale_repeat_n
         if T > 1:
-            # predefined_t = np.linspace(1, compressed_frames - 1, len(scale_schedule))
+            # 代码/形状说明：predefined_t = np.linspace(1, compressed_frames - 1, len(scale_schedule))
             if mode == "infinity_video_two_pyramid_full_time":
                 spatial_time_schedule.extend([(T - 1, h, w) for i, (_, h, w) in enumerate(spatial_time_schedule)])
             else:
                 predefined_t = np.linspace(1, T - 1, total_pixels2scales['0.06M']-3).tolist() + [T - 1] * (len(spatial_time_schedule)-total_pixels2scales['0.06M']+3)
                 spatial_time_schedule.extend([(min(int(np.round(predefined_t[i])), T - 1), h, w) for i, (_, h, w) in enumerate(spatial_time_schedule)])
             spatial_time_schedule.extend(spatial_time_schedule[-1:] * last_scale_repeat_n)
-        # double h and w
+        # 中文标题：将 h 和 w 翻倍
         spatial_time_schedule_double = [(t, 2*h, 2*w) for (t, h, w) in spatial_time_schedule]
         return spatial_time_schedule_double, tower_split_index
     if mode == "original":
@@ -182,18 +202,18 @@ def get_latent2scale_schedule(T: int, H: int, W: int, mode="original", last_scal
         predefined_HW_Scales[(32, 32)] = predefined_HW_Scales[(16, 16)] + [(20, 20), (24, 24), (28, 28), (32, 32)]
         predefined_HW_Scales[(64, 64)] = predefined_HW_Scales[(32, 32)] + [(40, 40), (48, 48), (56, 56), (64, 64)]
     elif mode == "dense_f8":
-        # predefined_HW_Scales[(16, 16)] = [(x, x) for x in range(1, 16+1)]
+        # 代码/形状说明：predefined_HW_Scales[(16, 16)] = [(x, x) for x in range(1, 16+1)]
         predefined_HW_Scales[(32, 32)] = [(x, x) for x in range(1, 16+1)] + [(20, 20), (24, 24), (28, 28), (32, 32)]
         predefined_HW_Scales[(64, 64)] = predefined_HW_Scales[(32, 32)] + [(40, 40), (48, 48), (56, 56), (64, 64)]
         predefined_HW_Scales[(128, 128)] = predefined_HW_Scales[(64, 64)] + [(80, 80), (96, 96), (112, 112), (128, 128)]
     elif mode == "dense_f8_double":
-        # predefined_HW_Scales setting double from dense f16
+        # 代码/形状说明：从 dense f16 设置翻倍后的 predefined_HW_Scales
         predefined_HW_Scales[(32, 32)] = [(x, x) for x in range(1, 16+1)]
         predefined_HW_Scales[(64, 64)] = predefined_HW_Scales[(32, 32)] + [(20, 20), (24, 24), (28, 28), (32, 32)]
         predefined_HW_Scales[(96, 96)] = predefined_HW_Scales[(64, 64)] + [(40, 40), (48, 48)]
         predefined_HW_Scales[(128, 128)] = predefined_HW_Scales[(64, 64)] + [(40, 40), (48, 48), (56, 56), (64, 64)]
 
-        predefined_HW_Scales[(24, 42)] = [(1, 1), (2, 2), (3, 3), (3, 4), (3, 5), (4, 6), (4, 7), (5, 8), (6, 9), (6, 10), (6, 11), (7, 12), (7, 13), (8, 14), (9, 15), (9, 16), (12, 21)]       
+        predefined_HW_Scales[(24, 42)] = [(1, 1), (2, 2), (3, 3), (3, 4), (3, 5), (4, 6), (4, 7), (5, 8), (6, 9), (6, 10), (6, 11), (7, 12), (7, 13), (8, 14), (9, 15), (9, 16), (12, 21)]
         predefined_HW_Scales[(36, 64)] = predefined_HW_Scales[(24, 42)] + [(14, 26), (18, 32)]
         predefined_HW_Scales[(60, 108)] = predefined_HW_Scales[(36, 64)] + [(24, 42), (30, 54)]
         predefined_HW_Scales[(90, 160)] = predefined_HW_Scales[(60, 108)] + [(38, 66),(45, 80)]
@@ -211,52 +231,57 @@ def get_latent2scale_schedule(T: int, H: int, W: int, mode="original", last_scal
     else:
         raise NotImplementedError
 
-    # predefined_T_Scales = [1, 2, 3, 4, 5, 6, 7, 9, 11, 13, 17, 17, 17, 17, 17, 17]
-    # predefined_T_Scales = [1, 2, 3, 4, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27]
+    # 代码/形状说明：predefined_T_Scales = [1, 2, 3, 4, 5, 6, 7, 9, 11, 13, 17, 17, 17, 17, 17, 17]
+    # 代码/形状说明：predefined_T_Scales = [1, 2, 3, 4, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27]
     predefined_T_Scales = [1, 2, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29]
-    # predefined_T_Scales = [1, 2, 3, 5, 6, 8, 9, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]
+    # 代码/形状说明：predefined_T_Scales = [1, 2, 3, 5, 6, 8, 9, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]
     patch_THW_shape_per_scale = predefined_HW_Scales[(H, W)]
     if len(predefined_T_Scales) < len(patch_THW_shape_per_scale):
-        # print("warning: the length of predefined_T_Scales is less than the length of patch_THW_shape_per_scale!")
+        # 代码/形状说明：print("警告：predefined_T_Scales 的长度小于 patch_THW_shape_per_scale 的长度！")
         predefined_T_Scales += [predefined_T_Scales[-1]] * (len(patch_THW_shape_per_scale) - len(predefined_T_Scales))
     patch_THW_shape_per_scale = [(min(T, t), h, w ) for (h, w), t in zip(patch_THW_shape_per_scale, predefined_T_Scales[:len(patch_THW_shape_per_scale)])]
     return patch_THW_shape_per_scale
 
-# TP: Two Pyramid
+# 中文说明：TP：双塔
 class MultiScaleFSQTP(Module):
-    """ Follows Algorithm 1. in https://arxiv.org/pdf/2107.03312.pdf """
+    """双塔多尺度 FSQ 量化器。
+
+    与双塔 BSQ 的区别主要在于：每一级不再输出 bit 串，而是输出逐维有限等级索引。
+    但外层残差量化的由粗到细调度保持一致。
+    """
 
     def __init__(
         self,
         *,
         dim,
         soft_clamp_input_value = None,
-        aux_loss = False, # intermediate auxiliary loss
+        aux_loss = False, # 中文标题：中间辅助损失
         use_stochastic_depth=False,
         drop_rate=0.,
-        schedule_mode="original", # ["original", "dynamic", "dense"]
+        schedule_mode="original", # 代码/形状说明：["original", "dynamic", "dense"]
         keep_first_quant=False,
         keep_last_quant=False,
         remove_residual_detach=False,
         random_flip = False,
         flip_prob = 0.5,
-        flip_mode = "stochastic", # "stochastic", "deterministic"
+        flip_mode = "stochastic", # 代码/形状说明："stochastic", "deterministic"
         max_flip_lvl = 1,
-        random_flip_1lvl = False, # random flip one level each time
+        random_flip_1lvl = False, # 中文标题：每次随机翻转一个层级
         flip_lvl_idx = None,
         drop_when_test=False,
         drop_lvl_idx=None,
         drop_lvl_num=0,
-        random_short_schedule = False, # randomly use short schedule (schedule for images of 256x256)
+        random_short_schedule = False, # 中文说明：随机使用较短日程（用于 256x256 图像的日程）
         short_schedule_prob = 0.5,
-        disable_flip_prob = 0.0, # disable random flip in this image
-        casual_multi_scale = False,  # causal multiscale
+        disable_flip_prob = 0.0, # 中文标题：在当前图像禁用随机翻转
+        casual_multi_scale = False,  # 中文标题：因果多尺度
         temporal_slicing = False,
         last_scale_repeat_n = 0,
         num_lvl_fsq = None,
         other_args = None,
         **kwargs
     ):
+        """初始化双塔调度、通道投影和语义/细节两套 FSQ 量化器。"""
         super().__init__()
         codebook_dim = dim
         self.use_stochastic_depth = use_stochastic_depth
@@ -273,7 +298,7 @@ class MultiScaleFSQTP(Module):
         self.casual_multi_scale = casual_multi_scale
         self.temporal_slicing = temporal_slicing
         self.last_scale_repeat_n = last_scale_repeat_n
-        # print(f"{casual_multi_scale=}")
+        # 代码/形状说明：print(f"{casual_multi_scale=}")
 
         self.drop_when_test = drop_when_test
         self.drop_lvl_idx = drop_lvl_idx
@@ -285,7 +310,7 @@ class MultiScaleFSQTP(Module):
         self.short_schedule_prob = short_schedule_prob
         self.z_interplote_up = 'trilinear'
         self.z_interplote_down = 'area'
-        
+
         self.schedule_mode = schedule_mode
         self.keep_first_quant = keep_first_quant
         self.keep_last_quant = keep_last_quant
@@ -313,7 +338,7 @@ class MultiScaleFSQTP(Module):
             num_lvl = num_lvl_fsq,
         )
 
-        self.detail_scale_min_tokens = 80 # include
+        self.detail_scale_min_tokens = 80 # 中文说明：包含该阈值
         middle_hidden_dim=64
         if self.other_args.use_learnable_dim_proj:
             self.semantic_proj_down = nn.Sequential(
@@ -326,7 +351,7 @@ class MultiScaleFSQTP(Module):
                 nn.SiLU(),
                 nn.Linear(middle_hidden_dim, self.origin_C),
             )
-            # assert self.detail_scale_dim >= self.origin_C
+            # 代码/形状说明：assert self.detail_scale_dim >= self.origin_C
             if self.detail_scale_dim == self.origin_C:
                 self.detail_proj_up, self.detail_proj_down = nn.Identity(), nn.Identity()
             elif self.detail_scale_dim > self.origin_C:
@@ -354,9 +379,11 @@ class MultiScaleFSQTP(Module):
 
     @property
     def codebooks(self):
+        """保留与其他量化器一致的接口；本质上暴露底层量化器对象。"""
         return self.lfq.codebook
 
     def get_codes_from_indices(self, indices_list):
+        """把各尺度整数等级索引恢复为连续 codes，并上采样到最终分辨率。"""
         all_codes = []
         for indices in indices_list:
             codes = self.lfq.indices_to_codes(indices)
@@ -368,12 +395,14 @@ class MultiScaleFSQTP(Module):
         return summed_codes
 
     def get_output_from_indices(self, indices):
+        """仅根据索引重建量化输出，不重新执行量化器前向。"""
         codes = self.get_codes_from_indices(indices)
         codes_summed = reduce(codes, 'q ... -> ...', 'sum')
         return codes_summed
 
     def flip_quant(self, x):
-        # assert self.flip_mode in ['stochastic', 'stochastic_dynamic']
+        """按概率翻转量化码符号，用于扰动实验。"""
+        # 代码/形状说明：assert self.flip_mode in ['stochastic', 'stochastic_dynamic']
         if self.flip_mode == 'stochastic':
             flip_mask = torch.rand_like(x) < self.flip_prob
         elif self.flip_mode == 'stochastic_dynamic':
@@ -392,9 +421,10 @@ class MultiScaleFSQTP(Module):
         return_all_codes = False,
         double = False
     ):
+        """执行双塔多尺度残差量化，并返回每一级的等级索引。"""
         if x.ndim == 4:
             x = x.unsqueeze(2)
-        B, C, T, H, W = x.size()    
+        B, C, T, H, W = x.size()
         if self.schedule_mode.startswith("same"):
             scale_num = int(self.schedule_mode[len("same"):])
             assert T == 1
@@ -410,7 +440,7 @@ class MultiScaleFSQTP(Module):
         else:
             scale_schedule = get_latent2scale_schedule(T, H, W, mode=self.schedule_mode)
             scale_num = len(scale_schedule)
-                        
+
         if self.training and self.random_short_schedule and random.random() < self.short_schedule_prob:
             if self.schedule_mode.startswith("infinity_video_two_pyramid"):
                 if T == 1:
@@ -420,24 +450,24 @@ class MultiScaleFSQTP(Module):
                     pass
             else:
                 if self.schedule_mode.startswith("dense_f8"):
-                    # print(B, C, T, H, W, scale_num, self.full2short_f8[scale_num], scale_schedule)
+                    # 代码/形状说明：print(B, C, T, H, W, scale_num, self.full2short_f8[scale_num], scale_schedule)
                     scale_num = self.full2short_f8[scale_num]
-                    # print('after: \n', scale_schedule[:scale_num])
+                    # 代码/形状说明：print('截断后：\n', scale_schedule[:scale_num])
                 else:
                     scale_num = self.full2short[scale_num]
             scale_schedule = scale_schedule[:scale_num]
-        
+
         quantized_out = 0.
         residual = x
         quantized_out_firstframe = None
 
         all_losses = []
         all_indices = []
-        
-        # go through the layers
-        # residual_list = []
-        # interpolate_residual_list = []
-        # quantized_list = []
+
+        # 中文标题：遍历各层
+        # 代码/形状说明：residual_list = []
+        # 代码/形状说明：interpolate_residual_list = []
+        # 代码/形状说明：quantized_list = []
         with autocast('cuda', enabled = False):
             for si, (pt, ph, pw) in enumerate(scale_schedule):
                 if si < tower_split_index:
@@ -456,16 +486,7 @@ class MultiScaleFSQTP(Module):
                     lfq = self.lfq_semantic
 
                 def interpolate(tensor, size, mode, quantizer, is_semantic_scale):
-                    """
-                    arguments:
-                        tensor: (B,C,T,H,W)
-                        size: (C1,T,H1,W1)
-                        mode: str
-                        quantizer: quantizer
-                        is_semantic_scale: bool
-                    return:
-                        tensor: (B,*size)
-                    """
+                    """在时空尺度与语义/细节通道维之间做插值对齐。"""
                     B, C, T, H, W = tensor.shape
                     C1, T, H1, W1 = size
                     if quantizer.other_args.use_learnable_dim_proj:
@@ -491,18 +512,18 @@ class MultiScaleFSQTP(Module):
                         tensor = tensor.permute(0,2,1,3,4) # (B,T,C1,H1,W1) -> (B,C1,T,H1,W1)
                     return tensor
 
-                if ph * pw < 16*16: # 192p drop
+                if ph * pw < 16*16: # 中文说明：192p 场景下的丢弃策略
                     skip_detail_scales = False
                 else:
                     if random.random() < self.other_args.skip_detail_scales_prob:
                         skip_detail_scales = True
-                    
+
                 if (not skip_detail_scales):
                     interpolate_residual = interpolate(residual[:, :, ss:ee, :, :].clone(), size=(C1, pt, ph, pw), mode=self.z_interplote_down, quantizer=self, is_semantic_scale=is_semantic_scale)
                     quantized, indices = lfq(interpolate_residual)
                     quantized = interpolate(quantized, size=tgt_shape, mode=self.z_interplote_up, quantizer=self, is_semantic_scale=is_semantic_scale)
                     all_indices.append(indices)
-                    # all_losses.append(loss)
+                    # 中文说明：all_losses.append(loss)
                     residual[:, :, ss:ee, :, :] = residual[:, :, ss:ee, :, :] - quantized
                     quantized_out = quantized_out + quantized
                 if si == tower_split_index - 1:
@@ -515,7 +536,7 @@ class MultiScaleFSQTP(Module):
                 else:
                     quantized_out = torch.cat([quantized_out_firstframe, quantized_out], dim=2)
 
-        # stack all losses and indices
+        # 中文标题：堆叠所有损失和索引
 
         all_losses = None
 
@@ -524,9 +545,9 @@ class MultiScaleFSQTP(Module):
         if not return_all_codes:
             return ret
 
-        # whether to return all codes from all codebooks across layers
+        # 中文标题：是否返回跨层所有 codebook 的全部 codes
         all_codes = self.get_codes_from_indices(all_indices)
 
-        # will return all codes in shape (quantizer, batch, sequence length, codebook dimension)
+        # 中文说明：将以 (quantizer, batch, sequence length, codebook dimension) 形状返回全部 codes
 
         return (*ret, all_codes)

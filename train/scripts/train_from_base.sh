@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 中文导读：
+# 这是 Stage 1 世界模型监督微调入口。它准备 T5 文本编码器、InfinityStar video VAE、
+# 8B 基座权重和 UAV-Flow JSONL 视频数据，然后调用 `train.py`。
+# 训练目标对应“给定语言指令和真实观测 latent，预测下一段真实 latent”，让世界模型先学会
+# 导航视频中的时空转移；动作解码器训练入口在 `train/action_decoder/scripts/`。
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
@@ -19,7 +25,7 @@ require_existing_path() {
   local label="$1"
   local path="$2"
   if [[ ! -e "${path}" ]]; then
-    echo "[ERROR] ${label} not found: ${path}" >&2
+    echo "[ERROR] 找不到 ${label}：${path}" >&2
     exit 1
   fi
 }
@@ -45,8 +51,8 @@ ARNOLD_WORKER_0_PORT="${ARNOLD_WORKER_0_PORT:-9591}"
 PORT="${ARNOLD_WORKER_0_PORT%%,*}"
 
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
-# Worldmodel python package lives under Worldmodel/infinity/.
-# Add the directory containing the `infinity/` package to PYTHONPATH.
+# Worldmodel 的 Python 包位于 Worldmodel/infinity/ 下。
+# 把包含 `infinity/` 包的目录加入 PYTHONPATH。
 export PYTHONPATH="${REPO_ROOT}/../Worldmodel/runtime${PYTHONPATH:+:${PYTHONPATH}}"
 export TORCHINDUCTOR_COMPILE_THREADS="${TORCHINDUCTOR_COMPILE_THREADS:-1}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"

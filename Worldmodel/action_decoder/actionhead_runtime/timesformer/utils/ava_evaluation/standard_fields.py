@@ -13,15 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 
-"""Contains classes specifying naming conventions used for object detection.
-
-
-Specifies:
-  InputDataFields: standard fields used by reader/preprocessor/batcher.
-  DetectionResultFields: standard fields returned by object detector.
-  BoxListFields: standard field used by BoxList
-  TfExampleFields: standard fields for tf-example data format (go/tf-example).
-"""
+"""目标检测评估使用的标准字段名集合。"""
 
 
 from __future__ import (
@@ -33,43 +25,10 @@ from __future__ import (
 
 
 class InputDataFields(object):
-    """Names for the input tensors.
+    """集中定义输入样本字段名，避免检测评估中字符串散落各处。 小白可以先看 `__init__` 保存了哪些字段，再看其他方法如何读取这些字段。
 
-  Holds the standard data field names to use for identifying input tensors. This
-  should be used by the decoder to identify keys for the returned tensor_dict
-  containing input tensors. And it should be used by the model to identify the
-  tensors it needs.
-
-  Attributes:
-    image: image.
-    original_image: image in the original input size.
-    key: unique key corresponding to image.
-    source_id: source of the original image.
-    filename: original filename of the dataset (without common path).
-    groundtruth_image_classes: image-level class labels.
-    groundtruth_boxes: coordinates of the ground truth boxes in the image.
-    groundtruth_classes: box-level class labels.
-    groundtruth_label_types: box-level label types (e.g. explicit negative).
-    groundtruth_is_crowd: [DEPRECATED, use groundtruth_group_of instead]
-      is the groundtruth a single object or a crowd.
-    groundtruth_area: area of a groundtruth segment.
-    groundtruth_difficult: is a `difficult` object
-    groundtruth_group_of: is a `group_of` objects, e.g. multiple objects of the
-      same class, forming a connected group, where instances are heavily
-      occluding each other.
-    proposal_boxes: coordinates of object proposal boxes.
-    proposal_objectness: objectness score of each proposal.
-    groundtruth_instance_masks: ground truth instance masks.
-    groundtruth_instance_boundaries: ground truth instance boundaries.
-    groundtruth_instance_classes: instance mask-level class labels.
-    groundtruth_keypoints: ground truth keypoints.
-    groundtruth_keypoint_visibilities: ground truth keypoint visibilities.
-    groundtruth_label_scores: groundtruth label scores.
-    groundtruth_weights: groundtruth weight factor for bounding boxes.
-    num_groundtruth_boxes: number of groundtruth boxes.
-    true_image_shapes: true shapes of images in the resized images, as resized
-      images can be padded with zeros.
-  """
+    数据流提示：类属性通常在初始化时写入，后续方法通过这些属性完成评估、采样或状态转换。
+    """
 
     image = "image"
     original_image = "original_image"
@@ -98,19 +57,10 @@ class InputDataFields(object):
 
 
 class DetectionResultFields(object):
-    """Naming conventions for storing the output of the detector.
+    """集中定义检测结果字段名。 小白可以先看 `__init__` 保存了哪些字段，再看其他方法如何读取这些字段。
 
-  Attributes:
-    source_id: source of the original image.
-    key: unique key corresponding to image.
-    detection_boxes: coordinates of the detection boxes in the image.
-    detection_scores: detection scores for the detection boxes in the image.
-    detection_classes: detection-level class labels.
-    detection_masks: contains a segmentation mask for each detection box.
-    detection_boundaries: contains an object boundary for each detection box.
-    detection_keypoints: contains detection keypoints for each detection box.
-    num_detections: number of detections in the batch.
-  """
+    数据流提示：类属性通常在初始化时写入，后续方法通过这些属性完成评估、采样或状态转换。
+    """
 
     source_id = "source_id"
     key = "key"
@@ -124,19 +74,10 @@ class DetectionResultFields(object):
 
 
 class BoxListFields(object):
-    """Naming conventions for BoxLists.
+    """集中定义 BoxList 内部字段名。 小白可以先看 `__init__` 保存了哪些字段，再看其他方法如何读取这些字段。
 
-  Attributes:
-    boxes: bounding box coordinates.
-    classes: classes per bounding box.
-    scores: scores per bounding box.
-    weights: sample weights per bounding box.
-    objectness: objectness score per bounding box.
-    masks: masks per bounding box.
-    boundaries: boundaries per bounding box.
-    keypoints: keypoints per bounding box.
-    keypoint_heatmaps: keypoint heatmaps per bounding box.
-  """
+    数据流提示：类属性通常在初始化时写入，后续方法通过这些属性完成评估、采样或状态转换。
+    """
 
     boxes = "boxes"
     classes = "classes"
@@ -150,49 +91,13 @@ class BoxListFields(object):
 
 
 class TfExampleFields(object):
-    """TF-example proto feature names for object detection.
+    """集中定义 TF Example 兼容字段名。 小白可以先看 `__init__` 保存了哪些字段，再看其他方法如何读取这些字段。
 
-  Holds the standard feature names to load from an Example proto for object
-  detection.
-
-  Attributes:
-    image_encoded: JPEG encoded string
-    image_format: image format, e.g. "JPEG"
-    filename: filename
-    channels: number of channels of image
-    colorspace: colorspace, e.g. "RGB"
-    height: height of image in pixels, e.g. 462
-    width: width of image in pixels, e.g. 581
-    source_id: original source of the image
-    object_class_text: labels in text format, e.g. ["person", "cat"]
-    object_class_label: labels in numbers, e.g. [16, 8]
-    object_bbox_xmin: xmin coordinates of groundtruth box, e.g. 10, 30
-    object_bbox_xmax: xmax coordinates of groundtruth box, e.g. 50, 40
-    object_bbox_ymin: ymin coordinates of groundtruth box, e.g. 40, 50
-    object_bbox_ymax: ymax coordinates of groundtruth box, e.g. 80, 70
-    object_view: viewpoint of object, e.g. ["frontal", "left"]
-    object_truncated: is object truncated, e.g. [true, false]
-    object_occluded: is object occluded, e.g. [true, false]
-    object_difficult: is object difficult, e.g. [true, false]
-    object_group_of: is object a single object or a group of objects
-    object_depiction: is object a depiction
-    object_is_crowd: [DEPRECATED, use object_group_of instead]
-      is the object a single object or a crowd
-    object_segment_area: the area of the segment.
-    object_weight: a weight factor for the object's bounding box.
-    instance_masks: instance segmentation masks.
-    instance_boundaries: instance boundaries.
-    instance_classes: Classes for each instance segmentation mask.
-    detection_class_label: class label in numbers.
-    detection_bbox_ymin: ymin coordinates of a detection box.
-    detection_bbox_xmin: xmin coordinates of a detection box.
-    detection_bbox_ymax: ymax coordinates of a detection box.
-    detection_bbox_xmax: xmax coordinates of a detection box.
-    detection_score: detection score for the class label and box.
-  """
+    数据流提示：类属性通常在初始化时写入，后续方法通过这些属性完成评估、采样或状态转换。
+    """
 
     image_encoded = "image/encoded"
-    image_format = "image/format"  # format is reserved keyword
+    image_format = "image/format"  # format 是 Python 保留/常用关键字，这里避免误用。
     filename = "image/filename"
     channels = "image/channels"
     colorspace = "image/colorspace"

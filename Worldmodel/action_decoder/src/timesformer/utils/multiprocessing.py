@@ -1,6 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
-"""Multiprocessing helpers."""
+"""多进程启动辅助函数。"""
 
 import torch
 
@@ -16,32 +16,11 @@ def run(
     cfg,
     output_queue=None,
 ):
+    """在子进程中运行给定函数，是多进程启动的包装入口。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
-    Runs a function from a child process.
-    Args:
-        local_rank (int): rank of the current process on the current machine.
-        num_proc (int): number of processes per machine.
-        func (function): function to execute on each of the process.
-        init_method (string): method to initialize the distributed training.
-            TCP initialization: equiring a network address reachable from all
-            processes followed by the port.
-            Shared file-system initialization: makes use of a file system that
-            is shared and visible from all machines. The URL should start with
-            file:// and contain a path to a non-existent file on a shared file
-            system.
-        shard_id (int): the rank of the current machine.
-        num_shards (int): number of overall machines for the distributed
-            training job.
-        backend (string): three distributed backends ('nccl', 'gloo', 'mpi') are
-            supports, each with different capabilities. Details can be found
-            here:
-            https://pytorch.org/docs/stable/distributed.html
-        cfg (CfgNode): configs. Details can be found in
-            slowfast/config/defaults.py
-        output_queue (queue): can optionally be used to return values from the
-            master process.
-    """
-    # Initialize the process group.
+    # 初始化分布式进程组。
     world_size = num_proc * num_shards
     rank = shard_id * num_proc + local_rank
 

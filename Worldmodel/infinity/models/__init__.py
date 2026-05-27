@@ -9,13 +9,14 @@ from timm.models.layers import DropPath
 from .infinity import Infinity, sample_with_top_k_top_p_also_inplace_modifying_logits_
 
 def _ex_repr(self):
+    """把模块公开属性整理成紧凑字符串，方便日志里快速查看配置。"""
     return ', '.join(
         f'{k}=' + (f'{v:g}' if isinstance(v, float) else str(v))
         for k, v in vars(self).items()
         if not k.startswith('_') and k != 'training'
         and not isinstance(v, (torch.nn.Module, torch.Tensor))
     )
-for clz in (torch.nn.CrossEntropyLoss, SoftTargetCrossEntropy):  # no longer __repr__ DropPath with drop_prob
+for clz in (torch.nn.CrossEntropyLoss, SoftTargetCrossEntropy):  # 统一这些 loss 的打印格式，避免日志过长。
     if hasattr(clz, 'extra_repr'):
         clz.extra_repr = _ex_repr
     else:

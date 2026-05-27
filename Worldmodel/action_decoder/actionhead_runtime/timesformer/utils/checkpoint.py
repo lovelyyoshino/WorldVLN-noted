@@ -1,6 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
-"""Functions that handle saving and loading of checkpoints."""
+"""checkpoint 保存、加载和参数名转换工具。"""
 
 import copy
 import numpy as np
@@ -19,13 +19,12 @@ logger = logging.get_logger(__name__)
 
 
 def make_checkpoint_dir(path_to_job):
-    """
-    Creates the checkpoint directory (if not present already).
-    Args:
-        path_to_job (string): the path to the folder of the current job.
+    """创建当前训练任务的 checkpoints 目录。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或checkpoint流程。
     """
     checkpoint_dir = os.path.join(path_to_job, "checkpoints")
-    # Create the checkpoint dir from the master process
+    # 只让主进程创建 checkpoint 目录。
     if du.is_master_proc() and not PathManager.exists(checkpoint_dir):
         try:
             PathManager.mkdirs(checkpoint_dir)
@@ -35,46 +34,41 @@ def make_checkpoint_dir(path_to_job):
 
 
 def get_checkpoint_dir(path_to_job):
-    """
-    Get path for storing checkpoints.
-    Args:
-        path_to_job (string): the path to the folder of the current job.
+    """返回当前训练任务保存 checkpoint 的目录。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或checkpoint流程。
     """
     return os.path.join(path_to_job, "checkpoints")
 
 
 def get_path_to_checkpoint(path_to_job, epoch):
-    """
-    Get the full path to a checkpoint file.
-    Args:
-        path_to_job (string): the path to the folder of the current job.
-        epoch (int): the number of epoch for the checkpoint.
+    """根据 epoch 生成 checkpoint文件路径。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或checkpoint流程。
     """
     name = "checkpoint_epoch_{:05d}.pyth".format(epoch)
     return os.path.join(get_checkpoint_dir(path_to_job), name)
 
 
 def get_last_checkpoint(path_to_job):
-    """
-    Get the last checkpoint from the checkpointing folder.
-    Args:
-        path_to_job (string): the path to the folder of the current job.
+    """查找 checkpoint 目录中最新的 checkpoint文件。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或checkpoint流程。
     """
 
     d = get_checkpoint_dir(path_to_job)
     names = PathManager.ls(d) if PathManager.exists(d) else []
     names = [f for f in names if "checkpoint" in f]
-    assert len(names), "No checkpoints found in '{}'.".format(d)
-    # Sort the checkpoints by epoch.
+    assert len(names), "在 '{}' 中没有找到 checkpoint。".format(d)
+    # 按 epoch 对 checkpoint 排序。
     name = sorted(names)[-1]
     return os.path.join(d, name)
 
 
 def has_checkpoint(path_to_job):
-    """
-    Determines if the given directory contains a checkpoint.
-    Args:
-        path_to_job (string): the path to the folder of the current job.
+    """判断目录中是否已经存在 checkpoint。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或checkpoint流程。
     """
     d = get_checkpoint_dir(path_to_job)
     files = PathManager.ls(d) if PathManager.exists(d) else []
@@ -82,12 +76,9 @@ def has_checkpoint(path_to_job):
 
 
 def is_checkpoint_epoch(cfg, cur_epoch, multigrid_schedule=None):
-    """
-    Determine if a checkpoint should be saved on current epoch.
-    Args:
-        cfg (CfgNode): configs to save.
-        cur_epoch (int): current number of epoch of the model.
-        multigrid_schedule (List): schedule for multigrid training.
+    """判断当前 epoch 是否应该保存 checkpoint。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或checkpoint流程。
     """
     if cur_epoch + 1 == cfg.SOLVER.MAX_EPOCH:
         return True
@@ -105,31 +96,27 @@ def is_checkpoint_epoch(cfg, cur_epoch, multigrid_schedule=None):
 
 
 def save_checkpoint(path_to_job, model, optimizer, epoch, cfg):
+    """保存模型、优化器、epoch 和配置到 checkpoint。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或checkpoint流程。
     """
-    Save a checkpoint.
-    Args:
-        model (model): model to save the weight to the checkpoint.
-        optimizer (optim): optimizer to save the historical state.
-        epoch (int): current number of epoch of the model.
-        cfg (CfgNode): configs to save.
-    """
-    # Save checkpoints only from the master process.
+    # 只允许主进程保存 checkpoint。
     if not du.is_master_proc(cfg.NUM_GPUS * cfg.NUM_SHARDS):
         return
-    # Ensure that the checkpoint dir exists.
+    # 确保 checkpoint 目录存在。
     PathManager.mkdirs(get_checkpoint_dir(path_to_job))
-    # Omit the DDP wrapper in the multi-gpu setting.
+    # 多卡训练时去掉 DDP 外层包装。
     sd = model.module.state_dict() if cfg.NUM_GPUS > 1 else model.state_dict()
     normalized_sd = sub_to_normal_bn(sd)
 
-    # Record the state.
+    # 记录训练状态。
     checkpoint = {
         "epoch": epoch,
         "model_state": normalized_sd,
         "optimizer_state": optimizer.state_dict(),
         "cfg": cfg.dump(),
     }
-    # Write the checkpoint.
+    # 写出 checkpoint文件。
     path_to_checkpoint = get_path_to_checkpoint(path_to_job, epoch + 1)
     with PathManager.open(path_to_checkpoint, "wb") as f:
         torch.save(checkpoint, f)
@@ -137,37 +124,30 @@ def save_checkpoint(path_to_job, model, optimizer, epoch, cfg):
 
 
 def inflate_weight(state_dict_2d, state_dict_3d):
-    """
-    Inflate 2D model weights in state_dict_2d to the 3D model weights in
-    state_dict_3d. The details can be found in:
-    Joao Carreira, and Andrew Zisserman.
-    "Quo vadis, action recognition? a new model and the kinetics dataset."
-    Args:
-        state_dict_2d (OrderedDict): a dict of parameters from a 2D model.
-        state_dict_3d (OrderedDict): a dict of parameters from a 3D model.
-    Returns:
-        state_dict_inflated (OrderedDict): a dict of inflated parameters.
+    """把 2D 卷积权重扩展成 3D 卷积权重，用于加载预训练模型。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或checkpoint流程。
     """
     state_dict_inflated = OrderedDict()
-    #print(state_dict_2d.keys())
-    #print('----')
-    #print(state_dict_3d.keys())
+    # 保留的上游调试/兼容代码：print(state_dict_2d.keys())
+    # 保留的上游调试/兼容代码：print('----')
+    # 保留的上游调试/兼容代码：print(state_dict_3d.keys())
     for k, v2d in state_dict_2d.items():
         assert k in state_dict_3d.keys()
         v3d = state_dict_3d[k]
-        # Inflate the weight of 2D conv to 3D conv.
+        # 把 2D 卷积权重扩展为 3D 卷积权重。
         if len(v2d.shape) == 4 and len(v3d.shape) == 5:
             logger.info(
-                "Inflate {}: {} -> {}: {}".format(k, v2d.shape, k, v3d.shape)
+                "对 {} 做 inflation：{} -> {}: {}".format(k, v2d.shape, k, v3d.shape)
             )
-            # Dimension need to be match.
+            # 维度需要匹配。
             try:
                assert v2d.shape[-2:] == v3d.shape[-2:]
                assert v2d.shape[:2] == v3d.shape[:2]
                v3d = (
                    v2d.unsqueeze(2).repeat(1, 1, v3d.shape[2], 1, 1) / v3d.shape[2]
                )
-            except: ### my modification
+            except: # 中文说明：这里兼容输入通道数不完全一致的 checkpoint。
                temp = (
                    v2d.unsqueeze(2).repeat(1, 1, v3d.shape[2], 1, 1) / v3d.shape[2]
                )
@@ -179,7 +159,7 @@ def inflate_weight(state_dict_2d, state_dict_3d):
             v3d = v2d
         else:
             logger.info(
-                "Unexpected {}: {} -|> {}: {}".format(
+                "unexpected 形状不匹配 {}: {} -|> {}: {}".format(
                     k, v2d.shape, k, v3d.shape
                 )
             )
@@ -197,30 +177,16 @@ def load_checkpoint(
     epoch_reset=False,
     clear_name_pattern=(),
 ):
-    """
-    Load the checkpoint from the given file. If inflation is True, inflate the
-    2D Conv weights from the checkpoint to 3D Conv.
-    Args:
-        path_to_checkpoint (string): path to the checkpoint to load.
-        model (model): model to load the weights from the checkpoint.
-        data_parallel (bool): if true, model is wrapped by
-        torch.nn.parallel.DistributedDataParallel.
-        optimizer (optim): optimizer to load the historical state.
-        inflation (bool): if True, inflate the weights from the checkpoint.
-        convert_from_caffe2 (bool): if True, load the model from caffe2 and
-            convert it to pytorch.
-        epoch_reset (bool): if True, reset #train iterations from the checkpoint.
-        clear_name_pattern (string): if given, this (sub)string will be cleared
-            from a layer name if it can be matched.
-    Returns:
-        (int): the number of training epoch of the checkpoint.
+    """从checkpoint文件恢复模型，并可选择恢复优化器状态。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或checkpoint流程。
     """
     assert PathManager.exists(
         path_to_checkpoint
-    ), "Checkpoint '{}' not found".format(path_to_checkpoint)
-    logger.info("Loading network weights from {}.".format(path_to_checkpoint))
+    ), "没有找到 checkpoint '{}'".format(path_to_checkpoint)
+    logger.info("正在从 {} 加载网络权重。".format(path_to_checkpoint))
 
-    # Account for the DDP wrapper in the multi-gpu setting.
+    # 多卡训练时，模型外面可能包着 DDP，这里先取出真正的模型。
     try:
       ms = model.module if data_parallel else model
     except:
@@ -238,7 +204,7 @@ def load_checkpoint(
                 c2_blob_shape = caffe2_checkpoint["blobs"][key].shape
                 model_blob_shape = ms.state_dict()[converted_key].shape
 
-                # expand shape dims if they differ (eg for converting linear to conv params)
+                # 如果维度数不同，就补 1 维；常见于把 linear 参数转成 conv 参数。
                 if len(c2_blob_shape) < len(model_blob_shape):
                     c2_blob_shape += (1,) * (
                         len(model_blob_shape) - len(c2_blob_shape)
@@ -246,7 +212,7 @@ def load_checkpoint(
                     caffe2_checkpoint["blobs"][key] = np.reshape(
                         caffe2_checkpoint["blobs"][key], c2_blob_shape
                     )
-                # Load BN stats to Sub-BN.
+                # 把 BN stats 复制到 Sub-BN 对应的通道上。
                 if (
                     len(model_blob_shape) == 1
                     and len(c2_blob_shape) == 1
@@ -273,7 +239,7 @@ def load_checkpoint(
                     )
                 else:
                     logger.warn(
-                        "!! {}: {} does not match {}: {}".format(
+                        "!! {}: {} 和 {}: {} 的形状对不上".format(
                             key,
                             c2_blob_shape,
                             converted_key,
@@ -285,22 +251,22 @@ def load_checkpoint(
                     prefix in key for prefix in ["momentum", "lr", "model_iter"]
                 ):
                     logger.warn(
-                        "!! {}: can not be converted, got {}".format(
+                        "!! {} 无法转换，转换后得到 {}".format(
                             key, converted_key
                         )
                     )
         diff = set(ms.state_dict()) - set(state_dict)
         diff = {d for d in diff if "num_batches_tracked" not in d}
         if len(diff) > 0:
-            logger.warn("Not loaded {}".format(diff))
+            logger.warn("这些权重没有被加载 {}".format(diff))
         ms.load_state_dict(state_dict, strict=False)
         epoch = -1
     else:
-        # Load the checkpoint on CPU to avoid GPU mem spike.
+        # 先把 checkpoint 加载到 CPU，避免 GPU 显存突然升高。
         with PathManager.open(path_to_checkpoint, "rb") as f:
             checkpoint = torch.load(f, map_location="cpu")
         try:
-#        if True:
+# 保留的上游调试/兼容代码：if True:
             model_state_dict_3d = (
                 model.module.state_dict() if data_parallel else model.state_dict()
             )
@@ -314,25 +280,25 @@ def load_checkpoint(
                 checkpoint["model_state"], model_state_dict_3d
             )
 
-#        except: ####### checkpoint from DEIT
-#            print(checkpoint.keys())
-#            model_state_dict_3d = model.state_dict()
-#            checkpoint["model_state"] = normal_to_sub_bn(
-##                checkpoint["model"], model_state_dict_3d
-#                checkpoint, model_state_dict_3d
+# 保留的上游调试/兼容代码：except: ####### checkpoint from DEIT
+# 保留的上游调试/兼容代码：print(checkpoint.keys())
+# 中文说明：model_state_dict_3d = model.state_dict()
+# 中文说明：checkpoint["model_state"] = normal_to_sub_bn(
+# 中文说明：#                checkpoint["model"], model_state_dict_3d
+# 中文说明：checkpoint, model_state_dict_3d
 #            )
-#            keys = checkpoint['model_state'].keys()
-#            checkpoint['new_model_state'] = {}
-#            for key in keys:
-#                new_key = 'model.'+key
-#                checkpoint['new_model_state'][new_key] = checkpoint['model_state'][key]
-#            checkpoint['model_state'] = checkpoint['new_model_state']
-#            del checkpoint['new_model_state']
+# 中文说明：keys = checkpoint['model_state'].keys()
+# 中文说明：checkpoint['new_model_state'] = {}
+# 保留的上游调试/兼容代码：for key in keys:
+# 中文说明：new_key = 'model.'+key
+# 中文说明：checkpoint['new_model_state'][new_key] = checkpoint['model_state'][key]
+# 中文说明：checkpoint['model_state'] = checkpoint['new_model_state']
+# 中文说明：del checkpoint['new_model_state']
 #
 #        ############
 
         if inflation:
-            # Try to inflate the model.
+            # 尝试对模型权重做 inflation。
             inflated_model_dict = inflate_weight(
                 checkpoint["model_state"], model_state_dict_3d
             )
@@ -347,7 +313,7 @@ def load_checkpoint(
                             model_state_dict_new[k_re] = checkpoint[
                                 "model_state"
                             ][k]
-                            logger.info("renaming: {} -> {}".format(k, k_re))
+                            logger.info("重命名权重键：{} -> {}".format(k, k_re))
                         else:
                             model_state_dict_new[k] = checkpoint["model_state"][
                                 k
@@ -365,32 +331,32 @@ def load_checkpoint(
                 pre_train_dict[k] = new_v.transpose(1,2)
             ###################
 
-            # Match pre-trained weights that have same shape as current model.
+            # 只挑出和当前模型同名、同形状的 pre-trained 权重。
             pre_train_dict_match = {
                 k: v
                 for k, v in pre_train_dict.items()
                 if k in model_dict and v.size() == model_dict[k].size()
             }
-#            print(pre_train_dict.keys())
-#            print('-------------')
-#            print(model_dict.keys())
-#            print(pre_train_dict_match)
-#            print(xy)
-            # Weights that do not have match from the pre-trained model.
+# 保留的上游调试/兼容代码：print(pre_train_dict.keys())
+# 保留的上游调试/兼容代码：print('-------------')
+# 保留的上游调试/兼容代码：print(model_dict.keys())
+# 保留的上游调试/兼容代码：print(pre_train_dict_match)
+# 保留的上游调试/兼容代码：print(xy)
+            # 这些层在 pre-trained 权重里没有可直接加载的匹配项。
             not_load_layers = [
                 k
                 for k in model_dict.keys()
                 if k not in pre_train_dict_match.keys()
             ]
-            # Log weights that are not loaded with the pre-trained weights.
+            # 记录没有从 pre-trained 权重中加载到的层，方便排查。
             if not_load_layers:
                 for k in not_load_layers:
-                    logger.info("Network weights {} not loaded.".format(k))
-            # Load pre-trained weights.
+                    logger.info("网络权重 {} 没有加载。".format(k))
+            # 加载已经匹配上的 pre-trained 权重。
             ms.load_state_dict(pre_train_dict_match, strict=False)
             epoch = -1
 
-            # Load the optimizer state (commonly not done when fine-tuning)
+            # 如果是继续训练，就恢复 optimizer 状态；微调时通常不会这样做。
         if "epoch" in checkpoint.keys() and not epoch_reset:
             epoch = checkpoint["epoch"]
             if optimizer:
@@ -401,19 +367,9 @@ def load_checkpoint(
 
 
 def sub_to_normal_bn(sd):
-    """
-    Convert the Sub-BN paprameters to normal BN parameters in a state dict.
-    There are two copies of BN layers in a Sub-BN implementation: `bn.bn` and
-    `bn.split_bn`. `bn.split_bn` is used during training and
-    "compute_precise_bn". Before saving or evaluation, its stats are copied to
-    `bn.bn`. We rename `bn.bn` to `bn` and store it to be consistent with normal
-    BN layers.
-    Args:
-        sd (OrderedDict): a dict of parameters whitch might contain Sub-BN
-        parameters.
-    Returns:
-        new_sd (OrderedDict): a dict with Sub-BN parameters reshaped to
-        normal parameters.
+    """把 Sub-BN 参数转换成普通 BN 参数名。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或checkpoint流程。
     """
     new_sd = copy.deepcopy(sd)
     modifications = [
@@ -442,13 +398,9 @@ def sub_to_normal_bn(sd):
 
 
 def c2_normal_to_sub_bn(key, model_keys):
-    """
-    Convert BN parameters to Sub-BN parameters if model contains Sub-BNs.
-    Args:
-        key (OrderedDict): source dict of parameters.
-        mdoel_key (OrderedDict): target dict of parameters.
-    Returns:
-        new_sd (OrderedDict): converted dict of parameters.
+    """把 Caffe2 普通 BN 参数转换成 Sub-BN 参数名。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或checkpoint流程。
     """
     if "bn.running_" in key:
         if key in model_keys:
@@ -462,13 +414,9 @@ def c2_normal_to_sub_bn(key, model_keys):
 
 
 def normal_to_sub_bn(checkpoint_sd, model_sd):
-    """
-    Convert BN parameters to Sub-BN parameters if model contains Sub-BNs.
-    Args:
-        checkpoint_sd (OrderedDict): source dict of parameters.
-        model_sd (OrderedDict): target dict of parameters.
-    Returns:
-        new_sd (OrderedDict): converted dict of parameters.
+    """把普通 BN 参数转换成 Sub-BN 参数名。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或checkpoint流程。
     """
     for key in model_sd:
         if key not in checkpoint_sd:
@@ -503,14 +451,14 @@ def normal_to_sub_bn(checkpoint_sd, model_sd):
 
 
 def load_test_checkpoint(cfg, model):
+    """测试阶段加载 checkpoint。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或checkpoint流程。
     """
-    Loading checkpoint logic for testing.
-    """
-    # Load a checkpoint to test if applicable.
+    # 测试时优先加载用户指定的 checkpoint。
     if cfg.TEST.CHECKPOINT_FILE_PATH != "":
-        # If no checkpoint found in MODEL_VIS.CHECKPOINT_FILE_PATH or in the current
-        # checkpoint folder, try to load checkpoint from
-        # TEST.CHECKPOINT_FILE_PATH and test it.
+        # 如果当前 checkpoint 目录没有合适文件，就使用
+        # TEST.CHECKPOINT_FILE_PATH 指向的 checkpoint 进行测试。
         load_checkpoint(
             cfg.TEST.CHECKPOINT_FILE_PATH,
             model,
@@ -523,9 +471,8 @@ def load_test_checkpoint(cfg, model):
         last_checkpoint = get_last_checkpoint(cfg.OUTPUT_DIR)
         load_checkpoint(last_checkpoint, model, cfg.NUM_GPUS > 1)
     elif cfg.TRAIN.CHECKPOINT_FILE_PATH != "":
-        # If no checkpoint found in TEST.CHECKPOINT_FILE_PATH or in the current
-        # checkpoint folder, try to load checkpoint from
-        # TRAIN.CHECKPOINT_FILE_PATH and test it.
+        # 如果 TEST.CHECKPOINT_FILE_PATH 和当前 checkpoint 目录都没有可用文件，
+        # 就尝试使用 TRAIN.CHECKPOINT_FILE_PATH 指向的 checkpoint 进行测试。
         load_checkpoint(
             cfg.TRAIN.CHECKPOINT_FILE_PATH,
             model,
@@ -536,23 +483,24 @@ def load_test_checkpoint(cfg, model):
         )
     else:
         logger.info(
-            "Unknown way of loading checkpoint. Using with random initialization, only for debugging."
+            "没有可用的 checkpoint 加载方式；将使用随机初始化，仅用于调试。"
         )
 
 
 def load_train_checkpoint(cfg, model, optimizer):
-    """
-    Loading checkpoint logic for training.
+    """训练阶段加载或恢复 checkpoint。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或checkpoint流程。
     """
     if cfg.TRAIN.AUTO_RESUME and has_checkpoint(cfg.OUTPUT_DIR):
         last_checkpoint = get_last_checkpoint(cfg.OUTPUT_DIR)
-        logger.info("Load from last checkpoint, {}.".format(last_checkpoint))
+        logger.info("从最新 checkpoint 加载：{}。".format(last_checkpoint))
         checkpoint_epoch = load_checkpoint(
             last_checkpoint, model, cfg.NUM_GPUS > 1, optimizer
         )
         start_epoch = checkpoint_epoch + 1
     elif cfg.TRAIN.CHECKPOINT_FILE_PATH != "":
-        logger.info("Load from given checkpoint file.")
+        logger.info("从指定 checkpoint文件加载。")
         checkpoint_epoch = load_checkpoint(
             cfg.TRAIN.CHECKPOINT_FILE_PATH,
             model,

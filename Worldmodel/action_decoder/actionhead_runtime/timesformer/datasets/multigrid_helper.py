@@ -1,6 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
-"""Helper functions for multigrid training."""
+"""Multigrid 训练的辅助工具。"""
 
 import numpy as np
 from torch._six import int_classes as _int_classes
@@ -9,16 +9,19 @@ from torch.utils.data.sampler import Sampler
 
 class ShortCycleBatchSampler(Sampler):
     """
-    Extend Sampler to support "short cycle" sampling.
-    See paper "A Multigrid Method for Efficiently Training Video Models",
-    Wu et al., 2019 (https://arxiv.org/abs/1912.00998) for details.
+        扩展采样器，使它支持短周期采样。
+
+        细节可参考论文 "A Multigrid Method for Efficiently Training Video Models",
+        引用/来源：Wu et al., 2019 (https://arxiv.org/abs/1912.00998)。
+
     """
 
     def __init__(self, sampler, batch_size, drop_last, cfg):
+        """根据配置计算三种批大小，并保存底层采样器。"""
         if not isinstance(sampler, Sampler):
             raise ValueError(
-                "sampler should be an instance of "
-                "torch.utils.data.Sampler, but got sampler={}".format(sampler)
+                "sampler 应是 torch.utils.data.Sampler 的实例，"
+                "但实际收到 sampler={}".format(sampler)
             )
         if (
             not isinstance(batch_size, _int_classes)
@@ -26,12 +29,12 @@ class ShortCycleBatchSampler(Sampler):
             or batch_size <= 0
         ):
             raise ValueError(
-                "batch_size should be a positive integer value, "
-                "but got batch_size={}".format(batch_size)
+                "batch_size 应是正整数，"
+                "但实际收到 batch_size={}".format(batch_size)
             )
         if not isinstance(drop_last, bool):
             raise ValueError(
-                "drop_last should be a boolean value, but got "
+                "drop_last 应是布尔值，但实际收到 "
                 "drop_last={}".format(drop_last)
             )
         self.sampler = sampler
@@ -57,6 +60,7 @@ class ShortCycleBatchSampler(Sampler):
         ]
 
     def __iter__(self):
+        """按短周期顺序产出带周期标记的批数据。"""
         counter = 0
         batch_size = self.batch_sizes[0]
         batch = []
@@ -71,6 +75,7 @@ class ShortCycleBatchSampler(Sampler):
             yield batch
 
     def __len__(self):
+        """返回按平均批大小估算后的批数量。"""
         avg_batch_size = sum(self.batch_sizes) / 3.0
         if self.drop_last:
             return int(np.floor(len(self.sampler) / avg_batch_size))

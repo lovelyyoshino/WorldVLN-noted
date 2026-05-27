@@ -4,6 +4,11 @@ import argparse
 
 
 def str2bool(v):
+    """中文说明：`str2bool` 实现VideoVAE 命令行和训练参数工具中的 `str2bool` 步骤，供训练、推理或调试流程复用。
+
+    新手提示：先看参数名如何落到模型、损失和 accelerate 配置上。
+    阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+    """
     if isinstance(v, bool):
         return v
     if v.lower() in ('true'):
@@ -11,24 +16,29 @@ def str2bool(v):
     elif v.lower() in ('false'):
         return False
     else:
-        raise argparse.ArgumentTypeError('Boolean value expected.')
+        raise argparse.ArgumentTypeError('需要布尔值：true 或 false。')
 
 def add_model_specific_args(args, parser):
+    """中文说明：`add_model_specific_args` 实现VideoVAE 命令行和训练参数工具中的 `add_model_specific_args` 步骤，供训练、推理或调试流程复用。
+
+    新手提示：先看参数名如何落到模型、损失和 accelerate 配置上。
+    阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+    """
     from infinity.models.videovae.models import CVIVIT_VQGAN, CNN_VQGAN, FLUX_VAE, MS_VAE, CogVAE, SlowFastVAE, HunYuanVAE, CogVAEL
-    
+
     if args.tokenizer == "cvivit":
         parser = CVIVIT_VQGAN.add_model_specific_args(parser)
         vae_model = CVIVIT_VQGAN
     elif args.tokenizer == "cnn":
         parser = CNN_VQGAN.add_model_specific_args(parser)
         vae_model = CNN_VQGAN
-    elif args.tokenizer in ["flux"]:  # add cogvideo here to align evaluation configs
-        parser = CNN_VQGAN.add_model_specific_args(parser) # align with cnn config
-        parser = FLUX_VAE.add_model_specific_args(parser) # flux config
+    elif args.tokenizer in ["flux"]:  # 中文标题：在这里添加 cogvideo，用于对齐评测配置
+        parser = CNN_VQGAN.add_model_specific_args(parser) # 中文标题：与 cnn 配置对齐
+        parser = FLUX_VAE.add_model_specific_args(parser) # 中文标题：flux 配置
         vae_model = FLUX_VAE
     elif args.tokenizer == "ms":
-        parser = CNN_VQGAN.add_model_specific_args(parser) # align with cnn config
-        parser = FLUX_VAE.add_model_specific_args(parser) # align with flux config
+        parser = CNN_VQGAN.add_model_specific_args(parser) # 中文标题：与 cnn 配置对齐
+        parser = FLUX_VAE.add_model_specific_args(parser) # 中文标题：与 flux 配置对齐
         vae_model = MS_VAE
     elif args.tokenizer in ["sd", "sd-vq", "mar", "cogvideox_origin", "vidtok", "open-sora-plan", "step-fun", "hunyuan_origin"]:
         vae_model = None
@@ -54,9 +64,19 @@ def add_model_specific_args(args, parser):
     return args, parser, vae_model
 
 class MainArgs:
+    """中文说明：`MainArgs` 封装VideoVAE 命令行和训练参数工具中的状态和子模块。
+
+    新手提示：先看参数名如何落到模型、损失和 accelerate 配置上。
+    阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+    """
     @staticmethod
     def add_main_args(parser):
-        # training
+        # 训练相关参数
+        """中文说明：`add_main_args` 实现VideoVAE 命令行和训练参数工具中的 `add_main_args` 步骤，供训练、推理或调试流程复用。
+
+        新手提示：先看参数名如何落到模型、损失和 accelerate 配置上。
+        阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+        """
         parser.add_argument('--max_steps', type=int, default=1e6)
         parser.add_argument('--log_every', type=int, default=1)
         parser.add_argument('--ckpt_every', type=int, default=1000)
@@ -67,7 +87,7 @@ class MainArgs:
         parser.add_argument('--dataloader_init_epoch', type=int, default=-1)
         parser.add_argument('--context_parallel_size', type=int, default=0)
 
-        # optimization
+        # 优化器相关参数
         parser.add_argument('--lr', type=float, default=1e-4)
         parser.add_argument('--beta1', type=float, default=0.9)
         parser.add_argument('--beta2', type=float, default=0.95)
@@ -75,13 +95,13 @@ class MainArgs:
         parser.add_argument('--disc_optim_type', type=str, default=None, choices=[None, "rmsprop"])
         parser.add_argument('--max_grad_norm', type=float, default=1.0)
         parser.add_argument('--max_grad_norm_disc', type=float, default=1.0)
-        parser.add_argument('--disable_sch', action="store_true") # deprecated option
+        parser.add_argument('--disable_sch', action="store_true") # 已废弃选项。
         parser.add_argument('--scheduler', type=str, default="no", choices=["no", "linear"])
         parser.add_argument('--warmup_steps', type=int, default=0)
         parser.add_argument('--lr_min', type=float, default=0.)
         parser.add_argument('--warmup_lr_init', type=float, default=0.)
 
-        # basic vae config
+        # 基础 VAE 配置
         parser.add_argument('--patch_size', type=int, default=8)
         parser.add_argument('--temporal_patch_size', type=int, default=4)
         parser.add_argument('--embedding_dim', type=int, default=256)
@@ -89,11 +109,11 @@ class MainArgs:
         parser.add_argument('--use_vae', action="store_true")
         parser.add_argument('--fix_model', type=str, default='no', choices=['no', 'encoder', 'encoder_decoder'])
 
-        # discrete vae config
+        # 离散 VAE 配置
         parser.add_argument('--use_stochastic_depth', action="store_true")
         parser.add_argument("--drop_rate", type=float, default=0.0)
         parser.add_argument('--schedule_mode', type=str, default="original", choices=["original", "dynamic", "dense", "same1", "same2", "same3", "half", "dense_f8", "dense_f8_double"])
-        parser.add_argument('--lr_drop', nargs='*', type=int, default=None, help="A list of numeric values. Example: --values 270 300")
+        parser.add_argument('--lr_drop', nargs='*', type=int, default=None, help="学习率下降的 step 列表，例如：--lr_drop 270 300")
         parser.add_argument('--lr_drop_rate', type=float, default=0.1)
         parser.add_argument('--keep_first_quant', action="store_true")
         parser.add_argument('--keep_last_quant', action="store_true")
@@ -142,9 +162,9 @@ class MainArgs:
         parser.add_argument('--compute_latent_loss', action="store_true")
         parser.add_argument('--latent_loss_weight', type=float, default=0.0)
 
-        # discriminator config
+        # 判别器配置
         parser.add_argument('--disc_version', type=str, default="v1")
-        parser.add_argument('--magvit_disc', action="store_true") # deprecated
+        parser.add_argument('--magvit_disc', action="store_true") # 已废弃。
         parser.add_argument('--disc_type', type=str, default="patchgan", choices=["patchgan", "stylegan"])
         parser.add_argument('--sigmoid_in_disc', action="store_true")
         parser.add_argument('--activation_in_disc', type=str, default="leaky_relu")
@@ -168,36 +188,41 @@ class MainArgs:
         parser = MainArgs.add_loss_args(parser)
         parser = MainArgs.add_accelerate_args(parser)
 
-        # initialization
+        # 初始化相关参数
         parser.add_argument('--tokenizer', type=str, required=True)
         parser.add_argument('--pretrained', type=str, default=None)
         parser.add_argument('--pretrained_mode', type=str, default="full")
         parser.add_argument('--pretrained_ema', type=str, default="no")
         parser.add_argument('--inflation_pe', action="store_true")
         parser.add_argument('--init_vgen', type=str, default='no', choices=['no', 'keep', 'average'])
-        parser.add_argument('--no_init_idis', action="store_true") # deprecated option
-        parser.add_argument('--init_idis', type=str, default='keep', choices=['no', 'keep']) # use keep by default following previous settings
+        parser.add_argument('--no_init_idis', action="store_true") # 已废弃选项。
+        parser.add_argument('--init_idis', type=str, default='keep', choices=['no', 'keep']) # 默认沿用历史设置，保持 idis 初始化。
         parser.add_argument('--init_vdis', type=str, default="no")
 
-        # misc
+        # 其他杂项参数
         parser.add_argument('--enable_nan_detector', action='store_true')
         parser.add_argument('--turn_on_profiler', action='store_true')
         parser.add_argument('--profiler_scheduler_wait_steps', type=int, default=10)
         parser.add_argument('--debug', action='store_true')
-        parser.add_argument('--video_logger', action='store_true') # deprecated option
+        parser.add_argument('--video_logger', action='store_true') # 已废弃选项。
         parser.add_argument('--bytenas', type=str, default="sg")
         parser.add_argument('--username', type=str, default="zhufengda")
         parser.add_argument('--seed', type=int, default=1234)
         parser.add_argument('--vq_to_vae', action='store_true')
         parser.add_argument('--load_not_strict', action='store_true')
-        parser.add_argument('--zero', type=int, default=0, choices=[0, 1, 2, 3]) # 1 hybrid shard, 2 shard grad_op, 3 full shard
+        parser.add_argument('--zero', type=int, default=0, choices=[0, 1, 2, 3]) # ZeRO 模式：1=混合分片，2=分片 grad_op，3=全量分片。
         parser.add_argument('--bucket_cap_mb', type=int, default=40) # DDP
         parser.add_argument('--manual_gc_interval', type=int, default=10000) # DDP
 
         return parser
-    
+
     @staticmethod
     def add_loss_args(parser):
+        """中文说明：`add_loss_args` 实现VideoVAE 命令行和训练参数工具中的 `add_loss_args` 步骤，供训练、推理或调试流程复用。
+
+        新手提示：先看参数名如何落到模型、损失和 accelerate 配置上。
+        阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+        """
         parser.add_argument("--recon_loss_type", type=str, default='l1', choices=['l1', 'l2'])
         parser.add_argument('--video_perceptual_weight', type=float, default=0.)
         parser.add_argument('--image_gan_weight', type=float, default=1.0)
@@ -212,20 +237,30 @@ class MainArgs:
         parser.add_argument('--norm_type', type=str, default='group', choices=['batch', 'group', "no"])
         parser.add_argument('--disc_loss_type', type=str, default='hinge', choices=['hinge', 'vanilla'])
         parser.add_argument('--gan_image4video', type=str, default='yes', choices=['no', 'yes'])
-        return parser 
+        return parser
 
     @staticmethod
     def add_accelerate_args(parser):
+        """中文说明：`add_accelerate_args` 实现VideoVAE 命令行和训练参数工具中的 `add_accelerate_args` 步骤，供训练、推理或调试流程复用。
+
+        新手提示：先看参数名如何落到模型、损失和 accelerate 配置上。
+        阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+        """
         parser.add_argument('--use_checkpoint', action="store_true")
-        parser.add_argument('--precision', type=str, default="fp32", choices=['fp32', 'bf16']) # disable fp16
-        parser.add_argument('--encoder_dtype', type=str, default="fp32", choices=['fp32', 'bf16']) # disable fp16
-        parser.add_argument('--decoder_dtype', type=str, default="fp32", choices=['fp32', 'bf16']) # disable fp16
+        parser.add_argument('--precision', type=str, default="fp32", choices=['fp32', 'bf16']) # 禁用 fp16。
+        parser.add_argument('--encoder_dtype', type=str, default="fp32", choices=['fp32', 'bf16']) # 禁用 fp16。
+        parser.add_argument('--decoder_dtype', type=str, default="fp32", choices=['fp32', 'bf16']) # 禁用 fp16。
         parser.add_argument('--upcast_attention', type=str, default="", choices=["qk", "qkv"])
         parser.add_argument('--upcast_tf32', action="store_true")
         return parser
 
 def format_args(args):
-    # Start building the script string
+    # 开始拼接脚本字符串
+    """中文说明：`format_args` 实现VideoVAE 命令行和训练参数工具中的 `format_args` 步骤，供训练、推理或调试流程复用。
+
+    新手提示：先看参数名如何落到模型、损失和 accelerate 配置上。
+    阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+    """
     script_content = "#!/bin/bash\n\n"
     script_content += "torchrun \\\n"
     script_content += "    --nproc_per_node=$ARNOLD_WORKER_GPU \\\n"
@@ -233,15 +268,20 @@ def format_args(args):
     script_content += "    --node_rank=$ARNOLD_ID --master_port=$port \\\n"
     script_content += "    train.py \\\n"
 
-    # Iterate over each key-value pair and append it to the command
+    # 遍历每个键值对并追加到命令行字符串
     for k, v in args.__dict__.items():
         script_content += f"    --{k} {v} \\\n"
 
-    # Remove the last backslash and newline
+    # 移除最后一个反斜杠和换行符
     script_content = script_content.rstrip(" \\\n") + "\n"
     return script_content
 
 def init_resolution(resolution, num_datasets):
+    """中文说明：`init_resolution` 实现VideoVAE 命令行和训练参数工具中的 `init_resolution` 步骤，供训练、推理或调试流程复用。
+
+    新手提示：先看参数名如何落到模型、损失和 accelerate 配置上。
+    阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+    """
     if len(resolution) == 1:
         resolution = [(resolution[0], resolution[0])] * num_datasets
     elif len(resolution) == num_datasets:

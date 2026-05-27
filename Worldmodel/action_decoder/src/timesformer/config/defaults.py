@@ -1,264 +1,255 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
-"""Configs."""
+"""TimeSformer 默认配置。"""
 from fvcore.common.config import CfgNode
 # -----------------------------------------------------------------------------
-# Config definition
+# 配置定义
 # -----------------------------------------------------------------------------
 _C = CfgNode()
 
 # ---------------------------------------------------------------------------- #
-# Batch norm options
+# BatchNorm 选项
 # ---------------------------------------------------------------------------- #
 _C.BN = CfgNode()
 
-# Precise BN stats.
+# 是否使用 Precise BN 统计。
 _C.BN.USE_PRECISE_STATS = False
 
-# Number of samples use to compute precise bn.
+# 用于计算精确 BN 的 batch 数量。
 _C.BN.NUM_BATCHES_PRECISE = 200
 
-# Weight decay value that applies on BN.
+# 应用于 BN 参数的权重衰减。
 _C.BN.WEIGHT_DECAY = 0.0
 
-# Norm type, options include `batchnorm`, `sub_batchnorm`, `sync_batchnorm`
+# Norm 类型，可选 `batchnorm`、`sub_batchnorm`、`sync_batchnorm`。
 _C.BN.NORM_TYPE = "batchnorm"
 
-# Parameter for SubBatchNorm, where it splits the batch dimension into
-# NUM_SPLITS splits, and run BN on each of them separately independently.
+# SubBatchNorm 参数：把 batch 维度切成 NUM_SPLITS 份，并分别独立运行 BN。
 _C.BN.NUM_SPLITS = 1
 
-# Parameter for NaiveSyncBatchNorm3d, where the stats across `NUM_SYNC_DEVICES`
-# devices will be synchronized.
+# NaiveSyncBatchNorm3d 参数：同步 `NUM_SYNC_DEVICES` 个设备上的统计量。
 _C.BN.NUM_SYNC_DEVICES = 1
 
 
 # ---------------------------------------------------------------------------- #
-# Training options.
+# 训练选项
 # ---------------------------------------------------------------------------- #
 _C.TRAIN = CfgNode()
 
-# If True Train the model, else skip training.
+# 为 True 时训练模型，否则跳过训练。
 _C.TRAIN.ENABLE = True
 
-# Dataset.
+# 训练数据集名称。
 _C.TRAIN.DATASET = "kinetics"
 
 ##
 _C.TRAIN.FINETUNE = False
 
-# Total mini-batch size.
+# 全局 mini-batch 总大小。
 _C.TRAIN.BATCH_SIZE = 64
 
-# Evaluate model on test data every eval period epochs.
+# 每隔多少个 epoch 在测试数据上评估模型。
 _C.TRAIN.EVAL_PERIOD = 10
 
-# Save model checkpoint every checkpoint period epochs.
+# 每隔多少个 epoch 保存一次模型检查点。
 _C.TRAIN.CHECKPOINT_PERIOD = 10
 
-# Resume training from the latest checkpoint in the output directory.
+# 从输出目录中的最新检查点恢复训练。
 _C.TRAIN.AUTO_RESUME = True
 
-# Path to the checkpoint to load the initial weight.
+# 用于加载初始权重的检查点路径。
 _C.TRAIN.CHECKPOINT_FILE_PATH = ""
 
-# Checkpoint types include `caffe2` or `pytorch`.
+# 检查点类型，可选 `caffe2` 或 `pytorch`。
 _C.TRAIN.CHECKPOINT_TYPE = "pytorch"
 
-# If True, perform inflation when loading checkpoint.
+# 为 True 时，加载检查点时执行 inflation。
 _C.TRAIN.CHECKPOINT_INFLATE = False
 
-# If True, reset epochs when loading checkpoint.
+# 为 True 时，加载检查点后重置 epoch 计数。
 _C.TRAIN.CHECKPOINT_EPOCH_RESET = False
 
-# If set, clear all layer names according to the pattern provided.
-_C.TRAIN.CHECKPOINT_CLEAR_NAME_PATTERN = ()  # ("backbone.",)
+# 如果设置，则按给定模式清理所有层名。
+_C.TRAIN.CHECKPOINT_CLEAR_NAME_PATTERN = ()  # 形状/映射说明：("backbone.",)
 
 # ---------------------------------------------------------------------------- #
-# Testing options
+# 测试选项
 # ---------------------------------------------------------------------------- #
 _C.TEST = CfgNode()
 
-# If True test the model, else skip the testing.
+# 为 True 时测试模型，否则跳过测试。
 _C.TEST.ENABLE = True
 
-# Dataset for testing.
+# 测试数据集名称。
 _C.TEST.DATASET = "kinetics"
 
-# Total mini-batch size
+# 测试时的全局 mini-batch 总大小。
 _C.TEST.BATCH_SIZE = 8
 
-# Path to the checkpoint to load the initial weight.
+# 用于加载测试权重的检查点路径。
 _C.TEST.CHECKPOINT_FILE_PATH = ""
 
-# Number of clips to sample from a video uniformly for aggregating the
-# prediction results.
+# 从每个视频中均匀采样多少个片段，用于聚合预测结果。
 _C.TEST.NUM_ENSEMBLE_VIEWS = 10
 
-# Number of crops to sample from a frame spatially for aggregating the
-# prediction results.
+# 从每帧的空间维度采样多少个裁剪区域，用于聚合预测结果。
 _C.TEST.NUM_SPATIAL_CROPS = 3
 
-# Checkpoint types include `caffe2` or `pytorch`.
+# 检查点类型，可选 `caffe2` 或 `pytorch`。
 _C.TEST.CHECKPOINT_TYPE = "pytorch"
-# Path to saving prediction results file.
+# 保存预测结果文件的路径。
 _C.TEST.SAVE_RESULTS_PATH = ""
 # -----------------------------------------------------------------------------
-# ResNet options
+# ResNet 选项
 # -----------------------------------------------------------------------------
 _C.RESNET = CfgNode()
 
-# Transformation function.
+# ResNet block 中使用的变换函数。
 _C.RESNET.TRANS_FUNC = "bottleneck_transform"
 
-# Number of groups. 1 for ResNet, and larger than 1 for ResNeXt).
+# 分组数量；ResNet 为 1，ResNeXt 通常大于 1。
 _C.RESNET.NUM_GROUPS = 1
 
-# Width of each group (64 -> ResNet; 4 -> ResNeXt).
+# 每个分组的通道宽度（64 -> ResNet；4 -> ResNeXt）。
 _C.RESNET.WIDTH_PER_GROUP = 64
 
-# Apply relu in a inplace manner.
+# 是否以原地方式执行 ReLU。
 _C.RESNET.INPLACE_RELU = True
 
-# Apply stride to 1x1 conv.
+# 是否把步幅放在 1x1 卷积上。
 _C.RESNET.STRIDE_1X1 = False
 
-#  If true, initialize the gamma of the final BN of each block to zero.
+# 为 True 时，将每个 block 最后一个 BN 的 gamma 初始化为 0。
 _C.RESNET.ZERO_INIT_FINAL_BN = False
 
-# Number of weight layers.
+# 网络权重层数量。
 _C.RESNET.DEPTH = 50
 
-# If the current block has more than NUM_BLOCK_TEMP_KERNEL blocks, use temporal
-# kernel of 1 for the rest of the blocks.
+# 如果当前 block 数超过 NUM_BLOCK_TEMP_KERNEL，剩余 block 使用 temporal kernel=1。
 _C.RESNET.NUM_BLOCK_TEMP_KERNEL = [[3], [4], [6], [3]]
 
-# Size of stride on different res stages.
+# 不同 ResNet stage 的步幅大小。
 _C.RESNET.SPATIAL_STRIDES = [[1], [2], [2], [2]]
 
-# Size of dilation on different res stages.
+# 不同 ResNet stage 的膨胀系数大小。
 _C.RESNET.SPATIAL_DILATIONS = [[1], [1], [1], [1]]
 
 # ---------------------------------------------------------------------------- #
-# X3D  options
-# See https://arxiv.org/abs/2004.04730 for details about X3D Networks.
+# X3D 选项
+# X3D 网络细节见 https://arxiv.org/abs/2004.04730。
 # ---------------------------------------------------------------------------- #
 _C.X3D = CfgNode()
 
-# Width expansion factor.
+# 宽度扩展因子。
 _C.X3D.WIDTH_FACTOR = 1.0
 
-# Depth expansion factor.
+# 深度扩展因子。
 _C.X3D.DEPTH_FACTOR = 1.0
 
-# Bottleneck expansion factor for the 3x3x3 conv.
+# 3x3x3 卷积的 bottleneck 扩展因子。
 _C.X3D.BOTTLENECK_FACTOR = 1.0  #
 
-# Dimensions of the last linear layer before classificaiton.
+# 分类前最后一个线性层的维度。
 _C.X3D.DIM_C5 = 2048
 
-# Dimensions of the first 3x3 conv layer.
+# 第一个 3x3 卷积层的维度。
 _C.X3D.DIM_C1 = 12
 
-# Whether to scale the width of Res2, default is false.
+# 是否缩放 Res2 的宽度，默认 false。
 _C.X3D.SCALE_RES2 = False
 
-# Whether to use a BatchNorm (BN) layer before the classifier, default is false.
+# 是否在分类器前使用 BatchNorm (BN) 层，默认 false。
 _C.X3D.BN_LIN5 = False
 
-# Whether to use channelwise (=depthwise) convolution in the center (3x3x3)
-# convolution operation of the residual blocks.
+# 是否在 residual blocks 中间的 (3x3x3) 卷积使用逐通道（=depthwise）卷积。
 _C.X3D.CHANNELWISE_3x3x3 = True
 
 # -----------------------------------------------------------------------------
-# Nonlocal options
+# Nonlocal 选项
 # -----------------------------------------------------------------------------
 _C.NONLOCAL = CfgNode()
 
-# Index of each stage and block to add nonlocal layers.
+# 要加入 Nonlocal 层的 stage 和 block 索引。
 _C.NONLOCAL.LOCATION = [[[]], [[]], [[]], [[]]]
 
-# Number of group for nonlocal for each stage.
+# 每个 stage 中 Nonlocal 的分组数量。
 _C.NONLOCAL.GROUP = [[1], [1], [1], [1]]
 
-# Instatiation to use for non-local layer.
+# Nonlocal 层使用的实例化方式。
 _C.NONLOCAL.INSTANTIATION = "dot_product"
 
 
-# Size of pooling layers used in Non-Local.
+# Nonlocal 中使用的池化层大小。
 _C.NONLOCAL.POOL = [
-    # Res2
+    # 中文说明：Res2
     [[1, 2, 2], [1, 2, 2]],
-    # Res3
+    # 中文说明：Res3
     [[1, 2, 2], [1, 2, 2]],
-    # Res4
+    # 中文说明：Res4
     [[1, 2, 2], [1, 2, 2]],
-    # Res5
+    # 中文说明：Res5
     [[1, 2, 2], [1, 2, 2]],
 ]
 
 # -----------------------------------------------------------------------------
-# Model options
+# 模型选项
 # -----------------------------------------------------------------------------
 _C.MODEL = CfgNode()
 
-# Model architecture.
+# 模型架构。
 _C.MODEL.ARCH = "slowfast"
 
-# Model name
+# 模型名称。
 _C.MODEL.MODEL_NAME = "SlowFast"
 
-# The number of classes to predict for the model.
+# 模型要预测的类别数量。
 _C.MODEL.NUM_CLASSES = 400
 
-# Loss function.
+# 损失函数。
 _C.MODEL.LOSS_FUNC = "cross_entropy"
 
-# Model architectures that has one single pathway.
+# 只有单一路径的模型架构。
 _C.MODEL.SINGLE_PATHWAY_ARCH = ["c2d", "i3d", "slow", "x3d"]
 
-# Model architectures that has multiple pathways.
+# 有多条路径的模型架构。
 _C.MODEL.MULTI_PATHWAY_ARCH = ["slowfast"]
 
-# Dropout rate before final projection in the backbone.
+# 主干网络最终投影前的 dropout 比率。
 _C.MODEL.DROPOUT_RATE = 0.5
 
-# Randomly drop rate for Res-blocks, linearly increase from res2 to res5
+# Res-block 的随机丢弃比例，会从 res2 到 res5 线性增加。
 _C.MODEL.DROPCONNECT_RATE = 0.0
 
-# The std to initialize the fc layer(s).
+# 初始化 fc 层时使用的标准差。
 _C.MODEL.FC_INIT_STD = 0.01
 
-# Activation layer for the output head.
+# 输出头的激活层。
 _C.MODEL.HEAD_ACT = "softmax"
 
 
 # -----------------------------------------------------------------------------
-# SlowFast options
+# SlowFast 选项
 # -----------------------------------------------------------------------------
 _C.SLOWFAST = CfgNode()
 
-# Corresponds to the inverse of the channel reduction ratio, $\beta$ between
-# the Slow and Fast pathways.
+# 对应 Slow/Fast 路径之间通道缩减比例 $\beta$ 的倒数。
 _C.SLOWFAST.BETA_INV = 8
 
-# Corresponds to the frame rate reduction ratio, $\alpha$ between the Slow and
-# Fast pathways.
+# 对应 Slow/Fast 路径之间帧率缩减比例 $\alpha$。
 _C.SLOWFAST.ALPHA = 8
 
-# Ratio of channel dimensions between the Slow and Fast pathways.
+# Slow/Fast 路径之间的通道维度比例。
 _C.SLOWFAST.FUSION_CONV_CHANNEL_RATIO = 2
 
-# Kernel dimension used for fusing information from Fast pathway to Slow
-# pathway.
+# 用于把 Fast pathway 信息融合到 Slow pathway 的卷积核尺寸。
 _C.SLOWFAST.FUSION_KERNEL_SZ = 5
 
-####### TimeSformer Options
+####### TimeSformer 选项
 _C.TIMESFORMER = CfgNode()
 _C.TIMESFORMER.ATTENTION_TYPE = 'divided_space_time'
 _C.TIMESFORMER.PRETRAINED_MODEL = ''
 
-## MixUp parameters
+## MixUp 参数
 _C.MIXUP = CfgNode()
 _C.MIXUP.ENABLED = False
 _C.MIXUP.ALPHA = 0.8
@@ -272,68 +263,66 @@ _C.EMA = CfgNode()
 _C.EMA.ENABLED = False
 
 # -----------------------------------------------------------------------------
-# Data options
+# 数据选项
 # -----------------------------------------------------------------------------
 _C.DATA = CfgNode()
 
-# The path to the data directory.
+# 数据目录路径。
 _C.DATA.PATH_TO_DATA_DIR = ""
 
-# The separator used between path and label.
+# 路径和标签之间使用的分隔符。
 _C.DATA.PATH_LABEL_SEPARATOR = " "
 
-# Video path prefix if any.
+# 视频路径前缀（如果有）。
 _C.DATA.PATH_PREFIX = ""
 
-# The spatial crop size of the input clip.
+# 输入片段的空间裁剪尺寸。
 _C.DATA.CROP_SIZE = 224
 
-# The number of frames of the input clip.
+# 输入片段的帧数。
 _C.DATA.NUM_FRAMES = 8
 
-# The video sampling rate of the input clip.
+# 输入片段的视频采样间隔。
 _C.DATA.SAMPLING_RATE = 8
 
-# The mean value of the video raw pixels across the R G B channels.
+# 视频原始像素在 R/G/B 通道上的均值。
 _C.DATA.MEAN = [0.45, 0.45, 0.45]
-# List of input frame channel dimensions.
+# 输入帧通道维度列表。
 
 _C.DATA.INPUT_CHANNEL_NUM = [3, 3]
 
-# The std value of the video raw pixels across the R G B channels.
+# 视频原始像素在 R/G/B 通道上的标准差。
 _C.DATA.STD = [0.225, 0.225, 0.225]
 
-# The spatial augmentation jitter scales for training.
+# 训练时空间增强的抖动尺度范围。
 _C.DATA.TRAIN_JITTER_SCALES = [256, 320]
 
-# The spatial crop size for training.
+# 训练时的空间裁剪尺寸。
 _C.DATA.TRAIN_CROP_SIZE = 224
 
-# The spatial crop size for testing.
+# 测试时的空间裁剪尺寸。
 _C.DATA.TEST_CROP_SIZE = 256
 
-# Input videos may has different fps, convert it to the target video fps before
-# frame sampling.
+# 输入视频可能有不同 fps，采样帧之前先转换到目标视频 fps。
 _C.DATA.TARGET_FPS = 30
 
-# Decoding backend, options include `pyav` or `torchvision`
+# 解码后端，可选 `pyav` 或 `torchvision`。
 _C.DATA.DECODING_BACKEND = "pyav"
 
-# if True, sample uniformly in [1 / max_scale, 1 / min_scale] and take a
-# reciprocal to get the scale. If False, take a uniform sample from
-# [min_scale, max_scale].
+# 如果为 True，在 [1 / max_scale, 1 / min_scale] 中均匀采样后取倒数得到 scale；
+# 如果为 False，直接在 [min_scale, max_scale] 中均匀采样。
 _C.DATA.INV_UNIFORM_SAMPLE = False
 
-# If True, perform random horizontal flip on the video frames during training.
+# 为 True 时，训练期间对视频帧执行随机水平翻转。
 _C.DATA.RANDOM_FLIP = True
 
-# If True, calculdate the map as metric.
+# 为 True 时，使用 mAP 作为指标。
 _C.DATA.MULTI_LABEL = False
 
-# Method to perform the ensemble, options include "sum" and "max".
+# 集成方法，可选 "sum" 和 "max"。
 _C.DATA.ENSEMBLE_METHOD = "sum"
 
-# If True, revert the default input channel (RBG <-> BGR).
+# 为 True 时，反转默认输入通道顺序（RBG <-> BGR）。
 _C.DATA.REVERSE_INPUT_CHANNEL = False
 
 ############
@@ -344,234 +333,231 @@ _C.DATA.AUTO_AUGMENT = ''
 _C.DATA.RE_PROB = 0.0
 
 # ---------------------------------------------------------------------------- #
-# Optimizer options
+# 优化器选项
 # ---------------------------------------------------------------------------- #
 _C.SOLVER = CfgNode()
 
-# Base learning rate.
+# 基础学习率。
 _C.SOLVER.BASE_LR = 0.1
 
-# Learning rate policy (see utils/lr_policy.py for options and examples).
+# 学习率策略（选项和示例见 utils/lr_policy.py）。
 _C.SOLVER.LR_POLICY = "cosine"
 
-# Final learning rates for 'cosine' policy.
+# 'cosine' 策略的最终学习率。
 _C.SOLVER.COSINE_END_LR = 0.0
 
-# Exponential decay factor.
+# 指数衰减因子。
 _C.SOLVER.GAMMA = 0.1
 
-# Step size for 'exp' and 'cos' policies (in epochs).
+# 'exp' 和 'cos' 策略的步长（单位：epoch）。
 _C.SOLVER.STEP_SIZE = 1
 
-# Steps for 'steps_' policies (in epochs).
+# 'steps_' 策略的步点（单位：epoch）。
 _C.SOLVER.STEPS = []
 
-# Learning rates for 'steps_' policies.
+# 'steps_' 策略对应的学习率列表。
 _C.SOLVER.LRS = []
 
-# Maximal number of epochs.
+# 最大 epoch 数。
 _C.SOLVER.MAX_EPOCH = 300
 
-# Momentum.
+# 中文说明：Momentum。
 _C.SOLVER.MOMENTUM = 0.9
 
-# Momentum dampening.
+# 中文说明：Momentum dampening。
 _C.SOLVER.DAMPENING = 0.0
 
-# Nesterov momentum.
+# 是否使用 Nesterov momentum。
 _C.SOLVER.NESTEROV = True
 
-# L2 regularization.
+# L2 正则化。
 _C.SOLVER.WEIGHT_DECAY = 1e-4
 
-# Start the warm up from SOLVER.BASE_LR * SOLVER.WARMUP_FACTOR.
+# 预热从 SOLVER.BASE_LR * SOLVER.WARMUP_FACTOR 开始。
 _C.SOLVER.WARMUP_FACTOR = 0.1
 
-# Gradually warm up the SOLVER.BASE_LR over this number of epochs.
+# 用这些 epoch 逐步预热到 SOLVER.BASE_LR。
 _C.SOLVER.WARMUP_EPOCHS = 0.0
 
-# The start learning rate of the warm up.
+# 预热的起始学习率。
 _C.SOLVER.WARMUP_START_LR = 0.01
 
-# Optimization method.
+# 优化方法。
 _C.SOLVER.OPTIMIZING_METHOD = "sgd"
 
-# Base learning rate is linearly scaled with NUM_SHARDS.
+# 基础学习率是否随 NUM_SHARDS 线性缩放。
 _C.SOLVER.BASE_LR_SCALE_NUM_SHARDS = False
 
 # ---------------------------------------------------------------------------- #
-# Misc options
+# 其他选项
 # ---------------------------------------------------------------------------- #
 
-# Number of GPUs to use (applies to both training and testing).
+# 使用的 GPU 数量（训练和测试都会用到）。
 _C.NUM_GPUS = 1
 
-# Number of machine to use for the job.
+# 本任务使用的机器数量。
 _C.NUM_SHARDS = 1
 
-# The index of the current machine.
+# 当前机器的索引。
 _C.SHARD_ID = 0
 
-# Output basedir.
+# 输出根目录。
 _C.OUTPUT_DIR = "./tmp"
 
-# Note that non-determinism may still be present due to non-deterministic
-# operator implementations in GPU operator libraries.
+# 注意：GPU 算子库中某些算子实现仍可能带来非确定性。
 _C.RNG_SEED = 1
 
-# Log period in iters.
+# 日志记录间隔（单位：iter）。
 _C.LOG_PERIOD = 10
 
-# If True, log the model info.
+# 为 True 时记录模型信息。
 _C.LOG_MODEL_INFO = False
 
-# Distributed backend.
+# 分布式后端。
 _C.DIST_BACKEND = "nccl"
 
-# Global batch size
+# 全局 batch 大小。
 _C.GLOBAL_BATCH_SIZE = 64
 
 # ---------------------------------------------------------------------------- #
-# Benchmark options
+# 基准测试选项
 # ---------------------------------------------------------------------------- #
 _C.BENCHMARK = CfgNode()
 
-# Number of epochs for data loading benchmark.
+# 数据加载基准测试的 epoch 数。
 _C.BENCHMARK.NUM_EPOCHS = 5
 
-# Log period in iters for data loading benchmark.
+# 数据加载基准测试的日志间隔（单位：iter）。
 _C.BENCHMARK.LOG_PERIOD = 100
 
-# If True, shuffle dataloader for epoch during benchmark.
+# 为 True 时，基准测试期间每个 epoch 都打乱数据加载器。
 _C.BENCHMARK.SHUFFLE = True
 
 
 # ---------------------------------------------------------------------------- #
-# Common train/test data loader options
+# 训练/测试通用数据加载器选项
 # ---------------------------------------------------------------------------- #
 _C.DATA_LOADER = CfgNode()
 
-# Number of data loader workers per training process.
+# 每个训练进程使用的数据加载器 worker 数量。
 _C.DATA_LOADER.NUM_WORKERS = 8
 
-# Load data to pinned host memory.
+# 是否把数据加载到固定页主机内存。
 _C.DATA_LOADER.PIN_MEMORY = True
 
-# Enable multi thread decoding.
+# 是否启用多线程解码。
 _C.DATA_LOADER.ENABLE_MULTI_THREAD_DECODE = False
 
 
 # ---------------------------------------------------------------------------- #
-# Detection options.
+# 检测选项
 # ---------------------------------------------------------------------------- #
 _C.DETECTION = CfgNode()
 
-# Whether enable video detection.
+# 是否启用视频检测。
 _C.DETECTION.ENABLE = False
 
-# Aligned version of RoI. More details can be found at slowfast/models/head_helper.py
+# RoI 的对齐版本，更多细节见 slowfast/models/head_helper.py。
 _C.DETECTION.ALIGNED = True
 
-# Spatial scale factor.
+# 空间缩放因子。
 _C.DETECTION.SPATIAL_SCALE_FACTOR = 16
 
-# RoI tranformation resolution.
+# RoI 变换的输出分辨率。
 _C.DETECTION.ROI_XFORM_RESOLUTION = 7
 
 
 # -----------------------------------------------------------------------------
-# AVA Dataset options
+# AVA 数据集选项
 # -----------------------------------------------------------------------------
 _C.AVA = CfgNode()
 
-# Directory path of frames.
+# 帧目录路径。
 _C.AVA.FRAME_DIR = ""
 
-# Directory path for files of frame lists.
+# 帧列表文件所在目录。
 _C.AVA.FRAME_LIST_DIR = (
     ""
 )
 
-# Directory path for annotation files.
+# 标注文件所在目录。
 _C.AVA.ANNOTATION_DIR = (
     ""
 )
 
-# Filenames of training samples list files.
+# 训练样本列表文件名。
 _C.AVA.TRAIN_LISTS = ["train.csv"]
 
-# Filenames of test samples list files.
+# 测试样本列表文件名。
 _C.AVA.TEST_LISTS = ["val.csv"]
 
-# Filenames of box list files for training. Note that we assume files which
-# contains predicted boxes will have a suffix "predicted_boxes" in the
-# filename.
+# 训练用框列表文件名。这里假设包含预测框的文件名会带有
+# "predicted_boxes" 后缀。
 _C.AVA.TRAIN_GT_BOX_LISTS = ["ava_train_v2.2.csv"]
 _C.AVA.TRAIN_PREDICT_BOX_LISTS = []
 
-# Filenames of box list files for test.
+# 测试用框列表文件名。
 _C.AVA.TEST_PREDICT_BOX_LISTS = ["ava_val_predicted_boxes.csv"]
 
-# This option controls the score threshold for the predicted boxes to use.
+# 使用预测框时的分数阈值。
 _C.AVA.DETECTION_SCORE_THRESH = 0.9
 
-# If use BGR as the format of input frames.
+# 输入帧是否使用 BGR 格式。
 _C.AVA.BGR = False
 
-# Training augmentation parameters
-# Whether to use color augmentation method.
+# 训练增强参数。
+# 是否使用颜色增强方法。
 _C.AVA.TRAIN_USE_COLOR_AUGMENTATION = False
 
-# Whether to only use PCA jitter augmentation when using color augmentation
-# method (otherwise combine with color jitter method).
+# 使用颜色增强时，是否只使用 PCA 抖动；否则会与颜色抖动组合使用。
 _C.AVA.TRAIN_PCA_JITTER_ONLY = True
 
-# Eigenvalues for PCA jittering. Note PCA is RGB based.
+# PCA 抖动的特征值。注意 PCA 基于 RGB。
 _C.AVA.TRAIN_PCA_EIGVAL = [0.225, 0.224, 0.229]
 
-# Eigenvectors for PCA jittering.
+# PCA 抖动的特征向量。
 _C.AVA.TRAIN_PCA_EIGVEC = [
     [-0.5675, 0.7192, 0.4009],
     [-0.5808, -0.0045, -0.8140],
     [-0.5836, -0.6948, 0.4203],
 ]
 
-# Whether to do horizontal flipping during test.
+# 测试期间是否执行水平翻转。
 _C.AVA.TEST_FORCE_FLIP = False
 
-# Whether to use full test set for validation split.
+# 是否在验证划分上使用完整测试集。
 _C.AVA.FULL_TEST_ON_VAL = False
 
-# The name of the file to the ava label map.
+# AVA 标签映射文件名。
 _C.AVA.LABEL_MAP_FILE = "ava_action_list_v2.2_for_activitynet_2019.pbtxt"
 
-# The name of the file to the ava exclusion.
+# AVA 排除列表文件名。
 _C.AVA.EXCLUSION_FILE = "ava_val_excluded_timestamps_v2.2.csv"
 
-# The name of the file to the ava groundtruth.
+# AVA 真值文件名。
 _C.AVA.GROUNDTRUTH_FILE = "ava_val_v2.2.csv"
 
-# Backend to process image, includes `pytorch` and `cv2`.
+# 图像处理后端，包括 `pytorch` 和 `cv2`。
 _C.AVA.IMG_PROC_BACKEND = "cv2"
 
 # ---------------------------------------------------------------------------- #
-# Multigrid training options
-# See https://arxiv.org/abs/1912.00998 for details about multigrid training.
+# Multigrid 训练选项
+# Multigrid 训练细节见 https://arxiv.org/abs/1912.00998。
 # ---------------------------------------------------------------------------- #
 _C.MULTIGRID = CfgNode()
 
-# Multigrid training allows us to train for more epochs with fewer iterations.
-# This hyperparameter specifies how many times more epochs to train.
-# The default setting in paper trains for 1.5x more epochs than baseline.
+# Multigrid 训练允许用更少迭代训练更多 epoch。
+# 该超参数指定训练 epoch 数相比基线增加多少倍。
+# 论文默认设置为基线的 1.5 倍。
 _C.MULTIGRID.EPOCH_FACTOR = 1.5
 
-# Enable short cycles.
+# 是否启用短周期。
 _C.MULTIGRID.SHORT_CYCLE = False
-# Short cycle additional spatial dimensions relative to the default crop size.
+# 短周期相对默认裁剪尺寸的额外空间尺寸比例。
 _C.MULTIGRID.SHORT_CYCLE_FACTORS = [0.5, 0.5 ** 0.5]
 
 _C.MULTIGRID.LONG_CYCLE = False
-# (Temporal, Spatial) dimensions relative to the default shape.
+# 相对默认形状的 (Temporal, Spatial) 维度比例。
 _C.MULTIGRID.LONG_CYCLE_FACTORS = [
     (0.25, 0.5 ** 0.5),
     (0.5, 0.5 ** 0.5),
@@ -579,198 +565,183 @@ _C.MULTIGRID.LONG_CYCLE_FACTORS = [
     (1, 1),
 ]
 
-# While a standard BN computes stats across all examples in a GPU,
-# for multigrid training we fix the number of clips to compute BN stats on.
-# See https://arxiv.org/abs/1912.00998 for details.
+# 标准 BN 会在单个 GPU 的所有样本上计算统计量；Multigrid 训练中，我们固定用于
+# 计算 BN 统计量的片段数量。细节见 https://arxiv.org/abs/1912.00998。
 _C.MULTIGRID.BN_BASE_SIZE = 8
 
-# Multigrid training epochs are not proportional to actual training time or
-# computations, so _C.TRAIN.EVAL_PERIOD leads to too frequent or rare
-# evaluation. We use a multigrid-specific rule to determine when to evaluate:
-# This hyperparameter defines how many times to evaluate a model per long
-# cycle shape.
+# Multigrid 训练的 epoch 与实际训练时间/计算量不成比例，因此 _C.TRAIN.EVAL_PERIOD
+# 可能导致评估过于频繁或稀疏。这里使用 multigrid 专用规则决定何时评估：
+# 该超参数定义每个长周期形状内评估模型的次数。
 _C.MULTIGRID.EVAL_FREQ = 3
 
-# No need to specify; Set automatically and used as global variables.
+# 无需手动指定；会自动设置并作为全局变量使用。
 _C.MULTIGRID.LONG_CYCLE_SAMPLING_RATE = 0
 _C.MULTIGRID.DEFAULT_B = 0
 _C.MULTIGRID.DEFAULT_T = 0
 _C.MULTIGRID.DEFAULT_S = 0
 
 # -----------------------------------------------------------------------------
-# Tensorboard Visualization Options
+# Tensorboard 可视化选项
 # -----------------------------------------------------------------------------
 _C.TENSORBOARD = CfgNode()
 
-# Log to summary writer, this will automatically.
-# log loss, lr and metrics during train/eval.
+# 写入摘要写入器；训练/评估期间会自动记录 loss、lr 和指标。
 _C.TENSORBOARD.ENABLE = False
-# Provide path to prediction results for visualization.
-# This is a pickle file of [prediction_tensor, label_tensor]
+# 提供用于可视化的预测结果路径。
+# 这是包含 [prediction_tensor, label_tensor] 的 pickle 文件。
 _C.TENSORBOARD.PREDICTIONS_PATH = ""
-# Path to directory for tensorboard logs.
-# Default to to cfg.OUTPUT_DIR/runs-{cfg.TRAIN.DATASET}.
+# Tensorboard 日志目录路径。
+# 默认是 cfg.OUTPUT_DIR/runs-{cfg.TRAIN.DATASET}。
 _C.TENSORBOARD.LOG_DIR = ""
-# Path to a json file providing class_name - id mapping
-# in the format {"class_name1": id1, "class_name2": id2, ...}.
-# This file must be provided to enable plotting confusion matrix
-# by a subset or parent categories.
+# 提供类别名称到 id 映射的 json 文件路径，格式为
+# 中文说明：{"class_name1": id1, "class_name2": id2, ...}。
+# 如需按子集或父类别绘制混淆矩阵，必须提供该文件。
 _C.TENSORBOARD.CLASS_NAMES_PATH = ""
 
-# Path to a json file for categories -> classes mapping
-# in the format {"parent_class": ["child_class1", "child_class2",...], ...}.
+# 类别组到类别列表映射的 json 文件路径，格式为
+# 中文说明：{"parent_class": ["child_class1", "child_class2",...], ...}。
 _C.TENSORBOARD.CATEGORIES_PATH = ""
 
-# Config for confusion matrices visualization.
+# 混淆矩阵可视化配置。
 _C.TENSORBOARD.CONFUSION_MATRIX = CfgNode()
-# Visualize confusion matrix.
+# 是否可视化混淆矩阵。
 _C.TENSORBOARD.CONFUSION_MATRIX.ENABLE = False
-# Figure size of the confusion matrices plotted.
+# 绘制混淆矩阵的图像尺寸。
 _C.TENSORBOARD.CONFUSION_MATRIX.FIGSIZE = [8, 8]
-# Path to a subset of categories to visualize.
-# File contains class names separated by newline characters.
+# 要可视化的类别子集路径。
+# 文件中用换行符分隔类别名称。
 _C.TENSORBOARD.CONFUSION_MATRIX.SUBSET_PATH = ""
 
-# Config for histogram visualization.
+# 直方图可视化配置。
 _C.TENSORBOARD.HISTOGRAM = CfgNode()
-# Visualize histograms.
+# 是否可视化直方图。
 _C.TENSORBOARD.HISTOGRAM.ENABLE = False
-# Path to a subset of classes to plot histograms.
-# Class names must be separated by newline characters.
+# 要绘制直方图的类别子集路径。
+# 类别名称必须用换行符分隔。
 _C.TENSORBOARD.HISTOGRAM.SUBSET_PATH = ""
-# Visualize top-k most predicted classes on histograms for each
-# chosen true label.
+# 对每个选定 true label，在直方图上可视化预测最多的 top-k 类。
 _C.TENSORBOARD.HISTOGRAM.TOPK = 10
-# Figure size of the histograms plotted.
+# 绘制直方图的图像尺寸。
 _C.TENSORBOARD.HISTOGRAM.FIGSIZE = [8, 8]
 
-# Config for layers' weights and activations visualization.
-# _C.TENSORBOARD.ENABLE must be True.
+# 层的权重和激活可视化配置。
+# _C.TENSORBOARD.ENABLE 必须为 True。
 _C.TENSORBOARD.MODEL_VIS = CfgNode()
 
-# If False, skip model visualization.
+# 如果为 False，跳过模型可视化。
 _C.TENSORBOARD.MODEL_VIS.ENABLE = False
 
-# If False, skip visualizing model weights.
+# 如果为 False，跳过模型权重可视化。
 _C.TENSORBOARD.MODEL_VIS.MODEL_WEIGHTS = False
 
-# If False, skip visualizing model activations.
+# 如果为 False，跳过模型激活可视化。
 _C.TENSORBOARD.MODEL_VIS.ACTIVATIONS = False
 
-# If False, skip visualizing input videos.
+# 如果为 False，跳过输入视频可视化。
 _C.TENSORBOARD.MODEL_VIS.INPUT_VIDEO = False
 
 
-# List of strings containing data about layer names and their indexing to
-# visualize weights and activations for. The indexing is meant for
-# choosing a subset of activations outputed by a layer for visualization.
-# If indexing is not specified, visualize all activations outputed by the layer.
-# For each string, layer name and indexing is separated by whitespaces.
-# e.g.: [layer1 1,2;1,2, layer2, layer3 150,151;3,4]; this means for each array `arr`
-# along the batch dimension in `layer1`, we take arr[[1, 2], [1, 2]]
+# 字符串列表，描述要可视化权重和激活的层名及其索引。
+# 索引用来选择某一层输出激活的子集进行可视化。
+# 如果未指定索引，则可视化该层输出的所有激活。
+# 每个字符串中，层名和索引用空白字符分隔。
+# 例如：[layer1 1,2;1,2, layer2, layer3 150,151;3,4]；
+# 这表示对 `layer1` 中沿 batch 维度的每个数组 `arr`，取 arr[[1, 2], [1, 2]]。
 _C.TENSORBOARD.MODEL_VIS.LAYER_LIST = []
-# Top-k predictions to plot on videos
+# 在视频上绘制的 top-k 预测数量。
 _C.TENSORBOARD.MODEL_VIS.TOPK_PREDS = 1
-# Colormap to for text boxes and bounding boxes colors
+# 文本框和边界框使用的色彩映射。
 _C.TENSORBOARD.MODEL_VIS.COLORMAP = "Pastel2"
-# Config for visualization video inputs with Grad-CAM.
-# _C.TENSORBOARD.ENABLE must be True.
+# 使用 Grad-CAM 可视化视频输入的配置。
+# _C.TENSORBOARD.ENABLE 必须为 True。
 _C.TENSORBOARD.MODEL_VIS.GRAD_CAM = CfgNode()
-# Whether to run visualization using Grad-CAM technique.
+# 是否使用 Grad-CAM 技术运行可视化。
 _C.TENSORBOARD.MODEL_VIS.GRAD_CAM.ENABLE = True
-# CNN layers to use for Grad-CAM. The number of layers must be equal to
-# number of pathway(s).
+# Grad-CAM 使用的 CNN 层。层数量必须等于路径数量。
 _C.TENSORBOARD.MODEL_VIS.GRAD_CAM.LAYER_LIST = []
-# If True, visualize Grad-CAM using true labels for each instances.
-# If False, use the highest predicted class.
+# 如果为 True，使用每个实例的 true labels 可视化 Grad-CAM。
+# 如果为 False，使用预测分数最高的类别。
 _C.TENSORBOARD.MODEL_VIS.GRAD_CAM.USE_TRUE_LABEL = False
-# Colormap to for text boxes and bounding boxes colors
+# 文本框和边界框使用的色彩映射。
 _C.TENSORBOARD.MODEL_VIS.GRAD_CAM.COLORMAP = "viridis"
 
-# Config for visualization for wrong prediction visualization.
-# _C.TENSORBOARD.ENABLE must be True.
+# 错误预测可视化配置。
+# _C.TENSORBOARD.ENABLE 必须为 True。
 _C.TENSORBOARD.WRONG_PRED_VIS = CfgNode()
 _C.TENSORBOARD.WRONG_PRED_VIS.ENABLE = False
-# Folder tag to origanize model eval videos under.
+# 用于组织模型评估视频的文件夹标签。
 _C.TENSORBOARD.WRONG_PRED_VIS.TAG = "Incorrectly classified videos."
-# Subset of labels to visualize. Only wrong predictions with true labels
-# within this subset is visualized.
+# 要可视化的标签子集。只会可视化 true labels 落在该子集中的错误预测。
 _C.TENSORBOARD.WRONG_PRED_VIS.SUBSET_PATH = ""
 
 
 # ---------------------------------------------------------------------------- #
-# Demo options
+# 演示选项
 # ---------------------------------------------------------------------------- #
 _C.DEMO = CfgNode()
 
-# Run model in DEMO mode.
+# 是否以 DEMO 模式运行模型。
 _C.DEMO.ENABLE = False
 
-# Path to a json file providing class_name - id mapping
-# in the format {"class_name1": id1, "class_name2": id2, ...}.
+# 提供类别名称到 id 映射的 json 文件路径，格式为
+# 中文说明：{"class_name1": id1, "class_name2": id2, ...}。
 _C.DEMO.LABEL_FILE_PATH = ""
 
-# Specify a camera device as input. This will be prioritized
-# over input video if set.
-# If -1, use input video instead.
+# 指定摄像头设备作为输入；如果设置，会优先于输入视频。
+# 如果为 -1，则改用输入视频。
 _C.DEMO.WEBCAM = -1
 
-# Path to input video for demo.
+# 演示输入视频路径。
 _C.DEMO.INPUT_VIDEO = ""
-# Custom width for reading input video data.
+# 读取输入视频数据时使用的自定义宽度。
 _C.DEMO.DISPLAY_WIDTH = 0
-# Custom height for reading input video data.
+# 读取输入视频数据时使用的自定义高度。
 _C.DEMO.DISPLAY_HEIGHT = 0
-# Path to Detectron2 object detection model configuration,
-# only used for detection tasks.
+# Detectron2 目标检测模型配置路径，仅检测任务使用。
 _C.DEMO.DETECTRON2_CFG = "COCO-Detection/faster_rcnn_R_50_FPN_3x.yaml"
-# Path to Detectron2 object detection model pre-trained weights.
+# Detectron2 目标检测模型预训练权重路径。
 _C.DEMO.DETECTRON2_WEIGHTS = "detectron2://COCO-Detection/faster_rcnn_R_50_FPN_3x/137849458/model_final_280758.pkl"
-# Threshold for choosing predicted bounding boxes by Detectron2.
+# Detectron2 选择预测边界框时使用的阈值。
 _C.DEMO.DETECTRON2_THRESH = 0.9
-# Number of overlapping frames between 2 consecutive clips.
-# Increase this number for more frequent action predictions.
-# The number of overlapping frames cannot be larger than
-# half of the sequence length `cfg.DATA.NUM_FRAMES * cfg.DATA.SAMPLING_RATE`
+# 两个连续片段之间的重叠帧数。
+# 增大该值可获得更频繁的动作预测。
+# 重叠帧数不能大于序列长度 `cfg.DATA.NUM_FRAMES * cfg.DATA.SAMPLING_RATE` 的一半。
 _C.DEMO.BUFFER_SIZE = 0
-# If specified, the visualized outputs will be written this a video file of
-# this path. Otherwise, the visualized outputs will be displayed in a window.
+# 如果指定，可视化输出会写入该路径的视频文件；否则会在窗口中显示。
 _C.DEMO.OUTPUT_FILE = ""
-# Frames per second rate for writing to output video file.
-# If not set (-1), use fps rate from input file.
+# 写入输出视频文件时使用的每秒帧数。
+# 如果未设置（-1），使用输入文件的 fps。
 _C.DEMO.OUTPUT_FPS = -1
-# Input format from demo video reader ("RGB" or "BGR").
+# 演示视频读取器输出的输入格式（"RGB" 或 "BGR"）。
 _C.DEMO.INPUT_FORMAT = "BGR"
-# Draw visualization frames in [keyframe_idx - CLIP_VIS_SIZE, keyframe_idx + CLIP_VIS_SIZE] inclusively.
+# 在闭区间 [keyframe_idx - CLIP_VIS_SIZE, keyframe_idx + CLIP_VIS_SIZE] 内绘制可视化帧。
 _C.DEMO.CLIP_VIS_SIZE = 10
-# Number of processes to run video visualizer.
+# 运行视频可视化器的进程数。
 _C.DEMO.NUM_VIS_INSTANCES = 2
 
-# Path to pre-computed predicted boxes
+# 预先计算的预测框路径。
 _C.DEMO.PREDS_BOXES = ""
-# Whether to run in with multi-threaded video reader.
+# 是否使用多线程视频读取器运行。
 _C.DEMO.THREAD_ENABLE = False
-# Take one clip for every `DEMO.NUM_CLIPS_SKIP` + 1 for prediction and visualization.
-# This is used for fast demo speed by reducing the prediction/visualiztion frequency.
-# If -1, take the most recent read clip for visualization. This mode is only supported
-# if `DEMO.THREAD_ENABLE` is set to True.
+# 每隔 `DEMO.NUM_CLIPS_SKIP` + 1 个片段取一个用于预测和可视化。
+# 这会通过降低预测/可视化频率来加快演示速度。
+# 如果为 -1，则取最近读取的片段进行可视化。该模式仅在
+# `DEMO.THREAD_ENABLE` 为 True 时支持。
 _C.DEMO.NUM_CLIPS_SKIP = 0
-# Path to ground-truth boxes and labels (optional)
+# 真值框和标签的路径（可选）。
 _C.DEMO.GT_BOXES = ""
-# The starting second of the video w.r.t bounding boxes file.
+# 视频相对于边界框文件的起始秒数。
 _C.DEMO.STARTING_SECOND = 900
-# Frames per second of the input video/folder of images.
+# 输入视频或图像文件夹的 fps。
 _C.DEMO.FPS = 30
-# Visualize with top-k predictions or predictions above certain threshold(s).
-# Option: {"thres", "top-k"}
+# 使用 top-k 预测或高于特定阈值的预测进行可视化。
+# 选项：{"thres", "top-k"}。
 _C.DEMO.VIS_MODE = "thres"
-# Threshold for common class names.
+# 常见类别名称的阈值。
 _C.DEMO.COMMON_CLASS_THRES = 0.7
-# Theshold for uncommon class names. This will not be
-# used if `_C.DEMO.COMMON_CLASS_NAMES` is empty.
+# 非常见类别名称的阈值。如果 `_C.DEMO.COMMON_CLASS_NAMES` 为空，则不会使用。
 _C.DEMO.UNCOMMON_CLASS_THRES = 0.3
-# This is chosen based on distribution of examples in
-# each classes in AVA dataset.
+# 该列表根据 AVA 数据集中各类别样本分布选择。
 _C.DEMO.COMMON_CLASS_NAMES = [
     "watch (a person)",
     "talk to (e.g., self, a person, a group)",
@@ -782,39 +753,39 @@ _C.DEMO.COMMON_CLASS_NAMES = [
     "lie/sleep",
     "bend/bow (at the waist)",
 ]
-# Slow-motion rate for the visualization. The visualized portions of the
-# video will be played `_C.DEMO.SLOWMO` times slower than usual speed.
+# 可视化的慢放倍率。视频中被可视化的部分会比正常速度慢 `_C.DEMO.SLOWMO` 倍播放。
 _C.DEMO.SLOWMO = 1
 
 def _assert_and_infer_cfg(cfg):
-    # BN assertions.
+    """检查配置值是否合法，并根据需要推断派生配置。"""
+    # BN 断言。
     if cfg.BN.USE_PRECISE_STATS:
         assert cfg.BN.NUM_BATCHES_PRECISE >= 0
-    # TRAIN assertions.
+    # TRAIN 断言。
     assert cfg.TRAIN.CHECKPOINT_TYPE in ["pytorch", "caffe2"]
     assert cfg.TRAIN.BATCH_SIZE % cfg.NUM_GPUS == 0
 
-    # TEST assertions.
+    # TEST 断言。
     assert cfg.TEST.CHECKPOINT_TYPE in ["pytorch", "caffe2"]
     assert cfg.TEST.BATCH_SIZE % cfg.NUM_GPUS == 0
     assert cfg.TEST.NUM_SPATIAL_CROPS == 3
 
-    # RESNET assertions.
+    # RESNET 断言。
     assert cfg.RESNET.NUM_GROUPS > 0
     assert cfg.RESNET.WIDTH_PER_GROUP > 0
     assert cfg.RESNET.WIDTH_PER_GROUP % cfg.RESNET.NUM_GROUPS == 0
 
-    # Execute LR scaling by num_shards.
+    # 按 num_shards 执行学习率缩放。
     if cfg.SOLVER.BASE_LR_SCALE_NUM_SHARDS:
         cfg.SOLVER.BASE_LR *= cfg.NUM_SHARDS
 
-    # General assertions.
+    # 通用断言。
     assert cfg.SHARD_ID < cfg.NUM_SHARDS
     return cfg
 
 
 def get_cfg():
     """
-    Get a copy of the default config.
+    获取默认配置的一份拷贝。
     """
     return _assert_and_infer_cfg(_C.clone())

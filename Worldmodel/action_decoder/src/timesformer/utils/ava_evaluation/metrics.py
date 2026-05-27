@@ -13,46 +13,33 @@
 # limitations under the License.
 # ==============================================================================
 
-"""Functions for computing metrics like precision, recall, CorLoc and etc."""
+"""检测或分类指标计算工具。"""
 from __future__ import division
 import numpy as np
 
 
 def compute_precision_recall(scores, labels, num_gt):
-    """Compute precision and recall.
+    """根据分数和真阳性/假阳性标记计算 precision/recall 曲线。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
 
-  Args:
-    scores: A float numpy array representing detection score
-    labels: A boolean numpy array representing true/false positive labels
-    num_gt: Number of ground truth instances
-
-  Raises:
-    ValueError: if the input is not of the correct format
-
-  Returns:
-    precision: Fraction of positive instances over detected ones. This value is
-      None if no ground truth labels are present.
-    recall: Fraction of detected positive instance over all positive instances.
-      This value is None if no ground truth labels are present.
-
-  """
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
+    """
     if (
         not isinstance(labels, np.ndarray)
         or labels.dtype != np.bool
         or len(labels.shape) != 1
     ):
-        raise ValueError("labels must be single dimension bool numpy array")
+        raise ValueError("labels 必须是一维 bool numpy array。")
 
     if not isinstance(scores, np.ndarray) or len(scores.shape) != 1:
-        raise ValueError("scores must be single dimension numpy array")
+        raise ValueError("scores 必须是一维 numpy array。")
 
     if num_gt < np.sum(labels):
         raise ValueError(
-            "Number of true positives must be smaller than num_gt."
+            "真阳性的数量不能超过 num_gt。"
         )
 
     if len(scores) != len(labels):
-        raise ValueError("scores and labels must be of the same size.")
+        raise ValueError("scores 和 labels 的长度必须一致。")
 
     if num_gt == 0:
         return None, None
@@ -72,49 +59,36 @@ def compute_precision_recall(scores, labels, num_gt):
 
 
 def compute_average_precision(precision, recall):
-    """Compute Average Precision according to the definition in VOCdevkit.
+    """按照 VOC 定义对 precision/recall 曲线积分得到 AP。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
 
-  Precision is modified to ensure that it does not decrease as recall
-  decrease.
-
-  Args:
-    precision: A float [N, 1] numpy array of precisions
-    recall: A float [N, 1] numpy array of recalls
-
-  Raises:
-    ValueError: if the input is not of the correct format
-
-  Returns:
-    average_precison: The area under the precision recall curve. NaN if
-      precision and recall are None.
-
-  """
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
+    """
     if precision is None:
         if recall is not None:
-            raise ValueError("If precision is None, recall must also be None")
+            raise ValueError("如果 precision 为 None，recall 也必须为 None。")
         return np.NAN
 
     if not isinstance(precision, np.ndarray) or not isinstance(
         recall, np.ndarray
     ):
-        raise ValueError("precision and recall must be numpy array")
+        raise ValueError("precision 和 recall 必须是 numpy array。")
     if precision.dtype != np.float or recall.dtype != np.float:
-        raise ValueError("input must be float numpy array.")
+        raise ValueError("输入必须是 float numpy array。")
     if len(precision) != len(recall):
-        raise ValueError("precision and recall must be of the same size.")
+        raise ValueError("precision 和 recall 的长度必须一致。")
     if not precision.size:
         return 0.0
     if np.amin(precision) < 0 or np.amax(precision) > 1:
-        raise ValueError("Precision must be in the range of [0, 1].")
+        raise ValueError("precision 必须位于 [0, 1] 范围内。")
     if np.amin(recall) < 0 or np.amax(recall) > 1:
-        raise ValueError("recall must be in the range of [0, 1].")
+        raise ValueError("recall 必须位于 [0, 1] 范围内。")
     if not all(recall[i] <= recall[i + 1] for i in range(len(recall) - 1)):
-        raise ValueError("recall must be a non-decreasing array")
+        raise ValueError("recall 必须是非递减数组。")
 
     recall = np.concatenate([[0], recall, [1]])
     precision = np.concatenate([[0], precision, [0]])
 
-    # Preprocess precision to be a non-decreasing array
+    # 预处理 precision，使其成为非递减数组。
     for i in range(len(precision) - 2, -1, -1):
         precision[i] = np.maximum(precision[i], precision[i + 1])
 
@@ -128,24 +102,11 @@ def compute_average_precision(precision, recall):
 def compute_cor_loc(
     num_gt_imgs_per_class, num_images_correctly_detected_per_class
 ):
-    """Compute CorLoc according to the definition in the following paper.
+    """计算 CorLoc 指标，用于弱监督检测场景。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
 
-  https://www.robots.ox.ac.uk/~vgg/rg/papers/deselaers-eccv10.pdf
-
-  Returns nans if there are no ground truth images for a class.
-
-  Args:
-    num_gt_imgs_per_class: 1D array, representing number of images containing
-        at least one object instance of a particular class
-    num_images_correctly_detected_per_class: 1D array, representing number of
-        images that are correctly detected at least one object instance of a
-        particular class
-
-  Returns:
-    corloc_per_class: A float numpy array represents the corloc score of each
-      class
-  """
-    # Divide by zero expected for classes with no gt examples.
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
+    """
+    # 没有 GT 样本的类别可能出现除零。
     with np.errstate(divide="ignore", invalid="ignore"):
         return np.where(
             num_gt_imgs_per_class == 0,

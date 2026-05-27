@@ -13,12 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 
-"""Operations for [N, height, width] numpy arrays representing masks.
-
-Example mask operations that are supported:
-  * Areas: compute mask areas
-  * IOU: pairwise intersection-over-union scores
-"""
+"""numpy 掩码数组的面积、交集和重叠度工具。"""
 from __future__ import (
     absolute_import,
     division,
@@ -31,40 +26,22 @@ EPSILON = 1e-7
 
 
 def area(masks):
-    """Computes area of masks.
+    """计算框或掩码的面积。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
 
-  Args:
-    masks: Numpy array with shape [N, height, width] holding N masks. Masks
-      values are of type np.uint8 and values are in {0,1}.
-
-  Returns:
-    a numpy array with shape [N*1] representing mask areas.
-
-  Raises:
-    ValueError: If masks.dtype is not np.uint8
-  """
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
+    """
     if masks.dtype != np.uint8:
-        raise ValueError("Masks type should be np.uint8")
+        raise ValueError("掩码数组的类型必须是 np.uint8。")
     return np.sum(masks, axis=(1, 2), dtype=np.float32)
 
 
 def intersection(masks1, masks2):
-    """Compute pairwise intersection areas between masks.
+    """计算两组框或掩码的两两交集面积。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
 
-  Args:
-    masks1: a numpy array with shape [N, height, width] holding N masks. Masks
-      values are of type np.uint8 and values are in {0,1}.
-    masks2: a numpy array with shape [M, height, width] holding M masks. Masks
-      values are of type np.uint8 and values are in {0,1}.
-
-  Returns:
-    a numpy array with shape [N*M] representing pairwise intersection area.
-
-  Raises:
-    ValueError: If masks1 and masks2 are not of type np.uint8.
-  """
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
+    """
     if masks1.dtype != np.uint8 or masks2.dtype != np.uint8:
-        raise ValueError("masks1 and masks2 should be of type np.uint8")
+        raise ValueError("两个掩码数组的类型都必须是 np.uint8。")
     n = masks1.shape[0]
     m = masks2.shape[0]
     answer = np.zeros([n, m], dtype=np.float32)
@@ -77,22 +54,12 @@ def intersection(masks1, masks2):
 
 
 def iou(masks1, masks2):
-    """Computes pairwise intersection-over-union between mask collections.
+    """计算两组框或掩码的交并比。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
 
-  Args:
-    masks1: a numpy array with shape [N, height, width] holding N masks. Masks
-      values are of type np.uint8 and values are in {0,1}.
-    masks2: a numpy array with shape [M, height, width] holding N masks. Masks
-      values are of type np.uint8 and values are in {0,1}.
-
-  Returns:
-    a numpy array with shape [N, M] representing pairwise iou scores.
-
-  Raises:
-    ValueError: If masks1 and masks2 are not of type np.uint8.
-  """
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
+    """
     if masks1.dtype != np.uint8 or masks2.dtype != np.uint8:
-        raise ValueError("masks1 and masks2 should be of type np.uint8")
+        raise ValueError("两个掩码数组的类型都必须是 np.uint8。")
     intersect = intersection(masks1, masks2)
     area1 = area(masks1)
     area2 = area(masks2)
@@ -105,26 +72,12 @@ def iou(masks1, masks2):
 
 
 def ioa(masks1, masks2):
-    """Computes pairwise intersection-over-area between box collections.
+    """计算两组框或掩码的交集面积占比。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
 
-  Intersection-over-area (ioa) between two masks, mask1 and mask2 is defined as
-  their intersection area over mask2's area. Note that ioa is not symmetric,
-  that is, IOA(mask1, mask2) != IOA(mask2, mask1).
-
-  Args:
-    masks1: a numpy array with shape [N, height, width] holding N masks. Masks
-      values are of type np.uint8 and values are in {0,1}.
-    masks2: a numpy array with shape [M, height, width] holding N masks. Masks
-      values are of type np.uint8 and values are in {0,1}.
-
-  Returns:
-    a numpy array with shape [N, M] representing pairwise ioa scores.
-
-  Raises:
-    ValueError: If masks1 and masks2 are not of type np.uint8.
-  """
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
+    """
     if masks1.dtype != np.uint8 or masks2.dtype != np.uint8:
-        raise ValueError("masks1 and masks2 should be of type np.uint8")
+        raise ValueError("两个掩码数组的类型都必须是 np.uint8。")
     intersect = intersection(masks1, masks2)
     areas = np.expand_dims(area(masks2), axis=0)
     return intersect / (areas + EPSILON)

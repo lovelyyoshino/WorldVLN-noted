@@ -18,15 +18,15 @@ logger = logging.getLogger(__name__)
 
 def retry_load_images(image_paths, retry=10, backend="pytorch"):
     """
-    This function is to load images with support of retrying for failed load.
+    加载图像列表，并在读取失败时自动重试。
 
-    Args:
-        image_paths (list): paths of images needed to be loaded.
-        retry (int, optional): maximum time of loading retrying. Defaults to 10.
-        backend (str): `pytorch` or `cv2`.
+    参数：
+        image_paths (list): 待加载图像的路径列表。
+        retry (int, optional): 最大重试次数，默认 10。
+        backend (str): `pytorch` 或 `cv2`。
 
-    Returns:
-        imgs (list): list of loaded images.
+    返回：
+        imgs (list): 已加载的图像列表。
     """
     for i in range(retry):
         imgs = []
@@ -41,24 +41,24 @@ def retry_load_images(image_paths, retry=10, backend="pytorch"):
                 imgs = torch.as_tensor(np.stack(imgs))
             return imgs
         else:
-            logger.warn("Reading failed. Will retry.")
+            logger.warn("读取失败，将重试。")
             time.sleep(1.0)
         if i == retry - 1:
-            raise Exception("Failed to load images {}".format(image_paths))
+            raise Exception("加载图像失败：{}".format(image_paths))
 
 
 def get_sequence(center_idx, half_len, sample_rate, num_frames):
     """
-    Sample frames among the corresponding clip.
+    在对应 clip 内生成采样帧索引序列。
 
-    Args:
-        center_idx (int): center frame idx for current clip
-        half_len (int): half of the clip length
-        sample_rate (int): sampling rate for sampling frames inside of the clip
-        num_frames (int): number of expected sampled frames
+    参数：
+        center_idx (int): 当前 clip 的中心帧索引。
+        half_len (int): clip 半长度。
+        sample_rate (int): clip 内部的帧采样率。
+        num_frames (int): 期望的采样帧总数。
 
-    Returns:
-        seq (list): list of indexes of sampled frames in this clip.
+    返回：
+        seq (list): 当前 clip 中采样得到的帧索引列表。
     """
     seq = list(range(center_idx - half_len, center_idx + half_len, sample_rate))
 
@@ -72,14 +72,16 @@ def get_sequence(center_idx, half_len, sample_rate, num_frames):
 
 def pack_pathway_output(cfg, frames):
     """
-    Prepare output as a list of tensors. Each tensor corresponding to a
-    unique pathway.
-    Args:
-        frames (tensor): frames of images sampled from the video. The
-            dimension is `channel` x `num frames` x `height` x `width`.
-    Returns:
-        frame_list (list): list of tensors with the dimension of
-            `channel` x `num frames` x `height` x `width`.
+        将输入帧整理成 pathway 张量列表。
+
+        参数：
+            frames (tensor): 从视频中采样得到的帧，维度为
+                说明：`channel` x `num frames` x `height` x `width`。
+
+        返回：
+            frame_list (list): pathway 张量列表，每个张量维度均为
+                说明：`channel` x `num frames` x `height` x `width`。
+
     """
     if cfg.DATA.REVERSE_INPUT_CHANNEL:
         frames = frames[[2, 1, 0], :, :, :]
@@ -87,7 +89,7 @@ def pack_pathway_output(cfg, frames):
         frame_list = [frames]
     elif cfg.MODEL.ARCH in cfg.MODEL.MULTI_PATHWAY_ARCH:
         fast_pathway = frames
-        # Perform temporal sampling from the fast pathway.
+        # 从快速通路中做时间降采样，生成慢速通路。
         slow_pathway = torch.index_select(
             frames,
             1,
@@ -98,7 +100,7 @@ def pack_pathway_output(cfg, frames):
         frame_list = [slow_pathway, fast_pathway]
     else:
         raise NotImplementedError(
-            "Model arch {} is not in {}".format(
+            "模型架构 {} 不在 {} 中".format(
                 cfg.MODEL.ARCH,
                 cfg.MODEL.SINGLE_PATHWAY_ARCH + cfg.MODEL.MULTI_PATHWAY_ARCH,
             )
@@ -116,27 +118,26 @@ def spatial_sampling(
     inverse_uniform_sampling=False,
 ):
     """
-    Perform spatial sampling on the given video frames. If spatial_idx is
-    -1, perform random scale, random crop, and random flip on the given
-    frames. If spatial_idx is 0, 1, or 2, perform spatial uniform sampling
-    with the given spatial_idx.
-    Args:
-        frames (tensor): frames of images sampled from the video. The
-            dimension is `num frames` x `height` x `width` x `channel`.
-        spatial_idx (int): if -1, perform random spatial sampling. If 0, 1,
-            or 2, perform left, center, right crop if width is larger than
-            height, and perform top, center, buttom crop if height is larger
-            than width.
-        min_scale (int): the minimal size of scaling.
-        max_scale (int): the maximal size of scaling.
-        crop_size (int): the size of height and width used to crop the
-            frames.
-        inverse_uniform_sampling (bool): if True, sample uniformly in
-            [1 / max_scale, 1 / min_scale] and take a reciprocal to get the
-            scale. If False, take a uniform sample from [min_scale,
-            max_scale].
-    Returns:
-        frames (tensor): spatially sampled frames.
+        对给定视频帧执行空间采样。
+
+        当 `spatial_idx` 为 -1 时，执行随机缩放、随机裁剪和随机翻转；
+        当 `spatial_idx` 为 0、1 或 2 时，执行确定性的均匀空间采样。
+
+        参数：
+            frames (tensor): 从视频中采样得到的帧，维度为
+                说明：`num frames` x `height` x `width` x `channel`。
+            spatial_idx (int): 若为 -1，则执行随机空间采样；若为 0、1、2，
+                则在宽大于高时取左、中、右裁剪，在高大于宽时取上、中、下裁剪。
+            min_scale (int): 缩放最小尺寸。
+            max_scale (int): 缩放最大尺寸。
+            crop_size (int): 裁剪后的高宽尺寸。
+            inverse_uniform_sampling (bool): 若为 True，则在
+                `[1 / max_scale, 1 / min_scale]` 上均匀采样后取倒数得到尺度；
+                否则直接在 `[min_scale, max_scale]` 上均匀采样。
+
+        返回：
+            frames (tensor): 空间采样后的帧。
+
     """
     assert spatial_idx in [-1, 0, 1, 2]
     if spatial_idx == -1:
@@ -150,9 +151,9 @@ def spatial_sampling(
         if random_horizontal_flip:
             frames, _ = transform.horizontal_flip(0.5, frames)
     else:
-        # The testing is deterministic and no jitter should be performed.
-        # min_scale, max_scale, and crop_size are expect to be the same.
-        #assert len({min_scale, max_scale, crop_size}) == 1
+        # 测试阶段是确定性的，不应执行随机抖动。
+        # min_scale、max_scale 和 crop_size 应保持一致。
+        # 保留的上游调试/兼容代码：assert len({min_scale, max_scale, crop_size}) == 1
         frames, _ = transform.random_short_side_scale_jitter(
             frames, min_scale, max_scale
         )
@@ -169,27 +170,24 @@ def spatial_sampling_2crops(
     inverse_uniform_sampling=False,
 ):
     """
-    Perform spatial sampling on the given video frames. If spatial_idx is
-    -1, perform random scale, random crop, and random flip on the given
-    frames. If spatial_idx is 0, 1, or 2, perform spatial uniform sampling
-    with the given spatial_idx.
-    Args:
-        frames (tensor): frames of images sampled from the video. The
-            dimension is `num frames` x `height` x `width` x `channel`.
-        spatial_idx (int): if -1, perform random spatial sampling. If 0, 1,
-            or 2, perform left, center, right crop if width is larger than
-            height, and perform top, center, buttom crop if height is larger
-            than width.
-        min_scale (int): the minimal size of scaling.
-        max_scale (int): the maximal size of scaling.
-        crop_size (int): the size of height and width used to crop the
-            frames.
-        inverse_uniform_sampling (bool): if True, sample uniformly in
-            [1 / max_scale, 1 / min_scale] and take a reciprocal to get the
-            scale. If False, take a uniform sample from [min_scale,
-            max_scale].
-    Returns:
-        frames (tensor): spatially sampled frames.
+        对给定视频帧执行双裁剪版本的空间采样。
+
+        参数和行为与 `spatial_sampling` 一致，只是在确定性裁剪阶段调用
+        说明：`uniform_crop_2crops`。
+
+        参数：
+            frames (tensor): 从视频中采样得到的帧，维度为
+                说明：`num frames` x `height` x `width` x `channel`。
+            spatial_idx (int): 若为 -1，则执行随机空间采样；若为 0、1、2，
+                则执行确定性的均匀空间裁剪。
+            min_scale (int): 缩放最小尺寸。
+            max_scale (int): 缩放最大尺寸。
+            crop_size (int): 裁剪后的高宽尺寸。
+            inverse_uniform_sampling (bool): 是否采用倒数均匀采样策略。
+
+        返回：
+            frames (tensor): 空间采样后的帧。
+
     """
     assert spatial_idx in [-1, 0, 1, 2]
     if spatial_idx == -1:
@@ -203,9 +201,9 @@ def spatial_sampling_2crops(
         if random_horizontal_flip:
             frames, _ = transform.horizontal_flip(0.5, frames)
     else:
-        # The testing is deterministic and no jitter should be performed.
-        # min_scale, max_scale, and crop_size are expect to be the same.
-        #assert len({min_scale, max_scale, crop_size}) == 1
+        # 测试阶段是确定性的，不应执行随机抖动。
+        # min_scale、max_scale 和 crop_size 应保持一致。
+        # 保留的上游调试/兼容代码：assert len({min_scale, max_scale, crop_size}) == 1
         frames, _ = transform.random_short_side_scale_jitter(
             frames, min_scale, max_scale
         )
@@ -215,12 +213,14 @@ def spatial_sampling_2crops(
 
 def as_binary_vector(labels, num_classes):
     """
-    Construct binary label vector given a list of label indices.
-    Args:
-        labels (list): The input label list.
-        num_classes (int): Number of classes of the label vector.
-    Returns:
-        labels (numpy array): the resulting binary vector.
+    根据标签索引列表构造二值标签向量。
+
+    参数：
+        labels (list): 输入标签列表。
+        num_classes (int): 标签向量的类别总数。
+
+    返回：
+        labels (numpy array): 生成的二值向量。
     """
     label_arr = np.zeros((num_classes,))
 
@@ -231,11 +231,13 @@ def as_binary_vector(labels, num_classes):
 
 def aggregate_labels(label_list):
     """
-    Join a list of label list.
-    Args:
-        labels (list): The input label list.
-    Returns:
-        labels (list): The joint list of all lists in input.
+    合并一组标签列表。
+
+    参数：
+        labels (list): 输入标签列表。
+
+    返回：
+        labels (list): 将所有子列表合并去重后的结果。
     """
     all_labels = []
     for labels in label_list:
@@ -246,12 +248,13 @@ def aggregate_labels(label_list):
 
 def convert_to_video_level_labels(labels):
     """
-    Aggregate annotations from all frames of a video to form video-level labels.
-    Args:
-        labels (list): The input label list.
-    Returns:
-        labels (list): Same as input, but with each label replaced by
-        a video-level one.
+    将视频所有帧的标注聚合成视频级标签。
+
+    参数：
+        labels (list): 输入标签列表。
+
+    返回：
+        labels (list): 与输入结构一致，但每帧标签都会替换成对应视频级标签。
     """
     for video_id in range(len(labels)):
         video_level_labels = aggregate_labels(labels[video_id])
@@ -262,18 +265,22 @@ def convert_to_video_level_labels(labels):
 
 def load_image_lists(frame_list_file, prefix="", return_list=False):
     """
-    Load image paths and labels from a "frame list".
-    Each line of the frame list contains:
-    `original_vido_id video_id frame_id path labels`
-    Args:
-        frame_list_file (string): path to the frame list.
-        prefix (str): the prefix for the path.
-        return_list (bool): if True, return a list. If False, return a dict.
-    Returns:
-        image_paths (list or dict): list of list containing path to each frame.
-            If return_list is False, then return in a dict form.
-        labels (list or dict): list of list containing label of each frame.
-            If return_list is False, then return in a dict form.
+        从 "frame list" 文件中读取图像路径和标签。
+
+        文件每一行格式为：
+        说明：`original_vido_id video_id frame_id path labels`
+
+        参数：
+            frame_list_file (string): frame list 文件路径。
+            prefix (str): 图像路径前缀。
+            return_list (bool): 若为 True，返回 list；否则返回 dict。
+
+        返回：
+            image_paths (list or dict): 每帧路径组成的列表或字典。
+                若 `return_list` 为 False，则返回 dict 形式。
+            labels (list or dict): 每帧标签组成的列表或字典。
+                若 `return_list` 为 False，则返回 dict 形式。
+
     """
     image_paths = defaultdict(list)
     labels = defaultdict(list)
@@ -281,7 +288,7 @@ def load_image_lists(frame_list_file, prefix="", return_list=False):
         assert f.readline().startswith("original_vido_id")
         for line in f:
             row = line.split()
-            # original_vido_id video_id frame_id path labels
+            # 字段顺序：original_vido_id video_id frame_id path labels
             assert len(row) == 5
             video_name = row[0]
             if prefix == "":
@@ -307,11 +314,12 @@ def load_image_lists(frame_list_file, prefix="", return_list=False):
 
 def tensor_normalize(tensor, mean, std):
     """
-    Normalize a given tensor by subtracting the mean and dividing the std.
-    Args:
-        tensor (tensor): tensor to normalize.
-        mean (tensor or list): mean value to subtract.
-        std (tensor or list): std to divide.
+    对张量执行减均值、除标准差的归一化。
+
+    参数：
+        tensor (tensor): 待归一化张量。
+        mean (tensor or list): 需要减去的均值。
+        std (tensor or list): 需要除以的标准差。
     """
     if tensor.dtype == torch.uint8:
         tensor = tensor.float()
@@ -327,8 +335,7 @@ def tensor_normalize(tensor, mean, std):
 
 def get_random_sampling_rate(long_cycle_sampling_rate, sampling_rate):
     """
-    When multigrid training uses a fewer number of frames, we randomly
-    increase the sampling rate so that some clips cover the original span.
+    在 multigrid 训练减少帧数时，随机增大采样率，使部分 clip 仍覆盖原始时间跨度。
     """
     if long_cycle_sampling_rate > 0:
         assert long_cycle_sampling_rate >= sampling_rate
@@ -339,11 +346,12 @@ def get_random_sampling_rate(long_cycle_sampling_rate, sampling_rate):
 
 def revert_tensor_normalize(tensor, mean, std):
     """
-    Revert normalization for a given tensor by multiplying by the std and adding the mean.
-    Args:
-        tensor (tensor): tensor to revert normalization.
-        mean (tensor or list): mean value to add.
-        std (tensor or list): std to multiply.
+    将归一化后的张量还原为原始尺度。
+
+    参数：
+        tensor (tensor): 待还原的张量。
+        mean (tensor or list): 需要加回的均值。
+        std (tensor or list): 需要乘回的标准差。
     """
     if type(mean) == list:
         mean = torch.tensor(mean)
@@ -356,15 +364,15 @@ def revert_tensor_normalize(tensor, mean, std):
 
 def create_sampler(dataset, shuffle, cfg):
     """
-    Create sampler for the given dataset.
-    Args:
-        dataset (torch.utils.data.Dataset): the given dataset.
-        shuffle (bool): set to ``True`` to have the data reshuffled
-            at every epoch.
-        cfg (CfgNode): configs. Details can be found in
-            slowfast/config/defaults.py
-    Returns:
-        sampler (Sampler): the created sampler.
+    为给定数据集创建 sampler。
+
+    参数：
+        dataset (torch.utils.data.Dataset): 目标数据集。
+        shuffle (bool): 若为 ``True``，每个 epoch 都重新打乱数据。
+        cfg (CfgNode): 配置对象，细节可参考 `slowfast/config/defaults.py`。
+
+    返回：
+        sampler (Sampler): 创建出的采样器。
     """
     sampler = DistributedSampler(dataset) if cfg.NUM_GPUS > 1 else None
 
@@ -373,8 +381,9 @@ def create_sampler(dataset, shuffle, cfg):
 
 def loader_worker_init_fn(dataset):
     """
-    Create init function passed to pytorch data loader.
-    Args:
-        dataset (torch.utils.data.Dataset): the given dataset.
+    创建传给 PyTorch 数据加载器的 worker 初始化函数。
+
+    参数：
+        dataset (torch.utils.data.Dataset): 目标数据集。
     """
     return None

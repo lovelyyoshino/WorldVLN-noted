@@ -23,17 +23,17 @@ for ratio, hws in ratio2hws.items():
 dynamic_resolution_h_w = {}
 predefined_HW_Scales_dynamic = {}
 aspect_ratio_scale_list = []
-bs_dict = {7: 8, 10: 4, 13: 1, 16: 1} # 256x256: batch=8, 512x512: batch=4, 1024x1024: batch=1 (bs=1 avoid OOM)
+bs_dict = {7: 8, 10: 4, 13: 1, 16: 1} # 中文说明：256x256: batch=8, 512x512: batch=4, 1024x1024: batch=1 (bs=1 avoid OOM)
 for ratio in full_ratio2hws:
     dynamic_resolution_h_w[ratio] ={}
     for ind, leng in enumerate([7, 10, 13, 16]):
-        h, w = full_ratio2hws[ratio][leng-1][0], full_ratio2hws[ratio][leng-1][1] # feature map size
-        pixel = (h * vae_stride, w * vae_stride) # The original image (H, W)
+        h, w = full_ratio2hws[ratio][leng-1][0], full_ratio2hws[ratio][leng-1][1] # 特征图尺寸。
+        pixel = (h * vae_stride, w * vae_stride) # 原始图像尺寸 (H, W)。
         dynamic_resolution_h_w[ratio][pixel[1]] = {
             'pixel': pixel,
             'scales': full_ratio2hws[ratio][:leng]
-        } # W as key
+        } # 用 W 作为 key。
         predefined_HW_Scales_dynamic[(h, w)] = full_ratio2hws[ratio][:leng]
-        # deal with aspect_ratio_scale_list
+        # 处理 aspect_ratio_scale_list
         info_dict = {"ratio": ratio, "h": h * vae_stride, "w": w * vae_stride, "bs": bs_dict[leng]}
         aspect_ratio_scale_list.append(info_dict)

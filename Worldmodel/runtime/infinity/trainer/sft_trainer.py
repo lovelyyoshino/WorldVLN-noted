@@ -39,6 +39,7 @@ import queue
 import threading
 
 def save_token():
+    """后台线程：异步把新提取的 VAE token 保存到磁盘缓存。"""
     while True:
         try:
             raw_features, feature_cache_files4images = save_token_queue.get()
@@ -46,11 +47,11 @@ def save_token():
                 if not osp.exists(feature_cache_files4images[i]):
                     os.makedirs(osp.dirname(feature_cache_files4images[i]), exist_ok=True)
                     torch.save(raw_features[i], feature_cache_files4images[i])
-                    print(f'Save to {feature_cache_files4images[i]}')
+                    print(f'保存 VAE token 到: {feature_cache_files4images[i]}')
                 else:
-                    print(f'{feature_cache_files4images[i]} exists, skip')
+                    print(f'{feature_cache_files4images[i]} 已存在，跳过保存')
         except Exception as e:
-            print(f"Error saving token: {e}")
+            print(f"保存 VAE token 失败: {e}")
         finally:
             save_token_queue.task_done()
 
@@ -60,6 +61,7 @@ saver.start()
 
 
 def _obs_points(pred_num_frames: int, step: int):
+    """生成观测锚点 `points = [1, 1+step, 1+2*step, ..., end]`。"""
     end = int(pred_num_frames)
     if end <= 0:
         return []
@@ -76,34 +78,36 @@ def _obs_points(pred_num_frames: int, step: int):
     return pts
 
 class InfinityTrainer(object):
+    """Infinity 的统一训练器，兼容 SFT、GRPO 与 teacher-forcing 调试导出。"""
     def __init__(
-        self, 
-        device, 
+        self,
+        device,
         raw_scale_schedule: Tuple[int, ...],
-        vae_local, 
+        vae_local,
         gpt_wo_ddp: Infinity, gpt: DDP,
-        gpt_opt: AmpOptimizer, 
+        gpt_opt: AmpOptimizer,
         label_smooth: float,
-        zero=0, 
-        vae_type=True, 
+        zero=0,
+        vae_type=True,
         reweight_loss_by_scale=0,
-        gpt_wo_ddp_ema=None, 
-        gpt_ema=None, 
-        use_fsdp_model_ema=False, 
+        gpt_wo_ddp_ema=None,
+        gpt_ema=None,
+        use_fsdp_model_ema=False,
         other_args=None,
     ):
+        """保存训练依赖对象，并初始化损失、EMA、GRPO 统计与调试工具。"""
         super(InfinityTrainer, self).__init__()
-        
+
         self.zero = zero
         self.vae_type = vae_type
-        
+
         self.gpt: Union[DDP, FSDP, nn.Module]
         self.gpt, self.vae_local = gpt, vae_local
         self.dynamic_scale_schedule = other_args.dynamic_scale_schedule
         self.steps_per_frame = other_args.steps_per_frame
         self.dynamic_resolution_h_w, self.h_div_w_templates = get_dynamic_resolution_meta(other_args.dynamic_scale_schedule, other_args.video_frames)
         self.gpt_opt: AmpOptimizer = gpt_opt
-        self.gpt_wo_ddp: Union[Infinity, torch._dynamo.eval_frame.OptimizedModule] = gpt_wo_ddp  # after torch.compile
+        self.gpt_wo_ddp: Union[Infinity, torch._dynamo.eval_frame.OptimizedModule] = gpt_wo_ddp  # 中文说明：after torch.compile
         self.gpt_wo_ddp_ema = gpt_wo_ddp_ema
         self.gpt_ema = gpt_ema
         self.self_correction = SelfCorrection(self.vae_local, other_args)
@@ -113,22 +117,22 @@ class InfinityTrainer(object):
         print(f'self.reweight_loss_by_scale: {self.reweight_loss_by_scale}')
         video_encode, _, get_visual_rope_embeds, get_scale_pack_info = get_encode_decode_func(other_args.dynamic_scale_schedule)
         self.video_encode = video_encode
-        # Needed for GRPO trace-replay logprob computation.
+        # 这两个函数给 GRPO trace-replay 复现老轨迹时使用。
         self.get_visual_rope_embeds = get_visual_rope_embeds
         self.get_scale_pack_info = get_scale_pack_info
-        
+
         gpt_uncompiled = self.gpt_wo_ddp._orig_mod if hasattr(self.gpt_wo_ddp, '_orig_mod') else self.gpt_wo_ddp
         del gpt_uncompiled.rng
         gpt_uncompiled.rng = torch.Generator(device=device)
         del gpt_uncompiled
-        
+
         self.label_smooth = label_smooth
 
         self.train_loss = nn.CrossEntropyLoss(label_smoothing=label_smooth, reduction='none')
         self.val_loss = nn.CrossEntropyLoss(label_smoothing=0.0, reduction='none')
         self.loss_weight = {0:{}, 1:{}}
 
-        # Optional teacher-forcing debug: decode latent clips and run TSformer trajectory export.
+        # teacher-forcing 调试导出：把 latent clip 解码，并用 TSformer 导出轨迹。
         self._tf_dump_enable = bool(int(getattr(other_args, "tf_dump_tsformer_enable", 0)))
         self._tf_dump_interval = int(getattr(other_args, "tf_dump_interval", 0))
         self._tf_dump_step = int(getattr(other_args, "tf_dump_step_frames", 16))
@@ -146,9 +150,9 @@ class InfinityTrainer(object):
         self._tf_ts_ready = False
         self._tf_ts_init_err = ""
         if self._tf_dump_enable and self._tf_dump_interval <= 0:
-            # Safe default to avoid per-iter heavy I/O.
+            # 给一个保守默认值，避免每个 iteration 都做重 I/O。
             self._tf_dump_interval = 200
-            
+
         self.prog_it = 0
         self.last_prog_si = -1
         self.first_prog = True
@@ -163,6 +167,7 @@ class InfinityTrainer(object):
         self._optstep_metric_ema_last: Dict[str, float] = {}
 
     def _update_scalar_ema(self, store: Dict[str, float], key: str, value: Optional[float]) -> Optional[float]:
+        """更新某个标量指标的 EMA，忽略空值和非有限值。"""
         if value is None:
             return None
         value = float(value)
@@ -177,6 +182,7 @@ class InfinityTrainer(object):
         return store[key]
 
     def _update_stable_metric_trackers(self, metrics: Dict[str, Optional[float]], stepping: bool) -> None:
+        """维护逐 iter 与逐 optimizer-step 的稳定指标统计。"""
         touched: List[str] = []
         for key, value in metrics.items():
             if value is None:
@@ -207,6 +213,7 @@ class InfinityTrainer(object):
             self._optstep_metric_counts[key] = 0
 
     def _collect_stable_metrics(self) -> Dict[str, float]:
+        """导出当前稳定指标快照，供日志系统统一记录。"""
         stable_metrics: Dict[str, float] = {}
         for key, value in self._stable_metric_last.items():
             stable_metrics[f"{key}_ema"] = value
@@ -217,12 +224,15 @@ class InfinityTrainer(object):
         return stable_metrics
 
     def _tf_to_cm_deg(self, deltas_m_rad: torch.Tensor) -> torch.Tensor:
+        """把轨迹增量从米/弧度转换成厘米/角度。"""
         out = deltas_m_rad.clone()
+        # 平移分量乘 100 变成厘米；旋转分量乘 `180 / pi` 变成角度。
         out[..., 0:3] = out[..., 0:3] * 100.0
         out[..., 3:6] = out[..., 3:6] * (180.0 / math.pi)
         return out
 
     def _tf_integrate(self, actions_cm_deg):
+        """把逐步增量轨迹积分成绝对位姿序列。"""
         pose = [0.0] * 6
         poses = []
         for a in actions_cm_deg:
@@ -231,7 +241,8 @@ class InfinityTrainer(object):
         return {"start_pose": [0.0] * 6, "poses": poses, "final_pose": (poses[-1] if poses else [0.0] * 6)}
 
     def _tf_expand_actions4_to16(self, actions4):
-        # TSformer outputs 4 deltas per clip; expand to 16 frame-level deltas by repeating each delta/factor.
+        """把 4 个 clip-level 动作均分并展开成 16 个 frame-level 动作。"""
+        # 关键公式：每个 clip 动作先除以 `expand_factor`，再重复 `expand_factor` 次。
         fac = int(self._tf_expand_factor)
         out = []
         for a in actions4:
@@ -241,6 +252,7 @@ class InfinityTrainer(object):
         return out
 
     def _tf_clip_positions_from_start(self, start_pose6, actions4):
+        """从给定起点位姿出发，把一个 clip 的动作序列展开成逐帧位姿。"""
         frame_deltas = self._tf_expand_actions4_to16(actions4)
         cur = [float(v) for v in start_pose6]
         poses16 = []
@@ -250,12 +262,13 @@ class InfinityTrainer(object):
         return poses16
 
     def _tf_clip_mse_vs_ref(self, clip_actions4, points, ref_poses):
-        # points is 1-based frame anchors, e.g. [1,17,33,49]
+        """把预测 clip 轨迹与参考位姿对齐，计算 MSE 诊断指标。"""
+        # `points` 使用 1-based 帧锚点，例如 `[1, 17, 33, 49]`。
         per_clip = []
         for seg, a4 in enumerate(clip_actions4):
             if seg >= len(points) - 1:
                 break
-            start_fid = int(points[seg])  # 1-based
+            start_fid = int(points[seg])  # 中文说明：1-based
             if start_fid - 1 >= len(ref_poses):
                 break
             gt_start = ref_poses[start_fid - 1]
@@ -290,14 +303,15 @@ class InfinityTrainer(object):
         }
 
     def _tf_maybe_init_tsformer(self, device: str):
+        """按需加载 TSformer 轨迹模型及其归一化统计。"""
         if self._tf_ts_ready or self._tf_ts_init_err:
             return
         if not self._tf_ts_ckpt:
-            self._tf_ts_init_err = "tf_dump_tsformer_ckpt is empty"
+            self._tf_ts_init_err = "tf_dump_tsformer_ckpt 为空"
             return
         repo_root = self._tf_ts_repo_root.strip()
         if not repo_root:
-            self._tf_ts_init_err = "tf_dump_tsformer_repo_root is empty"
+            self._tf_ts_init_err = "tf_dump_tsformer_repo_root 为空"
             return
         try:
             if repo_root not in sys.path:
@@ -334,13 +348,14 @@ class InfinityTrainer(object):
             self._tf_ts_mean = mean_t
             self._tf_ts_std = std_t
             self._tf_ts_ready = True
-            print(f"[TF-TS] initialized TSformer: ckpt={self._tf_ts_ckpt}")
+            print(f"[TF-TS] TSformer 初始化完成: ckpt={self._tf_ts_ckpt}")
         except Exception as e:
             self._tf_ts_init_err = str(e)
-            print(f"[TF-TS] init failed: {e}")
+            print(f"[TF-TS] 初始化失败: {e}")
 
     @torch.no_grad()
     def _tf_predict_actions_4(self, lat5_BCTHW: torch.Tensor, device: str) -> torch.Tensor:
+        """用 TSformer 从 5 帧 latent 窗口预测 4 个动作增量。"""
         assert self._tf_ts_model is not None
         x = lat5_BCTHW
         if int(x.shape[1]) == 64:
@@ -348,7 +363,7 @@ class InfinityTrainer(object):
             t = torch.nn.functional.pixel_shuffle(t, 2)
             x = t.permute(0, 2, 1, 3, 4).contiguous()
         if int(x.shape[1]) != 16:
-            raise ValueError(f"TSformer expects C=16/64, got {tuple(x.shape)}")
+            raise ValueError(f"TSformer 期望输入通道 C=16/64，实际收到 shape={tuple(x.shape)}")
         lat_TCHW = x[0].permute(1, 0, 2, 3).contiguous()
         windows = torch.stack([lat_TCHW[:-1], lat_TCHW[1:]], dim=1).to(device=device, dtype=torch.float32)
         out = self._tf_ts_model(windows)
@@ -362,6 +377,7 @@ class InfinityTrainer(object):
 
     @torch.no_grad()
     def _tf_decode_and_save_clip(self, z5_BCTHW: torch.Tensor, out_mp4: str, fps: int, drop_first: bool):
+        """把 latent clip 解码成视频并保存，便于肉眼检查。"""
         if not self._tf_dump_save_video:
             return
         try:
@@ -385,10 +401,11 @@ class InfinityTrainer(object):
             os.makedirs(osp.dirname(out_mp4), exist_ok=True)
             imageio.mimsave(out_mp4, rgb, fps=int(fps))
         except Exception as e:
-            print(f"[TF-TS] decode/save clip failed: {e}")
+            print(f"[TF-TS] 解码或保存 clip 失败: {e}")
 
     @torch.no_grad()
     def _tf_dump_step_trajectory(self, raw_features_list, g_it: int, args):
+        """定期导出 teacher-forcing 轨迹调试结果。"""
         if not self._tf_dump_enable:
             return
         if self._tf_dump_interval <= 0 or ((int(g_it) + 1) % int(self._tf_dump_interval) != 0):
@@ -396,7 +413,7 @@ class InfinityTrainer(object):
         self._tf_maybe_init_tsformer(args.device)
         if not self._tf_ts_ready:
             if self._tf_ts_init_err:
-                print(f"[TF-TS] skipped: {self._tf_ts_init_err}")
+                print(f"[TF-TS] 跳过导出: {self._tf_ts_init_err}")
             return
 
         out_root = self._tf_dump_out_dir or osp.join(args.local_out_path, "tf_tsformer_debug")
@@ -438,7 +455,7 @@ class InfinityTrainer(object):
                 actions_all.extend(a4)
                 clip_actions4.append(a4)
                 if len(clip_positions16) == 0:
-                    # Fallback start pose when no GT anchor is available.
+                    # 没有 GT 锚点时，退回到原点开始积分。
                     start_pose = [0.0] * 6
                 else:
                     start_pose = clip_positions16[-1][-1]
@@ -452,7 +469,7 @@ class InfinityTrainer(object):
                     with open(self._tf_ref_pose_json, "r", encoding="utf-8") as f:
                         ref_poses = json.load(f)
                     if isinstance(ref_poses, list) and len(ref_poses) > 1 and isinstance(ref_poses[0], list):
-                        # Re-anchor each clip at GT clip-start before computing MSE.
+                        # 计算 MSE 前，把每个 clip 都重新锚定到 GT 的 clip 起点。
                         clip_positions16 = []
                         for seg, a4 in enumerate(clip_actions4):
                             if seg >= len(points) - 1:
@@ -483,8 +500,8 @@ class InfinityTrainer(object):
             }
             with open(osp.join(sample_dir, "trajectory.json"), "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
-        print(f"[TF-TS] dumped trajectories to: {run_dir}")
-    
+        print(f"[TF-TS] 轨迹调试结果已导出到: {run_dir}")
+
     def train_step(
         self, epoch: int, it: int, g_it: int, stepping: bool, clip_decay_ratio: float, metric_lg: misc.MetricLogger,
         raw_features_bcthw: FTen, feature_cache_files4images: list, media: str,
@@ -510,6 +527,18 @@ class InfinityTrainer(object):
         traj_ids: Optional[list] = None,
         hybrid_roles: Optional[list] = None,
     ) -> Tuple[torch.Tensor, Optional[float]]:
+        """
+        执行一次训练 step，内部可走 SFT 或 GRPO 分支。
+
+        推荐阅读顺序：
+        1. 先看 `trainer_type / hybrid_roles / use_grpo`，确认这一批样本走 SFT 还是 GRPO；
+        2. 再看 `video_encode()` 如何把原始视觉输入打包成 GPT 可消费的视觉 token；
+        3. 如果走 GRPO，再看 `old_logprob -> new_logprob -> ratio -> clipped objective -> backward` 这条主链。
+
+        对小白最重要的区别：
+        - SFT：核心是 teacher-forcing 下的视觉 token 监督；
+        - GRPO：核心是“拿 rollout 时记录的旧 logprob 和 reward/advantage，重新计算新策略 logprob，再做 PPO/GRPO 目标”。
+        """
         device = args.device
         B = len(inp_B3HW) + len(raw_features_bcthw)
 
@@ -517,7 +546,7 @@ class InfinityTrainer(object):
             is_image_batch = 1
         else:
             is_image_batch = 0
-        # [forward]
+        # 前向阶段：先把图像编码成 VAE latent，再做 packed transformer 前向。
         with self.gpt_opt.amp_ctx:
             with torch.amp.autocast('cuda', enabled=False):
                 raw_features_list = []
@@ -548,12 +577,10 @@ class InfinityTrainer(object):
                 tokens_remain=args.train_max_token_len,
             )
 
-            # In strict GRPO (trace_replay), the learning signal comes from replayed logp_new,
-            # not from the per-token CE loss graph. Keeping the CE autograd graph alongside
-            # the replay graph can exceed 80G even on A100.
+            # 严格 GRPO 的梯度来自“replay 后的新 logprob”，而不是普通 CE 图。
+            # 如果 replay 图和 packed CE 图同时保留，显存会非常大，因此这里先做模式切分。
             trainer_type = str(getattr(args, "trainer_type", "sft") or "sft").strip().lower()
-            # Optional per-batch hybrid override (works best with video_batch_size=1):
-            # allow switching between GRPO and sft based on dataset-provided role.
+            # hybrid 模式允许数据集按 batch 指定当前应走 SFT 还是 GRPO。
             if isinstance(hybrid_roles, list) and len(hybrid_roles) > 0:
                 uniq = {str(x or "").strip().lower() for x in hybrid_roles}
                 uniq.discard("")
@@ -567,9 +594,8 @@ class InfinityTrainer(object):
             new_mode = str(getattr(args, "grpo_new_logprob_mode", "trace_replay") or "trace_replay").strip().lower()
             aux = float(getattr(args, "grpo_aux_sft_coef", 0.0) or 0.0)
             pg_only_flag = int(getattr(args, "grpo_pg_only", 1) or 0) == 1
-            # In strict GRPO, the only gradient-bearing term is the PPO objective (computed from trace replay/CE).
-            # We keep the big packed forward in no_grad to save memory even if aux>0, and implement any auxiliary
-            # stabilizer loss inside the strict logprob path (so it doesn't force a full packed backward).
+            # 严格 GRPO 中，真正带梯度的是 PPO 目标。
+            # 因此大 packed forward 可以先放进 no_grad，只保留统计值，把显存让给后面的 replay/new-logprob 分支。
             pg_only = bool(use_grpo and new_mode in ("trace_replay", "trace_ce") and pg_only_flag)
 
             if pg_only:
@@ -584,7 +610,7 @@ class InfinityTrainer(object):
                         super_scale_lengths=super_scale_lengths,
                         super_querysid_super_refsid=super_querysid_super_refsid,
                         other_info_by_scale=other_info_by_scale,
-                    )  # loss & acc_bit: [seq_len] (metrics only)
+                    )  # 中文说明：loss & acc_bit: [seq_len] (metrics only)
             else:
                 loss, acc_bit, valid_sequence_ratio = self.gpt(
                     text_cond_tuple,
@@ -596,22 +622,22 @@ class InfinityTrainer(object):
                     super_scale_lengths=super_scale_lengths,
                     super_querysid_super_refsid=super_querysid_super_refsid,
                     other_info_by_scale=other_info_by_scale,
-                )  # loss & acc_bit: [seq_len]
+                )  # 中文说明：loss & acc_bit: [seq_len]
 
-            # [loss reweight]
-            # import pdb; pdb.set_trace()
+            # 多尺度损失重加权：按尺度体积比调节不同 level 的贡献。
+            # 代码/形状说明：import pdb; pdb.set_trace()
             acc_pt2scale_acc = {}
             acc_pt2scale_acc_counter = {}
             for full_pt, scale_schedule in self.dynamic_resolution_h_w[self.h_div_w_templates[0]][args.pn]['pt2scale_schedule'].items():
                 acc_pt2scale_acc[full_pt] = [[] for _ in range(len(scale_schedule))]
                 acc_pt2scale_acc_counter[full_pt] = [0 for _ in range(len(scale_schedule))]
-            
+
             flatten_L_list, flatten_acc_bit_list, flatten_weight_list = [], [], []
             flatten_pg_obj_list = []
             flatten_sample_ind_list: List[int] = []
             ptr = 0
             global_scale_ind = 0
-            # NOTE: use_grpo already computed above (keep consistent).
+            # 中文说明：NOTE: use_grpo already computed above (keep consistent).
             reward_t = None
             reward_act_t = None
             reward_task_t = None
@@ -637,16 +663,16 @@ class InfinityTrainer(object):
                 if bool(int(getattr(args, "grpo_require_old_logprob", 1))):
                     if oldlp_t is None:
                         raise RuntimeError(
-                            "GRPO strict mode requires grpo_old_logprob per sample; got missing/length-mismatch list."
+                            "GRPO strict mode 需要每个样本都有 grpo_old_logprob；当前列表缺失或长度不匹配。"
                         )
                     if isinstance(grpo_trace_files, list) and len(grpo_trace_files) == n_s:
                         for i_tf, tf in enumerate(grpo_trace_files):
                             if not isinstance(tf, list) or len(tf) <= 0:
-                                raise RuntimeError(f"GRPO strict mode requires grpo_trace_files; sample[{i_tf}] missing")
+                                raise RuntimeError(f"GRPO strict mode 需要 grpo_trace_files；sample[{i_tf}] 缺失")
                     else:
-                        raise RuntimeError("GRPO strict mode requires grpo_trace_files list aligned with batch")
-                # Preferred path: consume StageA-precomputed final advantage directly.
-                # Legacy fallback: reconstruct weights from reward levels inside the current batch.
+                        raise RuntimeError("GRPO strict mode 需要与 batch 对齐的 grpo_trace_files 列表")
+                # 首选直接消费 StageA 预先算好的 final advantage。
+                # 兼容路径则在当前 batch 内按 reward 字段重建权重。
                 if isinstance(grpo_adv_finals, list) and len(grpo_adv_finals) == n_s:
                     w_np = np.asarray([float(x) for x in grpo_adv_finals], dtype=np.float64)
                     adv_clip = float(getattr(args, "grpo_adv_clip", 0.0))
@@ -728,7 +754,7 @@ class InfinityTrainer(object):
                     else:
                         mode = str(getattr(args, "grpo_weight_mode", "raw_reward") or "raw_reward").strip().lower()
 
-                    # Build groups if available; else treat each sample as its own group.
+                    # 如果数据提供 group_id，则按组计算排名/门控；否则每个样本单独成组。
                     groups: Dict[str, List[int]] = {}
                     if isinstance(grpo_group_ids, list) and len(grpo_group_ids) == n_s:
                         for i, gid in enumerate(grpo_group_ids):
@@ -752,6 +778,7 @@ class InfinityTrainer(object):
                         )
 
                         def _rank01_average_ties(vals: np.ndarray) -> np.ndarray:
+                            """把组内 reward 排名归一化到 `[0, 1]`，并让并列项共享平均名次。"""
                             n = int(vals.shape[0])
                             if n <= 1:
                                 return np.zeros((n,), dtype=np.float64)
@@ -771,7 +798,7 @@ class InfinityTrainer(object):
                         w_rank = np.zeros((n_s,), dtype=np.float64)
                         for _, inds in groups.items():
                             idx = np.asarray(inds, dtype=np.int64)
-                            # rank-map on combined reward only (no act/task split required)
+                            # 在组内按合成 reward 排名；并列项共享平均名次。
                             s = _rank01_average_ties(r_np[idx])
                             mu = float(np.mean(r_np[idx])) if idx.size > 0 else 0.0
                             m = (r_np[idx] >= mu).astype(np.float64)
@@ -779,27 +806,27 @@ class InfinityTrainer(object):
                             w_rank[idx] = decay * m * s
                         w_np = w_rank
                     elif mode == "raw_reward":
-                        # raw_reward: keep w_np = raw combined reward
+                        # raw_reward：保留 w_np 为原始组合 reward。
                         pass
                     if mode:
-                        # Optional safety clip (does not change ordering, just bounds magnitude).
+                        # 可选安全裁剪：不改变排序，只限制数值幅度。
                         adv_clip = float(getattr(args, "grpo_adv_clip", 0.0))
                         if adv_clip and adv_clip > 0:
                             w_np = np.clip(w_np, -adv_clip, adv_clip)
                         weight_t = torch.tensor(w_np, dtype=loss.dtype, device=loss.device)
                 elif reward_t is not None and weight_t is None:
-                    # Fallback: if only grpo_reward is present.
+                    # 兜底逻辑：只有 grpo_reward 时使用。
                     w = reward_t
                     adv_clip = float(getattr(args, "grpo_adv_clip", 0.0))
                     if adv_clip and adv_clip > 0:
                         w = w.clamp(min=-adv_clip, max=adv_clip)
                     weight_t = w
-                # Safety: never allow NaN/Inf rewards/logprobs to poison PPO loss.
+                # 安全兜底：任何 NaN/Inf 都先转成 0，避免污染 PPO loss。
                 if weight_t is not None:
                     weight_t = torch.nan_to_num(weight_t, nan=0.0, posinf=0.0, neginf=0.0)
                     if bool(int(getattr(args, "grpo_require_nonnegative_adv", 1))):
                         if torch.any(weight_t < -1e-6):
-                            raise RuntimeError("grpo_adv_final contains negative weights under 0410 non-negative scheme")
+                            raise RuntimeError("在 0410 非负权重方案下，grpo_adv_final 不应包含负权重")
                 if reward_t is not None:
                     reward_t = torch.nan_to_num(reward_t, nan=0.0, posinf=0.0, neginf=0.0)
                 if reward_act_t is not None:
@@ -818,15 +845,16 @@ class InfinityTrainer(object):
                     reward_ce_t = torch.nan_to_num(reward_ce_t, nan=0.0, posinf=0.0, neginf=0.0)
                 if oldlp_t is not None:
                     oldlp_t = torch.nan_to_num(oldlp_t, nan=0.0, posinf=0.0, neginf=0.0)
-                # Strict PPO/GRPO ratio needs logprob_new computed on the SAME sampled token trace.
-                # Default to trace replay in the GRPO replay path.
+                # PPO 比率 `exp(logp_new - logp_old)` 必须在同一条采样 token 轨迹上计算。
+                # 所以严格路径默认回放 StageA 保存的 trace。
                 newlp_t: Optional[torch.Tensor] = None
                 new_mode = str(getattr(args, "grpo_new_logprob_mode", "trace_replay") or "trace_replay").strip().lower()
                 if oldlp_t is not None and weight_t is not None and new_mode in ("trace_replay", "trace_ce"):
                     if not (isinstance(grpo_trace_files, list) and len(grpo_trace_files) == n_s):
-                        raise RuntimeError("trace_replay requires grpo_trace_files aligned with batch")
-                    # Slice a per-sample text_cond_tuple from packed kv_compact.
+                        raise RuntimeError("trace_replay 需要与 batch 对齐的 grpo_trace_files")
+                    # 从 packed 的 text_cond_tuple 中切出单样本版本，供逐样本 replay 使用。
                     def _slice_text_cond_tuple(tup, sample_i: int):
+                        """从 packed 文本条件里切出第 `sample_i` 个样本。"""
                         kv_compact, lens, cu_seqlens_k, max_seqlen_k = tup
                         le = int(lens[sample_i])
                         st = int(cu_seqlens_k[sample_i].item()) if hasattr(cu_seqlens_k[sample_i], "item") else int(cu_seqlens_k[sample_i])
@@ -836,7 +864,7 @@ class InfinityTrainer(object):
                         cu_i = torch.tensor([0, le], device=kv_compact.device, dtype=cu_seqlens_k.dtype)
                         return (kv_i, lens_i, cu_i, le)
 
-                    # Build a minimal infer-args shim for inference-only fields.
+                    # 构造一个最小 infer-args，仅包含推理回放真正需要的字段。
                     import types as _types
                     base = vars(args).copy()
                     base.setdefault("use_cfg", 1)
@@ -845,17 +873,8 @@ class InfinityTrainer(object):
                     base.setdefault("apg_norm_threshold", float(getattr(args, "apg_norm_threshold", 0.0)))
                     infer_args = _types.SimpleNamespace(**base)
 
-                    # IMPORTANT:
-                    # Trace-replay runs a custom autoregressive loop (NOT model.forward),
-                    # so when using FSDP (zero=3), root-owned parameters (e.g. cfg_uncond/text_proj)
-                    # remain sharded unless we explicitly unshard them.
-                    # However, the big transformer chunks are wrapped as nested FSDP units and will
-                    # unshard themselves on their own forward calls inside replay.
-                    #
-                    # Strategy: if self.gpt is FSDP, temporarily summon FULL params for the ROOT FSDP
-                    # instance only (recurse=False) so root-owned params are materialized, then call
-                    # replay on the underlying module. This avoids gathering the entire 8B model on
-                    # each rank.
+                    # trace-replay 不是普通 `model.forward`，所以 FSDP 根模块上的参数
+                    # 可能仍是分片状态。这里仅临时 unshard 根模块，避免整模型全量 gather。
                     try:
                         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP  # type: ignore
                     except Exception:
@@ -879,20 +898,20 @@ class InfinityTrainer(object):
                             tfl = grpo_trace_files[si]
                             tf0 = tfl[0] if isinstance(tfl, list) and len(tfl) > 0 else ""
                             if not tf0 or (not osp.exists(tf0)):
-                                raise RuntimeError(f"trace_replay missing trace file for sample[{si}]: {tf0}")
+                                raise RuntimeError(f"trace_replay 缺少 sample[{si}] 的 trace 文件: {tf0}")
                             tr = torch.load(tf0, map_location="cpu")
                             idx_trace = tr.get("idx_trace", None)
                             if idx_trace is None:
-                                raise RuntimeError(f"trace_replay missing idx_trace in {tf0}")
+                                raise RuntimeError(f"trace_replay 在 {tf0} 中缺少 idx_trace")
                             clipid_target = tr.get("clipid_target", None)
                             try:
                                 clipid_target_i = int(clipid_target) if clipid_target is not None else None
                             except Exception:
                                 clipid_target_i = None
-                            # Token count for selected-token KL normalization.
+                            # 选中 token 的数量，用来做 KL / logprob 归一化。
                             tok_cnt = 0
                             try:
-                                # If step_clipids is present, only count tokens belonging to the target clip.
+                                # 若 trace 记录了 step_clipids，则只统计目标 clip 的 token 数。
                                 step_clipids = tr.get("step_clipids", None)
                                 use_step_clipids = (
                                     clipid_target_i is not None
@@ -917,15 +936,11 @@ class InfinityTrainer(object):
                             context_info = tr.get("context_info", None)
                             if scale_schedule is None or context_info is None:
                                 raise RuntimeError(
-                                    f"trace_replay requires scale_schedule/context_info in {tf0} (rerun StageA after server update)"
+                                    f"trace_replay 在 {tf0} 中需要 scale_schedule/context_info（请在服务端更新后重跑 StageA）"
                                 )
                             cfg_scale = float(tr.get("infinity_cfg", 1.0))
-                            # Debug/memory knob: force CFG=1.0 during StageB trace-replay.
-                            # This disables the cond+uncond double-branch (bs=2*B) in prepare_text_conditions,
-                            # and can halve replay KV/activation memory.
-                            #
-                            # IMPORTANT: this breaks strict PPO semantics if StageA old_logprob was collected
-                            # under cfg!=1. Use only for debugging OOM; for strict runs, rerun StageA with cfg=1.
+                            # 调试开关：在 StageB 强制 CFG=1，可把 cond/uncond 双分支缩成单分支，
+                            # 但会破坏严格 PPO 语义，只适合排查 OOM。
                             try:
                                 import os as _os
                                 v = _os.environ.get("INFINITY_GRPO_FORCE_CFG", "").strip()
@@ -935,16 +950,16 @@ class InfinityTrainer(object):
                                 pass
                             tau_list = tr.get("tau_list", None)
                             if not isinstance(tau_list, list) or len(tau_list) < len(scale_schedule):
-                                raise RuntimeError(f"trace_replay requires tau_list aligned to scale_schedule in {tf0}")
+                                raise RuntimeError(f"trace_replay 需要 {tf0} 中的 tau_list 与 scale_schedule 对齐")
                             top_k = int(tr.get("top_k", 0))
                             top_p = float(tr.get("top_p", 0.0))
                             gt_leak = int(tr.get("gt_leak", -1))
                             gt_ls_Bl = tr.get("gt_ls_Bl", None)
                             if gt_leak > 0 and gt_ls_Bl is None:
                                 raise RuntimeError(
-                                    f"trace_replay requires gt_ls_Bl when gt_leak>0 in {tf0} (rerun StageA after server update)"
+                                    f"trace_replay 在 gt_leak>0 时需要 {tf0} 提供 gt_ls_Bl（请在服务端更新后重跑 StageA）"
                                 )
-                            # Optional debug: print which clip is being replayed (helps pinpoint clip3-only OOM).
+                            # 可选调试：打印当前回放的是哪个 clip，方便定位 clip3 之类的特定 OOM。
                             try:
                                 import os as _os
                                 if int(_os.environ.get("INFINITY_GRPO_DEBUG_REPLAY", "0") or 0) == 1:
@@ -957,19 +972,15 @@ class InfinityTrainer(object):
                                         )
                             except Exception:
                                 pass
-                            # NOTE (memory): gt_ls_Bl can be ~10+ MiB per sample for long prefixes.
-                            # Moving the entire list to GPU upfront can trigger CUDA OOM when replay is near the limit.
-                            # We pass it through as-is and let replay move per-step slices as needed.
+                            # `gt_ls_Bl` 可能非常大，先保持在 CPU，让 replay 按 step 懒加载到 GPU。
                             gt_ls_gpu = gt_ls_Bl
                             cfg_list = [cfg_scale] * int(len(scale_schedule))
                             label_i = _slice_text_cond_tuple(text_cond_tuple, si)
                             if new_mode == "trace_replay":
-                                # Memory safety for strict trace-replay:
-                                # Offload saved tensors to CPU to prevent GPU OOM.
+                                # 严格 trace-replay 的显存保护：把保存的 autograd tensor 挪到 CPU。
                                 use_save_on_cpu = int(getattr(args, "grpo_replay_save_on_cpu", 1) or 0) == 1
                                 pin_save_on_cpu = int(getattr(args, "grpo_replay_save_on_cpu_pin", 1) or 0) == 1
-                                # Optional: only offload the heaviest clip (typically clipid_target==3).
-                                # This keeps strictness (exact gradient), but can avoid host OOM by not offloading every sample.
+                                # 可选：只给最重的 clip 开 CPU offload，减少主机内存压力。
                                 try:
                                     import os as _os
                                     if int(_os.environ.get("INFINITY_GRPO_SAVE_ON_CPU_CLIP3_ONLY", "0") or 0) == 1:
@@ -1010,8 +1021,8 @@ class InfinityTrainer(object):
                                         )
                                 newlp_t[si] = lp[0]
                             else:
-                                # trace_ce: teacher-forcing evaluation in a single forward pass (no KV-cache replay).
-                                # This is the standard PPO/RLHF approach for computing logp_new on chosen tokens.
+                                # `trace_ce` 走 teacher-forcing 单次前向，不回放 KV cache，
+                                # 属于更传统的 PPO / RLHF 新 logprob 计算方式。
                                 import math as _math
                                 import json as _json
                                 import torch.nn.functional as _F
@@ -1020,17 +1031,16 @@ class InfinityTrainer(object):
 
                                 gpt_eval = getattr(self, "gpt", None)
                                 if gpt_eval is None:
-                                    raise RuntimeError("trace_ce requires self.gpt (FSDP/DDP) to run a forward pass")
+                                    raise RuntimeError("trace_ce 需要 self.gpt (FSDP/DDP) 才能执行一次 forward")
 
-                                # Build repeat-aware mapping from each scale -> last-repeat trace index (cache step id).
-                                # Prefer repetition recorded in StageA trace to guarantee strict alignment.
+                                # 建立“尺度 -> 最后一次重复 step”的映射，确保和 StageA 的重复策略严格对齐。
                                 try:
                                     img_rep_s = str(tr.get("image_scale_repetition", getattr(infer_args, "image_scale_repetition", "[1]"))).strip()
                                     vid_rep_s = str(tr.get("video_scale_repetition", getattr(infer_args, "video_scale_repetition", "[1]"))).strip()
                                     image_rep = np.array(_json.loads(img_rep_s))
                                     video_rep = np.array(_json.loads(vid_rep_s))
                                 except Exception as e:
-                                    raise RuntimeError(f"trace_ce requires valid image/video_scale_repetition: {e}")
+                                    raise RuntimeError(f"trace_ce 需要合法的 image/video_scale_repetition: {e}")
                                 first_full = _ffssi(scale_schedule)
                                 scales_in_one_clip = int(first_full) + 1
                                 max_repeat_times = int(getattr(infer_args, "max_repeat_times", 999999))
@@ -1051,18 +1061,19 @@ class InfinityTrainer(object):
                                 total_steps = int(step_ptr0)
                                 if not (isinstance(idx_trace, list) and len(idx_trace) >= total_steps):
                                     raise RuntimeError(
-                                        f"trace_ce expects idx_trace list length >= total_steps ({len(idx_trace) if isinstance(idx_trace, list) else 'NA'} < {total_steps})"
+                                        f"trace_ce 期望 idx_trace 列表长度 >= total_steps ({len(idx_trace) if isinstance(idx_trace, list) else 'NA'} < {total_steps})"
                                     )
 
-                                # Prepare VAE-scale schedule.
+                                # 根据是否 patchify，准备 VAE 视角下的尺度表。
                                 apply_patchify = bool(getattr(gpt_replay, "apply_spatial_patchify", False))
                                 if apply_patchify:
                                     vae_scale_schedule = [(int(pt), int(2 * ph), int(2 * pw)) for (pt, ph, pw) in scale_schedule]
                                 else:
                                     vae_scale_schedule = [(int(pt), int(ph), int(pw)) for (pt, ph, pw) in scale_schedule]
 
-                                # Helper: latent [B, d, t, h, w] -> raw visual tokens [B, t*h*w, d] (or patchified).
+                                # 辅助函数：把 latent `[B, d, t, h, w]` 还原成原始视觉 token 序列。
                                 def _latent_to_raw_tokens(lat: torch.Tensor) -> torch.Tensor:
+                                    """把 latent 重排成 `[B, token_num, dim]` 的 token 序列。"""
                                     if apply_patchify:
                                         _x = lat.permute(0, 2, 1, 3, 4)  # [B, t, d, 2h, 2w]
                                         _x = torch.nn.functional.pixel_unshuffle(_x, 2)  # [B, t, 4d, h, w]
@@ -1072,10 +1083,9 @@ class InfinityTrainer(object):
                                     _x = _x.reshape(_x.shape[0], _x.shape[1], -1).permute(0, 2, 1).contiguous()
                                     return _x
 
-                                # Build per-scale inputs/labels/rope from the cached (last-repeat) trace token,
-                                # and update latent state from idx_trace (no transformer).
+                                # 按尺度拼装输入 / 标签 / rope，并用 idx_trace 更新 latent 状态。
                                 B1 = 1
-                                # Use model dtype for latent math; forward will cast x_BLC to fp32 anyway.
+                                # latent 运算尽量沿用模型 dtype；真正前向时会再转成 fp32。
                                 lat_dtype = model_dtype
                                 device0 = loss.device
                                 vae_embed_dim = int(
@@ -1089,8 +1099,7 @@ class InfinityTrainer(object):
                                 else:
                                     noise0 = torch.zeros((1, vae_embed_dim, *vae_scale_schedule[0]), device=device0, dtype=lat_dtype)
                                 summed_code = noise0[0:1]
-                                # Deterministic scale selection:
-                                # Prefer StageA-provided selection list to guarantee strict old/new logprob alignment.
+                                # 尺度选择必须确定性复现，优先使用 StageA 保存的选择结果。
                                 select_si_list = None
                                 try:
                                     sel = tr.get("trace_ce_select_si_list", None)
@@ -1120,17 +1129,18 @@ class InfinityTrainer(object):
                                             else:
                                                 select_si_list = [S - 1, 2 * S - 1] + list(range(2 * S, min(L, 2 * S + 11)))
                                         else:
-                                            # Generic fallback: keep all first clip + one high-res scale from target clip if possible.
+                                            # 兜底策略：保留完整首个 clip，再尽量从目标 clip 保留一个高分辨率尺度。
                                             select_si_list = list(range(min(L, S)))
                                             tgt = min(L - 1, c * S + (S - 1))
                                             if tgt not in select_si_list:
                                                 select_si_list.append(tgt)
-                                        # Ensure unique & in-range.
+                                        # 确保唯一且不越界。
                                         select_si_list = sorted({int(x) for x in select_si_list if 0 <= int(x) < L})
                                 except Exception:
                                     select_si_list = list(range(len(scale_schedule)))
 
-                                # Remap context_info ref_sids to selected subset (drop missing refs).
+                                # 把原始 context_info 里的 ref_sids 重映射到“当前选中的尺度子集”；
+                                # 没有被选中的引用尺度会在这里被丢掉。
                                 real_si_2_new_si: Dict[int, int] = {int(r): int(i2) for i2, r in enumerate(select_si_list)}
                                 new_scale_pack_info: Dict[int, Dict[str, Any]] = {}
                                 for new_q, real_q in enumerate(select_si_list):
@@ -1144,7 +1154,9 @@ class InfinityTrainer(object):
                                         if nn is not None:
                                             new_scale_pack_info[int(new_q)]["ref_sids"].append(int(nn))
 
-                                # Build x_BLC/gt_BL/visual_rope_cache for selected scales (teacher forcing).
+                                # 为 `trace_ce` 的 teacher-forcing 单次前向构造选中尺度输入：
+                                # `x_BLC` 是视觉 token，`gt_BL` 是对应 bit-label 监督，
+                                # `visual_rope_cache` 则保证这些尺度的位置编码仍然对齐。
                                 x_scales = []
                                 gt_scales = []
                                 rope_scales = []
@@ -1153,13 +1165,13 @@ class InfinityTrainer(object):
                                 clipids = []
                                 for _si, _pn in enumerate(scale_schedule):
                                     pt, ph, pw = int(_pn[0]), int(_pn[1]), int(_pn[2])
-                                    # compute current scale input (downsampled summed_code)
+                                    # 计算当前尺度输入：把累计 latent 下采样到当前尺度。
                                     this_lat = summed_code
                                     if tuple(this_lat.shape[-3:]) != tuple(vae_scale_schedule[_si]):
                                         this_lat = _F.interpolate(this_lat, size=vae_scale_schedule[_si], mode=self.vae_local.quantizer.z_interplote_down).contiguous()
                                     if int(_si) in real_si_2_new_si:
                                         x_scales.append(_latent_to_raw_tokens(this_lat))
-                                        # rope cache uses cached-step real_si (last repeat)
+                                        # RoPE cache 使用当前尺度最后一次重复对应的真实 step 编号。
                                         rope_scales.append(
                                             self.get_visual_rope_embeds(
                                                 gpt_replay.rope2d_freqs_grid,
@@ -1190,8 +1202,8 @@ class InfinityTrainer(object):
                                             forced = forced.unsqueeze(0)
                                         gt_scales.append(forced.reshape(B1, mul, d_label).contiguous())
 
-                                    # Update latent state from cached token at this scale (keeps conditioning consistent).
-                                    # Target spatial size for codes accumulation.
+                                    # 用该尺度缓存 token 更新 latent 状态，保持后续条件一致。
+                                    # codes 累加使用的目标空间尺寸。
                                     if _si < scales_in_one_clip:
                                         target_pn = vae_scale_schedule[int(first_full)]
                                     else:
@@ -1240,7 +1252,7 @@ class InfinityTrainer(object):
                                         codes = _F.interpolate(codes, size=target_pn, mode=self.vae_local.quantizer.z_interplote_up)
                                     summed_code = _F.interpolate(summed_code, size=target_pn, mode=self.vae_local.quantizer.z_interplote_up).contiguous()
                                     summed_code = summed_code + codes
-                                    # advance to next scale input (downsample if needed) is handled at loop head
+                                    # 下一尺度输入会在下一轮循环开头统一处理，需要时再下采样。
 
                                     if _si < len(scale_schedule) - 1:
                                         if tuple(scale_schedule[int(_si)][-2:]) == tuple(scale_schedule[-1][-2:]):
@@ -1261,14 +1273,14 @@ class InfinityTrainer(object):
                                     int(first_full),
                                 )
 
-                                # Build super_scale_lengths and querysid_refsid (same logic as `video_encode`).
+                                # 构造 super_scale_lengths 和 querysid_refsid，逻辑与 `video_encode` 保持一致。
                                 kv_i, lens_i, cu_i, le = label_i
                                 text_lens = list(lens_i)
                                 scale_lengths = [int(np.array(scale_schedule[si]).prod()) for si in select_si_list] + [int(x) for x in text_lens]
                                 valid_scales = int(len(select_si_list) + len(text_lens))
-                                # Match Infinity.forward padding regime: after concatenating (visual + text),
-                                # the model pads to pad_to_multiplier when train_with_var_seq_len=1.
-                                # build_flex_attn_func asserts sum(super_scale_lengths) == padded_seq_len.
+                                # 对齐 Infinity.forward 的 padding 规则：视觉+文本拼接后，
+                                # train_with_var_seq_len=1 时会补齐到 pad_to_multiplier。
+                                # 代码/形状说明：build_flex_attn_func asserts sum(super_scale_lengths) == padded_seq_len.
                                 cur_seq_len = int(np.sum(scale_lengths))
                                 try:
                                     if int(getattr(args, "train_with_var_seq_len", 0) or 0) == 1:
@@ -1287,7 +1299,7 @@ class InfinityTrainer(object):
                                 for i_sid in range(valid_scales):
                                     qref[i_sid][i_sid] = True
                                 base = 0
-                                # Only one packed sample (B=1): ind=0, global_text_sid = len(flatten_packing_scales)+0.
+                                # 代码/形状说明：Only one packed sample (B=1): ind=0, global_text_sid = len(flatten_packing_scales)+0.
                                 for local_q in range(len(select_si_list)):
                                     global_q = local_q + base
                                     global_text_sid = len(select_si_list) + 0
@@ -1295,14 +1307,14 @@ class InfinityTrainer(object):
                                     for local_r in new_scale_pack_info[int(local_q)]["ref_sids"]:
                                         qref[global_q][base + int(local_r)] = True
 
-                                # Disable condition-drop randomness during policy scoring (keep deterministic ratio).
+                                # 中文说明：Disable condition-drop randomness during policy scoring (keep deterministic ratio).
                                 orig_cdr = float(getattr(gpt_replay, "cond_drop_rate", 0.0) or 0.0)
                                 try:
                                     gpt_replay.cond_drop_rate = 0.0
                                 except Exception:
                                     pass
                                 try:
-                                    # Keep model in training mode so checkpointing (`full-block`) stays enabled.
+                                    # 保持 training mode，使 `full-block` checkpointing 仍然启用。
                                     with torch.amp.autocast("cuda", dtype=model_dtype):
                                         loss_tok, _, _ = gpt_eval(
                                             label_i,
@@ -1321,11 +1333,11 @@ class InfinityTrainer(object):
                                     except Exception:
                                         pass
 
-                                # Convert mean-over-d token loss -> logprob, and select only target clip.
+                                # 把按 d 维求均值的 token loss 转成 logprob，并只选目标 clip。
                                 nll_target = torch.zeros((1,), dtype=loss.dtype, device=device0)
-                                # Token counts:
-                                # - tok_cnt_elems: number of bit-elements (mul*d_label) matching summed logprob units,
-                                #                 used for selected-token KL normalization.
+                                # 中文说明：Token counts:
+                                # tok_cnt_elems 是 bit 元素数（mul*d_label），与求和 logprob 的单位一致，
+                                # 用于选中 token 的 KL 归一化。
                                 tok_cnt_elems = 0
                                 tok_ptr = 0
                                 for j, si_real in enumerate(select_si_list):
@@ -1338,24 +1350,25 @@ class InfinityTrainer(object):
                                     nll_target = nll_target + seg.sum() * dlab
                                     tok_cnt_elems += int(mul) * int(dlabels[j])
                                 newlp_t[si] = (-nll_target)[0]
-                                # Optional auxiliary stabilizer: mean teacher-forcing CE on target-clip tokens.
-                                # This is a cheap "quality/anti-collapse" constraint and does NOT require a full packed backward.
+                                # 可选辅助稳定项：只在目标 clip token 上计算 teacher-forcing CE 均值。
+                                # 这是轻量的“质量/防坍缩”约束，不需要完整 packed backward。
                                 if aux_sft_by_sample is not None:
-                                    # `nll_target` is summed over (mul*d_label) elements; normalize by element count.
+                                    # `nll_target` 已按 (mul*d_label) 元素求和，这里再除以元素数做归一化。
                                     aux_sft_by_sample[si] = (nll_target / float(max(1, tok_cnt_elems)))[0]
-                                # Override tok_t using deterministic counts from trace_ce packing.
-                                # This avoids KL normalization spikes when idx_trace/step_clipids counting fails.
+                                # 用 trace_ce packing 得到的确定性计数覆盖 tok_t。
+                                # 这样即使 idx_trace/step_clipids 计数失败，也不会造成 KL 归一化尖峰。
                                 try:
                                     if int(tok_cnt_elems) > 0:
                                         tok_t[si] = float(tok_cnt_elems)
                                 except Exception:
                                     pass
 
-                    # PPO-style clipped objective per sample (must handle +/- advantage correctly).
-                    # Standard PPO:
-                    #   obj = min(ratio*A, clip(ratio)*A) when A>=0
-                    #   obj = max(ratio*A, clip(ratio)*A) when A<0
-                    # Compute ratio in fp32 to avoid fp16/bf16 exp overflow (inf) and 0*inf -> nan.
+                    # 这里进入标准 PPO / GRPO 主目标：
+                    # - `ratio = exp(new_logprob - old_logprob)`；
+                    # - 优势/权重 >= 0 时取 `min(ratio*A, clip(ratio)*A)`；
+                    # - 优势/权重 < 0 时取 `max(ratio*A, clip(ratio)*A)`。
+                    # ratio 强制用 fp32 计算，避免 fp16/bf16 下 exp 溢出成 inf，
+                    # 再与 0 相乘产生 nan。
                     delta = (newlp_t - oldlp_t).to(torch.float32).clamp(min=-60.0, max=60.0)
                     ratio = torch.exp(delta)
                     eps = float(getattr(args, "grpo_ratio_eps", 0.2))
@@ -1366,12 +1379,14 @@ class InfinityTrainer(object):
                     obj = torch.where(wt32 >= 0, torch.minimum(unclipped, clipped), torch.maximum(unclipped, clipped))
                     pg_by_sample = (-obj).to(loss.dtype)
                     beta = float(getattr(args, "grpo_kl_beta", 0.0) or 0.0)
-                    # selected-token KL approximation (cheap): E[logpi_new - logpi_ref] over selected tokens
+                    # 这里的 KL 不是全分布精确 KL，而是“离线采样 token 上的便宜近似”：
+                    # 只在被选中的 token 上估计 `E[logpi_new - logpi_ref]`。
                     if beta > 0:
                         if isinstance(grpo_ref_logprobs, list) and len(grpo_ref_logprobs) == n_s:
                             ref_t = torch.tensor([float(x) for x in grpo_ref_logprobs], dtype=loss.dtype, device=loss.device)
                         else:
-                            # fallback: treat old policy as ref (valid when rollout ckpt == ref ckpt)
+                            # 兜底：若没有显式 ref_logprob，就把 old policy 当成 ref。
+                            # 这在 rollout checkpoint 与参考 checkpoint 相同的场景下是成立的。
                             ref_t = oldlp_t
                         ref_t = torch.nan_to_num(ref_t, nan=0.0, posinf=0.0, neginf=0.0)
                         tok_safe = torch.nan_to_num(tok_t, nan=1.0, posinf=1.0, neginf=1.0).clamp_min(1.0)
@@ -1379,13 +1394,14 @@ class InfinityTrainer(object):
                         kl_per_token = torch.nan_to_num(kl_per_token, nan=0.0, posinf=0.0, neginf=0.0)
                         approx_kl = kl_per_token.mean()
                         metric_lg.update(approx_kl=approx_kl)
-                        # IMPORTANT: this is an *approximation* computed on offline sampled tokens, so it can be
-                        # slightly negative due to sampling noise / mismatch. A negative "KL penalty" would
-                        # incorrectly *reward* divergence. We clamp the penalty to be non-negative.
+                        # 重要：这只是基于离线采样 token 的近似 KL。
+                        # 受采样噪声和策略不匹配影响，它可能出现轻微负值；
+                        # 负的“KL 惩罚”会反过来奖励策略发散，所以这里把惩罚项裁成非负。
                         kl_pen = kl_per_token.clamp_min(0.0)
                         pg_by_sample = pg_by_sample + beta * kl_pen
-                    # Add auxiliary stabilizer loss per sample (trace_ce only).
-                    # NOTE: This is intentionally added inside the strict PPO loss so it remains memory-efficient.
+                    # `trace_ce` 模式下可以再给每条样本加一个辅助稳定项 `aux_sft`。
+                    # 这里故意把它直接并入 strict PPO 目标，而不是额外跑一次完整 packed backward，
+                    # 这样显存更省。
                     if aux_sft_by_sample is not None and float(aux) > 0:
                         pg_by_sample = pg_by_sample + float(aux) * aux_sft_by_sample.to(pg_by_sample.dtype)
             for sample_ind, item in enumerate(sequece_packing_scales):
@@ -1416,10 +1432,10 @@ class InfinityTrainer(object):
                     if use_grpo and weight_t is not None:
                         adv = weight_t[sample_ind]
                         if pg_by_sample is not None:
-                            # Trace-replay PPO objective (per-sample), broadcast to all scales for weighting.
+                            # Trace-replay 的逐样本 PPO 目标，广播到所有尺度用于加权。
                             pg_obj = pg_by_sample[sample_ind]
                         elif oldlp_t is not None:
-                            # Legacy proxy: per-scale negative CE as logp_new estimate (kept for compatibility).
+                            # 兼容旧逻辑：把逐尺度负 CE 当作 logp_new 估计。
                             logp_new = -loss_this_scale
                             delta = (logp_new - oldlp_t[sample_ind]).to(torch.float32).clamp(min=-60.0, max=60.0)
                             ratio = torch.exp(delta)
@@ -1434,7 +1450,7 @@ class InfinityTrainer(object):
                                 kl_proxy = (logp_new - oldlp_t[sample_ind]) ** 2
                                 pg_obj = pg_obj + float(getattr(args, "grpo_kl_beta", 0.0)) * kl_proxy
                         else:
-                            # Fallback: reward-weighted policy-gradient proxy without ratio clipping.
+                            # 兜底逻辑：不做 ratio clipping 的 reward 加权 policy-gradient 近似。
                             pg_obj = adv * loss_this_scale
                         if pg_obj is not None:
                             flatten_pg_obj_list.append(pg_obj)
@@ -1445,15 +1461,15 @@ class InfinityTrainer(object):
             flatten_weight_list = flatten_weight_list / flatten_weight_list.sum()
             sft_loss = (torch.stack(flatten_L_list) * flatten_weight_list).sum()
             if use_grpo and len(flatten_pg_obj_list) == len(flatten_L_list) and len(flatten_pg_obj_list) > 0:
-                # Non-strict fallback path (e.g. no old_logprob): keep legacy behavior.
+                # 中文说明：Non-strict fallback path (e.g. no old_logprob): keep legacy behavior.
                 rl_loss = (torch.stack(flatten_pg_obj_list) * flatten_weight_list).sum()
-                # Optional hybrid scaling: shrink GRPO update magnitude when mixing with a stronger SFT anchor.
+                # 可选混合缩放：当 GRPO 与更强的 SFT anchor 混训时，压低 RL 更新幅度。
                 rl_coef = float(getattr(args, "grpo_hybrid_rl_coef", 1.0) or 1.0)
                 if rl_coef != 1.0:
                     rl_loss = rl_loss * rl_coef
                 aux = float(getattr(args, "grpo_aux_sft_coef", 0.0) or 0.0)
-                # If strict PPO objective is present (pg_by_sample != None), auxiliary is already included there
-                # (for trace_ce) and we must NOT force a full packed backward via sft_loss.
+                # 若严格 PPO 目标存在（pg_by_sample != None），辅助项已经在 trace_ce 分支里合入，
+                # 不能再通过 sft_loss 强制触发完整 packed backward。
                 if pg_by_sample is not None:
                     final_loss = rl_loss
                 else:
@@ -1461,43 +1477,46 @@ class InfinityTrainer(object):
             else:
                 final_loss = sft_loss
             final_acc_bit = (torch.stack(flatten_acc_bit_list) * flatten_weight_list).sum()
-        
-        # [backward]
+
+        # 反向阶段：统一由 AmpOptimizer 负责 mixed precision / grad clip / step。
         grad_norm_t, scale_log2_t = self.gpt_opt.backward_clip_step(ep=epoch, it=it, g_it=g_it, stepping=stepping, loss=final_loss, clip_decay_ratio=clip_decay_ratio)
-        
-        # update ema 
+
+        # EMA 更新公式仍是 `ema = decay * ema + (1 - decay) * param`。
         if args.use_fsdp_model_ema and (args.model_ema_decay < 1):
             update_ema(self.gpt_ema, self.gpt)
 
-        # [zero_grad]
+        # 只有真的发生 optimizer.step 时才清空梯度。
         if stepping:
             self.gpt_opt.optimizer.zero_grad(set_to_none=True)
 
-        # Optional debug export: decode per-segment latent clips and run TSformer trajectory.
+        # 可选导出：把当前 step 的 latent clip 解码并做 TSformer 轨迹分析。
         self._tf_dump_step_trajectory(raw_features_list=raw_features_list, g_it=g_it, args=args)
-        
-        # [metric logging]
+
+        # 指标聚合：先按尺度整理，再跨卡 all_reduce。
         if metric_lg.log_every_iter or it == 0 or it in metric_lg.log_iters:
             def sum_dict(acc_pt2scale_acc):
+                """把按尺度收集的 tensor 列表压成逐尺度总和。"""
                 for full_pt in acc_pt2scale_acc:
                     for si in range(len(acc_pt2scale_acc[full_pt])):
                         acc_pt2scale_acc[full_pt][si] = torch.tensor(acc_pt2scale_acc[full_pt][si]).sum()
                 return acc_pt2scale_acc
 
             def dict2list(acc_pt2scale_acc):
+                """把嵌套字典拍平成列表，方便组成一个 all_reduce 张量。"""
                 flatten_acc_pt2scale_acc = []
                 for key, val in acc_pt2scale_acc.items():
                     flatten_acc_pt2scale_acc.extend(val)
                 return flatten_acc_pt2scale_acc
-            
+
             def list2dict(acc_pt2scale_acc, flatten_acc_pt2scale_acc):
+                """把 all_reduce 后的扁平列表按原结构写回字典。"""
                 ptr = 0
                 for key in acc_pt2scale_acc:
                     for ind in range(len(acc_pt2scale_acc[key])):
                         acc_pt2scale_acc[key][ind] = flatten_acc_pt2scale_acc[ptr]
                         ptr += 1
                 return acc_pt2scale_acc
-            
+
             acc_pt2scale_acc = sum_dict(acc_pt2scale_acc)
             flatten_acc_pt2scale_acc = dict2list(acc_pt2scale_acc)
             flatten_acc_pt2scale_acc_counter = dict2list(acc_pt2scale_acc_counter)
@@ -1543,6 +1562,7 @@ class InfinityTrainer(object):
             success_negative_ratio = None
             if use_grpo and weight_t is not None:
                 def _sum_and_count(tensor):
+                    """把一个指标张量安全地转换成“总和 + 样本数”。"""
                     if tensor is None:
                         return (
                             torch.tensor(0.0, dtype=torch.float32, device=loss.device),
@@ -1616,6 +1636,7 @@ class InfinityTrainer(object):
                 tdist.all_reduce(weight_max_t, op=tdist.ReduceOp.MAX)
 
                 def _safe_mean(sum_idx, cnt_idx):
+                    """从 `reward_stats` 中安全读取均值；计数为 0 时返回 None。"""
                     denom = reward_stats[cnt_idx].item()
                     if denom <= 0:
                         return None
@@ -1693,14 +1714,14 @@ class InfinityTrainer(object):
                 w_max=weight_max if log_weight_stats else None,
                 succ_neg=success_negative_ratio if log_weight_stats else None,
                 neff=neff_count,
-            )    # todo: Accm, Acct
+            )    # 中文说明：todo: Accm, Acct
             if stable_metrics:
                 metric_lg.update(**stable_metrics)
             wandb_log_dict = {
                 'Overall/train_loss': train_loss,
                 'Overall/train_acc': train_acc*base,
                 'Overall/grad_norm_t': grad_norm_t,
-                'Overall/video_batch_ratio': (1-is_image_batch)*100., 
+                'Overall/video_batch_ratio': (1-is_image_batch)*100.,
                 'Overall/valid_sequence_ratio': valid_sequence_ratio*100.,
             }
             if reward_task_raw_mean is not None:
@@ -1747,39 +1768,44 @@ class InfinityTrainer(object):
                         wandb_log_dict[f'Details/Num/t{duration:04.1f}s/s{si+1:03d}'] = acc_pt2scale_acc_counter[full_pt][si]
             wandb_utils.log(wandb_log_dict, step=g_it)
         return grad_norm_t, scale_log2_t
-        
+
     def __repr__(self):
+        """返回训练器配置与结构摘要，便于日志打印。"""
         return (
             f'\n'
             f'[VGPTTr.config]: {pformat(self.get_config(), indent=2, width=250)}\n'
             f'[VGPTTr.structure]: {super(InfinityTrainer, self).__repr__().replace(InfinityTrainer.__name__, "")}'
         )
-    
+
     def ema_load(self):
+        """把在线模型参数临时替换成 EMA 参数，常用于验证前切换。"""
         self.cached_state_not_ema = {k: v.cpu() for k, v in self.gpt_wo_ddp.state_dict().items()}
         for pi, p_ema in self.pi_para_copy_for_parallel_ema:
             self.gpt_opt.paras[pi].data.copy_(p_ema)
         for pi, para in enumerate(self.gpt_opt.paras):
             dist.broadcast(para, src_rank=pi % dist.get_world_size())
-    
+
     def ema_recover(self):
+        """从缓存中恢复非 EMA 的原始训练参数。"""
         self.gpt_wo_ddp.load_state_dict(self.cached_state_not_ema)
         del self.cached_state_not_ema
         self.cached_state_not_ema = None
-    
+
     def get_config(self):
+        """导出需要随 checkpoint 一起保存的轻量训练状态。"""
         return {
             'label_smooth': self.label_smooth,
             'prog_it':      self.prog_it, 'last_prog_si': self.last_prog_si, 'first_prog': self.first_prog,
         }
-    
+
     def state_dict(self):
+        """打包训练器状态，包括配置、VAE、模型和优化器。"""
         m = self.vae_local
         if hasattr(m, '_orig_mod'):
             m = m._orig_mod
         state = {'config': self.get_config(), 'vae_local': m.state_dict()}
-        
-        if self.zero:   # TODO: fixme
+
+        if self.zero:   # 中文说明：待修复；zero 路径需要单独处理 state_dict 加载细节。
             state['gpt_fsdp'] = None
             with FSDP.state_dict_type(self.gpt, StateDictType.FULL_STATE_DICT, fullstate_save_policy, fulloptstate_save_policy):
                 state['gpt_fsdp'] = self.gpt.state_dict()
@@ -1788,9 +1814,9 @@ class InfinityTrainer(object):
                 state['gpt_fsdp_opt'] = FSDP.optim_state_dict(model=self.gpt, optim=self.gpt_opt.optimizer, optim_state_dict=self.gpt_opt.optimizer.state_dict())
             if self.gpt_opt.scaler is not None:
                 state['gpt_opt_scaler'] = self.gpt_opt.scaler.state_dict()
-        
+
         else:
-            
+
             for k in ('gpt_wo_ddp', 'gpt_opt'):
                 m = getattr(self, k)
                 if m is not None:
@@ -1798,27 +1824,28 @@ class InfinityTrainer(object):
                         m = m._orig_mod
                     state[k] = m.state_dict()
         return state
-    
+
     def load_state_dict(self, state, strict=True, skip_vae=False):
+        """从 checkpoint 恢复模型、优化器和训练进度状态。"""
         if self.zero:
             with FSDP.state_dict_type(self.gpt, StateDictType.FULL_STATE_DICT, fullstate_save_policy, fulloptstate_save_policy):
                 gpt_state = state['gpt_fsdp']
-                # Honor `strict` for FSDP resume as well.
-                # This is critical for compatibility when old checkpoints contain
-                # keys from slightly different heads (e.g. semantic_head2.*).
+                # FSDP 恢复也必须遵守 `strict`。
+                # 旧 checkpoint 可能含有来自略有差异的 head 的 key（例如 semantic_head2.*），
+                # 这里统一交给 PyTorch 的 strict/missing/unexpected 机制处理。
                 ret = self.gpt.load_state_dict(gpt_state, strict=strict)
                 if ret is not None:
                     missing, unexpected = ret
-                    print(f'[VGPTTr.load_state_dict][zero] gpt missing:  {missing}')
-                    print(f'[VGPTTr.load_state_dict][zero] gpt unexpected:  {unexpected}')
+                    print(f'[VGPTTr.load_state_dict][zero] gpt 缺失 keys:  {missing}')
+                    print(f'[VGPTTr.load_state_dict][zero] gpt 未预期 keys:  {unexpected}')
                 if self.use_fsdp_model_ema:
                     ema_state = state.get('gpt_ema_fsdp', None)
                     if ema_state is not None:
                         ret_ema = self.gpt_ema.load_state_dict(ema_state, strict=strict)
                         if ret_ema is not None:
                             missing, unexpected = ret_ema
-                            print(f'[VGPTTr.load_state_dict][zero] gpt_ema missing:  {missing}')
-                            print(f'[VGPTTr.load_state_dict][zero] gpt_ema unexpected:  {unexpected}')
+                            print(f'[VGPTTr.load_state_dict][zero] gpt_ema 缺失 keys:  {missing}')
+                            print(f'[VGPTTr.load_state_dict][zero] gpt_ema 未预期 keys:  {unexpected}')
                 one_group_opt_state = state.get('gpt_fsdp_opt', None)
                 """
                 AdamW state['gpt_fsdp_opt']:
@@ -1843,11 +1870,11 @@ class InfinityTrainer(object):
                     except Exception as e:
                         if strict:
                             raise
-                        print(f'[VGPTTr.load_state_dict][zero] skip optimizer state due to mismatch: {e}')
+                        print(f'[VGPTTr.load_state_dict][zero] optimizer state 不匹配，已跳过: {e}')
 
             if self.gpt_opt.scaler is not None:
                 try: self.gpt_opt.scaler.load_state_dict(state['gpt_opt_scaler'])
-                except Exception as e: print(f'[fp16 load_state_dict err] {e}')
+                except Exception as e: print(f'[fp16 load_state_dict 错误] {e}')
         else:
             for k in ('gpt_wo_ddp', 'gpt_opt'):
                 if skip_vae and 'vae' in k: continue
@@ -1858,9 +1885,9 @@ class InfinityTrainer(object):
                     ret = m.load_state_dict(state[k], strict=strict)
                     if ret is not None:
                         missing, unexpected = ret
-                        print(f'[VGPTTr.load_state_dict] {k} missing:  {missing}')
-                        print(f'[VGPTTr.load_state_dict] {k} unexpected:  {unexpected}')
-        
+                        print(f'[VGPTTr.load_state_dict] {k} 缺失 keys:  {missing}')
+                        print(f'[VGPTTr.load_state_dict] {k} 未预期 keys:  {unexpected}')
+
         config: dict = state.pop('config', None)
         self.prog_it = config.get('prog_it', 0)
         self.last_prog_si = config.get('last_prog_si', -1)
@@ -1868,7 +1895,7 @@ class InfinityTrainer(object):
         if config is not None:
             for k, v in self.get_config().items():
                 if config.get(k, None) != v:
-                    err = f'[VGPT.load_state_dict] config mismatch:  this.{k}={v} (ckpt.{k}={config.get(k, None)})'
+                    err = f'[VGPT.load_state_dict] config 不匹配:  this.{k}={v} (ckpt.{k}={config.get(k, None)})'
                     if strict:
                         raise AttributeError(err)
                     else:

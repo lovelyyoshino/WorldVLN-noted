@@ -1,6 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
-"""bn helper."""
+"""BatchNorm 精确统计量更新工具。"""
 
 import itertools
 import torch
@@ -8,19 +8,12 @@ import torch
 
 @torch.no_grad()
 def compute_and_update_bn_stats(model, data_loader, num_batches=200):
-    """
-    Compute and update the batch norm stats to make it more precise. During
-    training both bn stats and the weight are changing after every iteration,
-    so the bn can not precisely reflect the latest stats of the current model.
-    Here the bn stats is recomputed without change of weights, to make the
-    running mean and running var more precise.
-    Args:
-        model (model): the model using to compute and update the bn stats.
-        data_loader (dataloader): dataloader using to provide inputs.
-        num_batches (int): running iterations using to compute the stats.
+    """用若干 batch 重新估计 BatchNorm 统计量，使验证更稳定。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
 
-    # Prepares all the bn layers.
+    # 准备所有 BN 层。
     bn_layers = [
         m
         for m in model.modules()
@@ -36,22 +29,22 @@ def compute_and_update_bn_stats(model, data_loader, num_batches=200):
         )
     ]
 
-    # In order to make the running stats only reflect the current batch, the
-    # momentum is disabled.
-    # bn.running_mean = (1 - momentum) * bn.running_mean + momentum * batch_mean
-    # Setting the momentum to 1.0 to compute the stats without momentum.
+    # 为了让 running stats 只反映当前 batch，
+    # 这里禁用 momentum。
+    # 中文说明：bn.running_mean = (1 - momentum) * bn.running_mean + momentum * batch_mean
+    # 把 momentum 设为 1.0，用无动量方式统计。
     momentum_actual = [bn.momentum for bn in bn_layers]
     for bn in bn_layers:
         bn.momentum = 1.0
 
-    # Calculates the running iterations for precise stats computation.
+    # 计算精确 BN 统计需要迭代的次数。
     running_mean = [torch.zeros_like(bn.running_mean) for bn in bn_layers]
     running_square_mean = [torch.zeros_like(bn.running_var) for bn in bn_layers]
 
     for ind, (inputs, _, _) in enumerate(
         itertools.islice(data_loader, num_batches)
     ):
-        # Forwards the model to update the bn stats.
+        # 前向运行模型以更新 BN 统计量。
         if isinstance(inputs, (list,)):
             for i in range(len(inputs)):
                 inputs[i] = inputs[i].float().cuda(non_blocking=True)
@@ -60,9 +53,9 @@ def compute_and_update_bn_stats(model, data_loader, num_batches=200):
         model(inputs)
 
         for i, bn in enumerate(bn_layers):
-            # Accumulates the bn stats.
+            # 累计 BN 统计量。
             running_mean[i] += (bn.running_mean - running_mean[i]) / (ind + 1)
-            # $E(x^2) = Var(x) + E(x)^2$.
+            # 中文说明：$E(x^2) = Var(x) + E(x)^2$.
             cur_square_mean = bn.running_var + bn.running_mean ** 2
             running_square_mean[i] += (
                 cur_square_mean - running_square_mean[i]
@@ -70,7 +63,7 @@ def compute_and_update_bn_stats(model, data_loader, num_batches=200):
 
     for i, bn in enumerate(bn_layers):
         bn.running_mean = running_mean[i]
-        # Var(x) = $E(x^2) - E(x)^2$.
+        # 中文说明：Var(x) = $E(x^2) - E(x)^2$.
         bn.running_var = running_square_mean[i] - bn.running_mean ** 2
-        # Sets the precise bn stats.
+        # 写回精确 BN 统计量。
         bn.momentum = momentum_actual[i]

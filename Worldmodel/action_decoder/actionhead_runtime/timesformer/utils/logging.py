@@ -1,6 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
-"""Logging."""
+"""日志工具。"""
 
 import atexit
 import builtins
@@ -20,10 +20,11 @@ import timesformer.utils.distributed as du
 
 def _suppress_print():
     """
-    Suppresses printing from the current process.
+    屏蔽当前进程的 print 输出。
     """
 
     def print_pass(*objects, sep=" ", end="\n", file=sys.stdout, flush=False):
+        """替代 print 的空函数，用于让非主进程保持安静。"""
         pass
 
     builtins.print = print_pass
@@ -31,6 +32,7 @@ def _suppress_print():
 
 @functools.lru_cache(maxsize=None)
 def _cached_log_stream(filename):
+    """打开并缓存日志文件流，进程退出时自动关闭。"""
     io = PathManager.open(filename, "a", buffering=1024)
     atexit.register(io.close)
     return io
@@ -38,17 +40,18 @@ def _cached_log_stream(filename):
 
 def setup_logging(output_dir=None):
     """
-    Sets up the logging for multiple processes. Only enable the logging for the
-    master process, and suppress logging for the non-master processes.
+    为多进程训练设置日志。
+
+    只有 master 进程会正常输出日志，其他进程会屏蔽 print，避免重复刷屏。
     """
-    # Set up logging format.
+    # 设置日志格式。
     _FORMAT = "[%(levelname)s: %(filename)s: %(lineno)4d]: %(message)s"
 
     if du.is_master_proc():
-        # Enable logging for the master process.
+        # 为 master 进程启用日志。
         logging.root.handlers = []
     else:
-        # Suppress logging for non-master processes.
+        # 屏蔽非 master 进程的输出。
         _suppress_print()
 
     logger = logging.getLogger()
@@ -75,24 +78,27 @@ def setup_logging(output_dir=None):
 
 def get_logger(name):
     """
-    Retrieve the logger with the specified name or, if name is None, return a
-    logger which is the root logger of the hierarchy.
-    Args:
-        name (string): name of the logger.
+        获取指定名称的 logger。
+
+        如果 name 为 None，则返回日志层级中的 root logger。
+        参数：
+            name (string): logger 的名称。
+
     """
     return logging.getLogger(name)
 
 
-# Backward-compatible alias for downstream code (this file originally imported
-# simplejson directly).
+# 兼容下游旧代码：这个文件过去会直接导入 simplejson。
 simplejson = _json
 
 
 def log_json_stats(stats):
     """
-    Logs json stats.
-    Args:
-        stats (dict): a dictionary of statistical information to log.
+        以 JSON 字符串形式记录统计信息。
+
+        参数：
+            stats (dict): 需要写入日志的统计信息字典。
+
     """
     stats = {
         k: decimal.Decimal("{:.5f}".format(v)) if isinstance(v, float) else v

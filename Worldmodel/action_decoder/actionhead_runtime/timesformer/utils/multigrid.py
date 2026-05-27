@@ -1,6 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
-"""Helper functions for multigrid training."""
+"""multigrid 训练辅助函数。"""
 
 import numpy as np
 
@@ -11,23 +11,23 @@ logger = logging.get_logger(__name__)
 
 class MultigridSchedule(object):
     """
-    This class defines multigrid training schedule and update cfg accordingly.
+    定义 multigrid 训练日程，并据此更新配置。
     """
 
     def init_multigrid(self, cfg):
         """
-        Update cfg based on multigrid settings.
-        Args:
-            cfg (configs): configs that contains training and multigrid specific
-                hyperparameters. Details can be seen in
-                slowfast/config/defaults.py.
-        Returns:
-            cfg (configs): the updated cfg.
+                根据 multigrid 设置更新配置。
+
+                参数：
+                    cfg (configs): 包含训练和 multigrid 超参数的配置，细节见
+                        说明：`slowfast/config/defaults.py`。
+
+                返回：
+                    cfg (configs): 更新后的配置。
+
         """
         self.schedule = None
-        # We may modify cfg.TRAIN.BATCH_SIZE, cfg.DATA.NUM_FRAMES, and
-        # cfg.DATA.TRAIN_CROP_SIZE during training, so we store their original
-        # value in cfg and use them as global variables.
+        # 训练过程中可能会改动这些字段，因此先保存默认值，供全局复用。
         cfg.MULTIGRID.DEFAULT_B = cfg.TRAIN.BATCH_SIZE
         cfg.MULTIGRID.DEFAULT_T = cfg.DATA.NUM_FRAMES
         cfg.MULTIGRID.DEFAULT_S = cfg.DATA.TRAIN_CROP_SIZE
@@ -35,14 +35,14 @@ class MultigridSchedule(object):
         if cfg.MULTIGRID.LONG_CYCLE:
             self.schedule = self.get_long_cycle_schedule(cfg)
             cfg.SOLVER.STEPS = [0] + [s[-1] for s in self.schedule]
-            # Fine-tuning phase.
+            # 微调阶段。
             cfg.SOLVER.STEPS[-1] = (
                 cfg.SOLVER.STEPS[-2] + cfg.SOLVER.STEPS[-1]
             ) // 2
             cfg.SOLVER.LRS = [
                 cfg.SOLVER.GAMMA ** s[0] * s[1][0] for s in self.schedule
             ]
-            # Fine-tuning phase.
+            # 微调阶段。
             cfg.SOLVER.LRS = cfg.SOLVER.LRS[:-1] + [
                 cfg.SOLVER.LRS[-2],
                 cfg.SOLVER.LRS[-1],
@@ -61,16 +61,17 @@ class MultigridSchedule(object):
 
     def update_long_cycle(self, cfg, cur_epoch):
         """
-        Before every epoch, check if long cycle shape should change. If it
-            should, update cfg accordingly.
-        Args:
-            cfg (configs): configs that contains training and multigrid specific
-                hyperparameters. Details can be seen in
-                slowfast/config/defaults.py.
-            cur_epoch (int): current epoch index.
-        Returns:
-            cfg (configs): the updated cfg.
-            changed (bool): do we change long cycle shape at this epoch?
+                每个 epoch 开始前检查 long cycle 的 shape 是否需要切换，若需要则同步更新配置。
+
+                参数：
+                    cfg (configs): 包含训练和 multigrid 超参数的配置，细节见
+                        说明：`slowfast/config/defaults.py`。
+                    cur_epoch (int): 当前 epoch 索引。
+
+                返回：
+                    cfg (configs): 更新后的配置。
+                    changed (bool): 当前 epoch 是否发生了 long cycle shape 切换。
+
         """
         base_b, base_t, base_s = get_current_long_cycle_shape(
             self.schedule, cur_epoch
@@ -98,7 +99,7 @@ class MultigridSchedule(object):
             cfg.MULTIGRID.LONG_CYCLE_SAMPLING_RATE = cfg.DATA.SAMPLING_RATE * (
                 cfg.MULTIGRID.DEFAULT_T // cfg.DATA.NUM_FRAMES
             )
-            logger.info("Long cycle updates:")
+            logger.info("Long cycle 更新：")
             logger.info("\tBN.NORM_TYPE: {}".format(cfg.BN.NORM_TYPE))
             if cfg.BN.NORM_TYPE == "sync_batchnorm":
                 logger.info(
@@ -121,14 +122,15 @@ class MultigridSchedule(object):
 
     def get_long_cycle_schedule(self, cfg):
         """
-        Based on multigrid hyperparameters, define the schedule of a long cycle.
-        Args:
-            cfg (configs): configs that contains training and multigrid specific
-                hyperparameters. Details can be seen in
-                slowfast/config/defaults.py.
-        Returns:
-            schedule (list): Specifies a list long cycle base shapes and their
-                corresponding training epochs.
+                根据 multigrid 超参数构建 long cycle 训练日程。
+
+                参数：
+                    cfg (configs): 包含训练和 multigrid 超参数的配置，细节见
+                        说明：`slowfast/config/defaults.py`。
+
+                返回：
+                    schedule (list): long cycle 的 base shape 列表及其对应训练 epoch。
+
         """
 
         steps = cfg.SOLVER.STEPS
@@ -138,7 +140,7 @@ class MultigridSchedule(object):
         )
         default_iters = steps[-1]
 
-        # Get shapes and average batch size for each long cycle shape.
+        # 计算每个 long cycle shape 对应的形状和平均 batch size。
         avg_bs = []
         all_shapes = []
         for t_factor, s_factor in cfg.MULTIGRID.LONG_CYCLE_FACTORS:
@@ -169,7 +171,7 @@ class MultigridSchedule(object):
             avg_bs.append(np.mean([s[0] for s in shapes]))
             all_shapes.append(shapes)
 
-        # Get schedule regardless of cfg.MULTIGRID.EPOCH_FACTOR.
+        # 先构造不考虑 cfg.MULTIGRID.EPOCH_FACTOR 的基础日程。
         total_iters = 0
         schedule = []
         for step_index in range(len(steps) - 1):
@@ -188,13 +190,12 @@ class MultigridSchedule(object):
 
         final_step_epochs = cfg.SOLVER.MAX_EPOCH - steps[-1]
 
-        # We define the fine-tuning phase to have the same amount of iteration
-        # saving as the rest of the training.
+        # 令微调阶段与前面训练阶段具有相同的迭代节省比例。
         ft_epochs = final_step_epochs / iter_saving * avg_bs[-1]
 
         schedule.append((step_index + 1, all_shapes[-1][2], ft_epochs))
 
-        # Obtrain final schedule given desired cfg.MULTIGRID.EPOCH_FACTOR.
+        # 根据目标 cfg.MULTIGRID.EPOCH_FACTOR 生成最终日程。
         x = (
             cfg.SOLVER.MAX_EPOCH
             * cfg.MULTIGRID.EPOCH_FACTOR
@@ -213,25 +214,26 @@ class MultigridSchedule(object):
 
 def print_schedule(schedule):
     """
-    Log schedule.
+    记录训练日程。
     """
-    logger.info("Long cycle index\tBase shape\tEpochs")
+    logger.info("Long cycle 索引\t基础形状\tEpoch 数")
     for s in schedule:
         logger.info("{}\t{}\t{}".format(s[0], s[1], s[2]))
 
 
 def get_current_long_cycle_shape(schedule, epoch):
     """
-    Given a schedule and epoch index, return the long cycle base shape.
-    Args:
-        schedule (configs): configs that contains training and multigrid specific
-            hyperparameters. Details can be seen in
-            slowfast/config/defaults.py.
-        cur_epoch (int): current epoch index.
-    Returns:
-        shapes (list): A list describing the base shape in a long cycle:
-            [batch size relative to default,
-            number of frames, spatial dimension].
+        根据日程和 epoch 索引返回当前的 long cycle base shape。
+
+        参数：
+            schedule (configs): 包含训练和 multigrid 超参数的配置，细节见
+                说明：`slowfast/config/defaults.py`。
+            cur_epoch (int): 当前 epoch 索引。
+
+        返回：
+            shapes (list): 描述 long cycle base shape 的列表：
+                [相对默认值的 batch size，帧数，空间尺寸]。
+
     """
     for s in schedule:
         if epoch < s[-1]:

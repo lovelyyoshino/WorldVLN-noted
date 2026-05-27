@@ -1,7 +1,5 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
-"""
-Functions for benchmarks.
-"""
+"""TimeSformer 数据加载性能测试工具。"""
 
 import numpy as np
 import pprint
@@ -18,36 +16,31 @@ logger = logging.get_logger(__name__)
 
 
 def benchmark_data_loading(cfg):
-    """
-    Benchmark the speed of data loading in PySlowFast.
-    Args:
+    """压测数据加载速度，帮助定位数据加载器或解码瓶颈。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
 
-        cfg (CfgNode): configs. Details can be found in
-            lib/config/defaults.py
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
-    # Set up environment.
+    # 设置运行环境。
     setup_environment()
-    # Set random seed from configs.
+    # 根据配置设置随机种子。
     np.random.seed(cfg.RNG_SEED)
     torch.manual_seed(cfg.RNG_SEED)
 
-    # Setup logging format.
+    # 设置日志格式。
     logging.setup_logging(cfg.OUTPUT_DIR)
 
-    # Print config.
-    logger.info("Benchmark data loading with config:")
+    # 打印配置。
+    logger.info("使用以下配置压测数据加载：")
     logger.info(pprint.pformat(cfg))
 
     timer = Timer()
     dataloader = loader.construct_loader(cfg, "train")
-    logger.info(
-        "Initialize loader using {:.2f} seconds.".format(timer.seconds())
-    )
-    # Total batch size across different machines.
+    logger.info("初始化 loader 用时 {:.2f} 秒。".format(timer.seconds()))
+    # 统计跨机器的总 batch size。
     batch_size = cfg.TRAIN.BATCH_SIZE * cfg.NUM_SHARDS
     log_period = cfg.BENCHMARK.LOG_PERIOD
     epoch_times = []
-    # Test for a few epochs.
+    # 只测试少量 epoch 的加载速度。
     for cur_epoch in range(cfg.BENCHMARK.NUM_EPOCHS):
         timer = Timer()
         timer_epoch = Timer()
@@ -59,8 +52,8 @@ def benchmark_data_loading(cfg):
                 iter_times.append(timer.seconds())
                 ram_usage, ram_total = misc.cpu_mem_usage()
                 logger.info(
-                    "Epoch {}: {} iters ({} videos) in {:.2f} seconds. "
-                    "RAM Usage: {:.2f}/{:.2f} GB.".format(
+                    "Epoch {}: {} 次迭代（{} 个视频）用时 {:.2f} 秒。"
+                    "RAM 使用量：{:.2f}/{:.2f} GB。".format(
                         cur_epoch,
                         log_period,
                         log_period * batch_size,
@@ -73,8 +66,8 @@ def benchmark_data_loading(cfg):
         epoch_times.append(timer_epoch.seconds())
         ram_usage, ram_total = misc.cpu_mem_usage()
         logger.info(
-            "Epoch {}: in total {} iters ({} videos) in {:.2f} seconds. "
-            "RAM Usage: {:.2f}/{:.2f} GB.".format(
+            "Epoch {}: 总计 {} 次迭代（{} 个视频）用时 {:.2f} 秒。"
+            "RAM 使用量：{:.2f}/{:.2f} GB。".format(
                 cur_epoch,
                 len(dataloader),
                 len(dataloader) * batch_size,
@@ -84,8 +77,8 @@ def benchmark_data_loading(cfg):
             )
         )
         logger.info(
-            "Epoch {}: on average every {} iters ({} videos) take {:.2f}/{:.2f} "
-            "(avg/std) seconds.".format(
+            "Epoch {}: 平均每 {} 次迭代（{} 个视频）用时 {:.2f}/{:.2f} "
+            "秒（均值/标准差）。".format(
                 cur_epoch,
                 log_period,
                 log_period * batch_size,

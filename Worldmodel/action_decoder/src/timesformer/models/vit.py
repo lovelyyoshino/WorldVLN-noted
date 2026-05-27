@@ -1,6 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 # Copyright 2020 Ross Wightman
-# Modified Model definition
+# 修改过的模型定义。
 
 import torch
 import torch.nn as nn
@@ -19,6 +19,9 @@ from torch import einsum
 from einops import rearrange, reduce, repeat
 
 def _cfg(url='', **kwargs):
+    """
+    生成 Vision Transformer 默认配置字典，并允许调用方覆盖字段。
+    """
     return {
         'url': url,
         'num_classes': 1000, 'input_size': (3, 224, 224), 'pool_size': None,
@@ -37,7 +40,14 @@ default_cfgs = {
 }
 
 class Mlp(nn.Module):
+    """
+    Transformer block 中的两层前馈网络。
+    """
+
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
+        """
+        初始化 MLP 的两个 Linear 层、激活函数和 dropout。
+        """
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
@@ -47,6 +57,9 @@ class Mlp(nn.Module):
         self.drop = nn.Dropout(drop)
 
     def forward(self, x):
+        """
+        执行 Linear、激活、dropout、Linear、dropout 的前向计算。
+        """
         x = self.fc1(x)
         x = self.act(x)
         x = self.drop(x)
@@ -55,7 +68,14 @@ class Mlp(nn.Module):
         return x
 
 class Attention(nn.Module):
+    """
+    多头自注意力模块，可选择是否在内部生成 q、k、v。
+    """
+
     def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., with_qkv=True):
+        """
+        初始化多头注意力的 qkv 投影、输出投影和 dropout。
+        """
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
@@ -68,6 +88,9 @@ class Attention(nn.Module):
         self.attn_drop = nn.Dropout(attn_drop)
 
     def forward(self, x):
+        """
+        对输入 token 序列执行多头自注意力。
+        """
         B, N, C = x.shape
         if self.with_qkv:
            qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
@@ -87,9 +110,15 @@ class Attention(nn.Module):
         return x
 
 class Block(nn.Module):
+    """
+    TimeSformer 的 Transformer block，支持空间、时间或联合注意力。
+    """
 
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0.1, act_layer=nn.GELU, norm_layer=nn.LayerNorm, attention_type='divided_space_time'):
+        """
+        初始化注意力、MLP、归一化和可选的分离时空注意力分支。
+        """
         super().__init__()
         self.attention_type = attention_type
         assert(attention_type in ['divided_space_time', 'space_only','joint_space_time'])
@@ -98,14 +127,14 @@ class Block(nn.Module):
         self.attn = Attention(
            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
 
-        ## Temporal Attention Parameters
+        ## 时间注意力参数。
         if self.attention_type == 'divided_space_time':
             self.temporal_norm1 = norm_layer(dim)
             self.temporal_attn = Attention(
               dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
             self.temporal_fc = nn.Linear(dim, dim)
 
-        ## drop path
+        # 中文说明：# drop path。
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
@@ -113,6 +142,9 @@ class Block(nn.Module):
 
 
     def forward(self, x, B, T, W):
+        """
+        根据 attention_type 对视频 token 执行一个 Transformer block。
+        """
         num_spatial_tokens = (x.size(1) - 1) // T
         H = num_spatial_tokens // W
 
@@ -121,7 +153,7 @@ class Block(nn.Module):
             x = x + self.drop_path(self.mlp(self.norm2(x)))
             return x
         elif self.attention_type == 'divided_space_time':
-            ## Temporal
+            ## 时间注意力。
             xt = x[:,1:,:]
             xt = rearrange(xt, 'b (h w t) m -> (b h w) t m',b=B,h=H,w=W,t=T)
             res_temporal = self.drop_path(self.temporal_attn(self.temporal_norm1(xt)))
@@ -129,7 +161,7 @@ class Block(nn.Module):
             res_temporal = self.temporal_fc(res_temporal)
             xt = x[:,1:,:] + res_temporal
 
-            ## Spatial
+            ## 空间注意力。
             init_cls_token = x[:,0,:].unsqueeze(1)
             cls_token = init_cls_token.repeat(1, T, 1)
             cls_token = rearrange(cls_token, 'b t m -> (b t) m',b=B,t=T).unsqueeze(1)
@@ -138,26 +170,30 @@ class Block(nn.Module):
             xs = torch.cat((cls_token, xs), 1)
             res_spatial = self.drop_path(self.attn(self.norm1(xs)))
 
-            ### Taking care of CLS token
+            ### 处理 CLS token。
             cls_token = res_spatial[:,0,:]
             cls_token = rearrange(cls_token, '(b t) m -> b t m',b=B,t=T)
-            cls_token = torch.mean(cls_token,1,True) ## averaging for every frame
+            cls_token = torch.mean(cls_token,1,True) ## 对每一帧的 CLS token 取平均。
             res_spatial = res_spatial[:,1:,:]
             res_spatial = rearrange(res_spatial, '(b t) (h w) m -> b (h w t) m',b=B,h=H,w=W,t=T)
             res = res_spatial
             x = xt
 
-            ## Mlp
+            # 中文说明：# MLP。
             x = torch.cat((init_cls_token, x), 1) + torch.cat((cls_token, res), 1)
             x = x + self.drop_path(self.mlp(self.norm2(x)))
             return x
 
 class PatchEmbed(nn.Module):
-    """ Image to Patch Embedding
+    """
+    将视频帧图像切成 patch，并投影成 token embedding。
     """
     def __init__(self, img_size=(224, 224), patch_size=16, in_chans=3, embed_dim=768):
+        """
+        初始化 patch 大小、patch 数量和 Conv2d 投影层。
+        """
         super().__init__()
-        # img_size = to_2tuple(img_size)
+        # 如果需要支持标量 img_size，可以用 to_2tuple 转成二维大小。
         patch_size = to_2tuple(patch_size)
         num_patches = (img_size[1] // patch_size[1]) * (img_size[0] // patch_size[0])
         self.img_size = img_size
@@ -167,6 +203,9 @@ class PatchEmbed(nn.Module):
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
+        """
+        将 (B, C, T, H, W) 视频输入转成每帧 patch token。
+        """
         B, C, T, H, W = x.shape
         x = rearrange(x, 'b c t h w -> (b t) c h w')
         x = self.proj(x)
@@ -176,22 +215,26 @@ class PatchEmbed(nn.Module):
 
 
 class VisionTransformer(nn.Module):
-    """ Vision Transformere
+    """
+    TimeSformer 使用的 Vision Transformer 主体网络。
     """
     def __init__(self, img_size=(224, 224), patch_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
                  drop_path_rate=0.1, hybrid_backbone=None, norm_layer=nn.LayerNorm, num_frames=8, attention_type='divided_space_time', dropout=0.):
+        """
+        初始化 patch embedding、位置/时间 embedding、Transformer blocks 和分类头。
+        """
         super().__init__()
         self.attention_type = attention_type
         self.depth = depth
         self.dropout = nn.Dropout(dropout)
         self.num_classes = num_classes
-        self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
+        self.num_features = self.embed_dim = embed_dim  # 中文说明：为了和其他模型保持一致而保留 num_features。
         self.patch_embed = PatchEmbed(
             img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
         num_patches = self.patch_embed.num_patches
 
-        ## Positional Embeddings
+        ## 位置 embedding。
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches+1, embed_dim))
         self.pos_drop = nn.Dropout(p=drop_rate)
@@ -199,8 +242,8 @@ class VisionTransformer(nn.Module):
             self.time_embed = nn.Parameter(torch.zeros(1, num_frames, embed_dim))
             self.time_drop = nn.Dropout(p=drop_rate)
 
-        ## Attention Blocks
-        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, self.depth)]  # stochastic depth decay rule
+        ## 注意力 blocks。
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, self.depth)]  # stochastic depth 衰减规则。
         self.blocks = nn.ModuleList([
             Block(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
@@ -208,25 +251,28 @@ class VisionTransformer(nn.Module):
             for i in range(self.depth)])
         self.norm = norm_layer(embed_dim)
 
-        # Classifier head
+        # 分类头。
         self.head = nn.Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
         trunc_normal_(self.pos_embed, std=.02)
         trunc_normal_(self.cls_token, std=.02)
         self.apply(self._init_weights)
 
-        # initialization of temporal attention weights
-        # if self.attention_type == 'divided_space_time':
+        # 时间注意力权重初始化。
+        # 保留的上游调试/兼容代码：if self.attention_type == 'divided_space_time':
         #     i = 0
-        #     for m in self.blocks.modules():
-        #         m_str = str(m)
-        #         if 'Block' in m_str:
+        # 保留的上游调试/兼容代码：for m in self.blocks.modules():
+        # 中文说明：m_str = str(m)
+        # 保留的上游调试/兼容代码：if 'Block' in m_str:
         #             if i > 0:
-        #               nn.init.constant_(m.temporal_fc.weight, 0)
-        #               nn.init.constant_(m.temporal_fc.bias, 0)
+        # 中文说明：nn.init.constant_(m.temporal_fc.weight, 0)
+        # 中文说明：nn.init.constant_(m.temporal_fc.bias, 0)
         #             i += 1
 
     def _init_weights(self, m):
+        """
+        初始化 Linear 和 LayerNorm 层的权重。
+        """
         if isinstance(m, nn.Linear):
             trunc_normal_(m.weight, std=.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
@@ -237,22 +283,34 @@ class VisionTransformer(nn.Module):
 
     @torch.jit.ignore
     def no_weight_decay(self):
+        """
+        返回不参与 weight decay 的参数名集合。
+        """
         return {'pos_embed', 'cls_token', 'time_embed'}
 
     def get_classifier(self):
+        """
+        返回当前分类头模块。
+        """
         return self.head
 
     def reset_classifier(self, num_classes, global_pool=''):
+        """
+        重置分类类别数，并按新类别数重建分类头。
+        """
         self.num_classes = num_classes
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
     def forward_features(self, x):
+        """
+        从原始视频张量提取 CLS token 特征，尚不经过分类头。
+        """
         B = x.shape[0]
         x, T, W = self.patch_embed(x)
         cls_tokens = self.cls_token.expand(x.size(0), -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
 
-        ## resizing the positional embeddings in case they don't match the input at inference
+        ## 推理时如果输入尺寸与训练位置 embedding 不匹配，则调整位置 embedding 大小。
         if x.size(1) != self.pos_embed.size(1):
             pos_embed = self.pos_embed
             cls_pos_embed = pos_embed[0,0,:].unsqueeze(0).unsqueeze(1)
@@ -270,16 +328,16 @@ class VisionTransformer(nn.Module):
         x = self.pos_drop(x)
 
 
-        ## Time Embeddings
+        ## 时间 embedding。
         if self.attention_type != 'space_only':
-            # NOTE:
-            # x is currently shaped as (B*T, 1+N, D) (after PatchEmbed + cls + pos).
-            # We need ONE cls token per video (batch item), not the first B elements of (B*T).
-            # The correct indices for the first frame of each video are: 0, T, 2T, ...
+            # 注意：
+            # x 当前形状为 (B*T, 1+N, D)（经过 PatchEmbed + cls + pos 后）。
+            # 每个视频（batch item）只需要一个 cls token，而不是 (B*T) 的前 B 个元素。
+            # 每个视频第一帧的正确索引是：0, T, 2T, ...
             cls_tokens = x[0::T, 0, :].unsqueeze(1)
             x = x[:,1:]
             x = rearrange(x, '(b t) n m -> (b n) t m',b=B,t=T)
-            ## Resizing time embeddings in case they don't match
+            ## 如果帧数 T 与 time embedding 长度不匹配，则调整 time embedding 大小。
             if T != self.time_embed.size(1):
                 time_embed = self.time_embed.transpose(1, 2)
                 new_time_embed = F.interpolate(time_embed, size=(T), mode='nearest')
@@ -291,38 +349,39 @@ class VisionTransformer(nn.Module):
             x = rearrange(x, '(b n) t m -> b (n t) m',b=B,t=T)
             x = torch.cat((cls_tokens, x), dim=1)
 
-        ## Attention blocks
+        ## 注意力 blocks。
         for blk in self.blocks:
             x = blk(x, B, T, W)
 
-        ### Predictions for space-only baseline
+        ### space-only baseline 的预测处理。
         if self.attention_type == 'space_only':
             x = rearrange(x, '(b t) n m -> b t n m',b=B,t=T)
-            x = torch.mean(x, 1) # averaging predictions for every frame
+            x = torch.mean(x, 1) # 对每一帧的预测取平均。
 
         x = self.norm(x)
         return x[:, 0]
 
     def forward_features_from_patch_tokens(self, patch_tokens, B: int, T: int, W: int):
         """
-        Forward TSformer features from precomputed patch tokens (skip PatchEmbed).
+                从预先计算好的 patch tokens 提取 TimeSformer 特征，跳过 PatchEmbed。
 
-        Args:
-            patch_tokens: Tensor of shape (B*T, N, D) where:
-              - N = (H/P)*(W/P) is the number of spatial patches per frame
-              - D = embed_dim
-            B: batch size (#videos)
-            T: number of frames per video
-            W: patch grid width (W/P). Used by blocks and pos_embed resizing.
+                参数：
+                    patch_tokens: 形状为 (B*T, N, D) 的 Tensor，其中：
+                      - N = (H/P)*(W/P)，表示每帧的空间 patch 数。
+                      说明：- D = embed_dim。
+                    B: batch size，也就是视频数量。
+                    T: 每个视频的帧数。
+                    W: patch 网格宽度 (W/P)，供 block 和 pos_embed resize 使用。
 
-        Returns:
-            Tensor of shape (B, D): cls embedding after transformer blocks.
+                返回：
+                    形状为 (B, D) 的 Tensor，表示 transformer blocks 后的 cls embedding。
+
         """
         x = patch_tokens
         cls_tokens = self.cls_token.expand(x.size(0), -1, -1)  # (B*T,1,D)
         x = torch.cat((cls_tokens, x), dim=1)  # (B*T,1+N,D)
 
-        # Positional embeddings (same resizing logic as forward_features)
+        # 位置 embedding，resize 逻辑与 forward_features 相同。
         if x.size(1) != self.pos_embed.size(1):
             pos_embed = self.pos_embed
             cls_pos_embed = pos_embed[0, 0, :].unsqueeze(0).unsqueeze(1)  # (1,1,D)
@@ -338,7 +397,7 @@ class VisionTransformer(nn.Module):
             x = x + self.pos_embed
         x = self.pos_drop(x)
 
-        # Time embeddings (same logic, but correct cls selection)
+        # 时间 embedding，逻辑相同，但会正确选择 cls token。
         if self.attention_type != "space_only":
             cls_tokens = x[0::T, 0, :].unsqueeze(1)  # (B,1,D)
             x = x[:, 1:]  # (B*T, N, D)
@@ -364,12 +423,15 @@ class VisionTransformer(nn.Module):
         return x[:, 0]
 
     def forward(self, x):
+        """
+        提取视频特征并送入分类头，得到类别 logits。
+        """
         x = self.forward_features(x)
         x = self.head(x)
         return x
 
 def _conv_filter(state_dict, patch_size=16):
-    """ convert patch embedding weight from manual patchify + linear proj to conv"""
+    """将手工 patchify + linear proj 的 patch embedding 权重转换成卷积权重。"""
     out_dict = {}
     for k, v in state_dict.items():
         if 'patch_embed.proj.weight' in k:
@@ -381,7 +443,14 @@ def _conv_filter(state_dict, patch_size=16):
 
 @MODEL_REGISTRY.register()
 class vit_base_patch16_224(nn.Module):
+    """
+    注册到项目模型表中的 ViT-Base/16 TimeSformer 包装类。
+    """
+
     def __init__(self, cfg, **kwargs):
+        """
+        根据 cfg 创建 ViT-Base/16 模型，并按配置加载预训练权重。
+        """
         super(vit_base_patch16_224, self).__init__()
         self.pretrained=True
         patch_size = 16
@@ -395,12 +464,22 @@ class vit_base_patch16_224(nn.Module):
             load_pretrained(self.model, num_classes=self.model.num_classes, in_chans=kwargs.get('in_chans', 3), filter_fn=_conv_filter, img_size=cfg.DATA.TRAIN_CROP_SIZE, num_patches=self.num_patches, attention_type=self.attention_type, pretrained_model=pretrained_model)
 
     def forward(self, x):
+        """
+        将输入视频转发给内部 VisionTransformer。
+        """
         x = self.model(x)
         return x
 
 @MODEL_REGISTRY.register()
 class TimeSformer(nn.Module):
+    """
+    直接构建 TimeSformer 的便捷包装类。
+    """
+
     def __init__(self, img_size=(224, 224), patch_size=16, num_classes=400, num_frames=8, attention_type='divided_space_time',  pretrained_model='', **kwargs):
+        """
+        创建指定 patch 大小、帧数和注意力类型的 TimeSformer。
+        """
         super(TimeSformer, self).__init__()
         self.pretrained=True
         self.model = VisionTransformer(img_size=img_size, num_classes=num_classes, patch_size=patch_size, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1, num_frames=num_frames, attention_type=attention_type, **kwargs)
@@ -411,5 +490,8 @@ class TimeSformer(nn.Module):
         if self.pretrained:
             load_pretrained(self.model, num_classes=self.model.num_classes, in_chans=kwargs.get('in_chans', 3), filter_fn=_conv_filter, img_size=img_size, num_frames=num_frames, num_patches=self.num_patches, attention_type=self.attention_type, pretrained_model=pretrained_model)
     def forward(self, x):
+        """
+        将输入视频转发给内部 VisionTransformer。
+        """
         x = self.model(x)
         return x

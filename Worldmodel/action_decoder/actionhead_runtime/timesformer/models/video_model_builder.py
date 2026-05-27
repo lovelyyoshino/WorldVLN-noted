@@ -1,6 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
-"""Video models."""
+"""视频模型构建器。"""
 
 import math
 import torch
@@ -22,59 +22,59 @@ import copy
 import numpy as np
 from timesformer.models.vit import vit_base_patch16_224
 
-# Number of blocks for different stages given the model depth.
+# 不同模型深度下，每个 ResNet stage 的 block 数量。
 _MODEL_STAGE_DEPTH = {50: (3, 4, 6, 3), 101: (3, 4, 23, 3)}
 
-# Basis of temporal kernel sizes for each of the stage.
+# 每个 stage 使用的 temporal kernel 基础配置。
 _TEMPORAL_KERNEL_BASIS = {
     "c2d": [
-        [[1]],  # conv1 temporal kernel.
-        [[1]],  # res2 temporal kernel.
-        [[1]],  # res3 temporal kernel.
-        [[1]],  # res4 temporal kernel.
-        [[1]],  # res5 temporal kernel.
+        [[1]],  # conv1 的 temporal kernel。
+        [[1]],  # res2 的 temporal kernel。
+        [[1]],  # res3 的 temporal kernel。
+        [[1]],  # res4 的 temporal kernel。
+        [[1]],  # res5 的 temporal kernel。
     ],
     "c2d_nopool": [
-        [[1]],  # conv1 temporal kernel.
-        [[1]],  # res2 temporal kernel.
-        [[1]],  # res3 temporal kernel.
-        [[1]],  # res4 temporal kernel.
-        [[1]],  # res5 temporal kernel.
+        [[1]],  # conv1 的 temporal kernel。
+        [[1]],  # res2 的 temporal kernel。
+        [[1]],  # res3 的 temporal kernel。
+        [[1]],  # res4 的 temporal kernel。
+        [[1]],  # res5 的 temporal kernel。
     ],
     "i3d": [
-        [[5]],  # conv1 temporal kernel.
-        [[3]],  # res2 temporal kernel.
-        [[3, 1]],  # res3 temporal kernel.
-        [[3, 1]],  # res4 temporal kernel.
-        [[1, 3]],  # res5 temporal kernel.
+        [[5]],  # conv1 的 temporal kernel。
+        [[3]],  # res2 的 temporal kernel。
+        [[3, 1]],  # res3 的 temporal kernel。
+        [[3, 1]],  # res4 的 temporal kernel。
+        [[1, 3]],  # res5 的 temporal kernel。
     ],
     "i3d_nopool": [
-        [[5]],  # conv1 temporal kernel.
-        [[3]],  # res2 temporal kernel.
-        [[3, 1]],  # res3 temporal kernel.
-        [[3, 1]],  # res4 temporal kernel.
-        [[1, 3]],  # res5 temporal kernel.
+        [[5]],  # conv1 的 temporal kernel。
+        [[3]],  # res2 的 temporal kernel。
+        [[3, 1]],  # res3 的 temporal kernel。
+        [[3, 1]],  # res4 的 temporal kernel。
+        [[1, 3]],  # res5 的 temporal kernel。
     ],
     "slow": [
-        [[1]],  # conv1 temporal kernel.
-        [[1]],  # res2 temporal kernel.
-        [[1]],  # res3 temporal kernel.
-        [[3]],  # res4 temporal kernel.
-        [[3]],  # res5 temporal kernel.
+        [[1]],  # conv1 的 temporal kernel。
+        [[1]],  # res2 的 temporal kernel。
+        [[1]],  # res3 的 temporal kernel。
+        [[3]],  # res4 的 temporal kernel。
+        [[3]],  # res5 的 temporal kernel。
     ],
     "slowfast": [
-        [[1], [5]],  # conv1 temporal kernel for slow and fast pathway.
-        [[1], [3]],  # res2 temporal kernel for slow and fast pathway.
-        [[1], [3]],  # res3 temporal kernel for slow and fast pathway.
-        [[3], [3]],  # res4 temporal kernel for slow and fast pathway.
-        [[3], [3]],  # res5 temporal kernel for slow and fast pathway.
+        [[1], [5]],  # slow 和 fast pathway 的 conv1 temporal kernel。
+        [[1], [3]],  # slow 和 fast pathway 的 res2 temporal kernel。
+        [[1], [3]],  # slow 和 fast pathway 的 res3 temporal kernel。
+        [[3], [3]],  # slow 和 fast pathway 的 res4 temporal kernel。
+        [[3], [3]],  # slow 和 fast pathway 的 res5 temporal kernel。
     ],
     "x3d": [
-        [[5]],  # conv1 temporal kernels.
-        [[3]],  # res2 temporal kernels.
-        [[3]],  # res3 temporal kernels.
-        [[3]],  # res4 temporal kernels.
-        [[3]],  # res5 temporal kernels.
+        [[5]],  # conv1 的 temporal kernel。
+        [[3]],  # res2 的 temporal kernel。
+        [[3]],  # res3 的 temporal kernel。
+        [[3]],  # res4 的 temporal kernel。
+        [[3]],  # res5 的 temporal kernel。
     ],
 }
 
@@ -91,9 +91,9 @@ _POOL1 = {
 
 class FuseFastToSlow(nn.Module):
     """
-    Fuses the information from the Fast pathway to the Slow pathway. Given the
-    tensors from Slow pathway and Fast pathway, fuse information from Fast to
-    Slow, then return the fused tensors from Slow and Fast pathway in order.
+    将 Fast pathway 的信息融合到 Slow pathway。
+    输入为 Slow 和 Fast 两条 pathway 的张量，先用卷积调整 Fast 特征，
+    再拼接到 Slow 特征上，最后按 [Slow, Fast] 的顺序返回。
     """
 
     def __init__(
@@ -108,20 +108,16 @@ class FuseFastToSlow(nn.Module):
         norm_module=nn.BatchNorm3d,
     ):
         """
-        Args:
-            dim_in (int): the channel dimension of the input.
-            fusion_conv_channel_ratio (int): channel ratio for the convolution
-                used to fuse from Fast pathway to Slow pathway.
-            fusion_kernel (int): kernel size of the convolution used to fuse
-                from Fast pathway to Slow pathway.
-            alpha (int): the frame rate ratio between the Fast and Slow pathway.
-            eps (float): epsilon for batch norm.
-            bn_mmt (float): momentum for batch norm. Noted that BN momentum in
-                PyTorch = 1 - BN momentum in Caffe2.
-            inplace_relu (bool): if True, calculate the relu on the original
-                input without allocating new memory.
-            norm_module (nn.Module): nn.Module for the normalization layer. The
-                default is nn.BatchNorm3d.
+                参数：
+                    dim_in (int): Fast pathway 输入通道数。
+                    fusion_conv_channel_ratio (int): Fast 到 Slow 融合卷积的输出通道倍率。
+                    fusion_kernel (int): Fast 到 Slow 融合卷积的 temporal kernel 大小。
+                    alpha (int): Fast 和 Slow pathway 的帧率比例。
+                    eps (float): batch norm 的 epsilon。
+                    bn_mmt (float): batch norm 动量；PyTorch 中的含义是 Caffe2 的 1 - momentum。
+                    inplace_relu (bool): 为 True 时在原张量上计算 ReLU，减少额外内存。
+                    norm_module (nn.Module): 归一化层类型，默认是 nn.BatchNorm3d。
+
         """
         super(FuseFastToSlow, self).__init__()
         self.conv_f2s = nn.Conv3d(
@@ -140,6 +136,9 @@ class FuseFastToSlow(nn.Module):
         self.relu = nn.ReLU(inplace_relu)
 
     def forward(self, x):
+        """
+        接收 [Slow, Fast] 特征列表，并返回融合后的 [Slow, Fast]。
+        """
         x_s = x[0]
         x_f = x[1]
         fuse = self.conv_f2s(x_f)
@@ -152,20 +151,21 @@ class FuseFastToSlow(nn.Module):
 @MODEL_REGISTRY.register()
 class SlowFast(nn.Module):
     """
-    SlowFast model builder for SlowFast network.
+        SlowFast 网络的模型构建器。
 
-    Christoph Feichtenhofer, Haoqi Fan, Jitendra Malik, and Kaiming He.
-    "SlowFast networks for video recognition."
-    https://arxiv.org/pdf/1812.03982.pdf
+        说明：Christoph Feichtenhofer, Haoqi Fan, Jitendra Malik, and Kaiming He.
+        说明："SlowFast networks for video recognition."
+        引用/来源：https://arxiv.org/pdf/1812.03982.pdf
+
     """
 
     def __init__(self, cfg):
         """
-        The `__init__` method of any subclass should also contain these
-            arguments.
-        Args:
-            cfg (CfgNode): model building configs, details are in the
-                comments of the config file.
+                初始化 SlowFast 模型。
+
+                参数：
+                    cfg (CfgNode): 模型构建配置，具体含义见配置文件中的注释。
+
         """
         super(SlowFast, self).__init__()
         self.norm_module = get_norm(cfg)
@@ -180,11 +180,12 @@ class SlowFast(nn.Module):
 
     def _construct_network(self, cfg):
         """
-        Builds a SlowFast model. The first pathway is the Slow pathway and the
-            second pathway is the Fast pathway.
-        Args:
-            cfg (CfgNode): model building configs, details are in the
-                comments of the config file.
+                构建 SlowFast 模型。
+                第一条 pathway 是 Slow pathway，第二条 pathway 是 Fast pathway。
+
+                参数：
+                    cfg (CfgNode): 模型构建配置，具体含义见配置文件中的注释。
+
         """
         assert cfg.MODEL.ARCH in _POOL1.keys()
         pool_size = _POOL1[cfg.MODEL.ARCH]
@@ -391,7 +392,7 @@ class SlowFast(nn.Module):
                         cfg.DATA.TRAIN_CROP_SIZE // 32 // pool_size[1][1],
                         cfg.DATA.TRAIN_CROP_SIZE // 32 // pool_size[1][2],
                     ],
-                ],  # None for AdaptiveAvgPool3d((1, 1, 1))
+                ],  # None 表示使用 AdaptiveAvgPool3d((1, 1, 1))。
                 dropout_rate=cfg.MODEL.DROPOUT_RATE,
                 act_func=cfg.MODEL.HEAD_ACT,
             )
@@ -399,6 +400,9 @@ class SlowFast(nn.Module):
             self.add_module(self.head_name, head)
 
     def forward(self, x, bboxes=None):
+        """
+        执行 SlowFast 的 stem、stage、pathway 融合和分类头前向计算。
+        """
         x = self.s1(x)
         x = self.s1_fuse(x)
         x = self.s2(x)
@@ -424,26 +428,26 @@ class SlowFast(nn.Module):
 @MODEL_REGISTRY.register()
 class ResNet(nn.Module):
     """
-    ResNet model builder. It builds a ResNet like network backbone without
-    lateral connection (C2D, I3D, Slow).
+        ResNet 模型构建器。
+        构建不带横向连接的 ResNet 风格视频网络骨干（C2D、I3D、Slow）。
 
-    Christoph Feichtenhofer, Haoqi Fan, Jitendra Malik, and Kaiming He.
-    "SlowFast networks for video recognition."
-    https://arxiv.org/pdf/1812.03982.pdf
+        说明：Christoph Feichtenhofer, Haoqi Fan, Jitendra Malik, and Kaiming He.
+        说明："SlowFast networks for video recognition."
+        引用/来源：https://arxiv.org/pdf/1812.03982.pdf
 
-    Xiaolong Wang, Ross Girshick, Abhinav Gupta, and Kaiming He.
-    "Non-local neural networks."
-    https://arxiv.org/pdf/1711.07971.pdf
+        说明：Xiaolong Wang, Ross Girshick, Abhinav Gupta, and Kaiming He.
+        说明："Non-local neural networks."
+        引用/来源：https://arxiv.org/pdf/1711.07971.pdf
+
     """
 
     def __init__(self, cfg):
         """
-        The `__init__` method of any subclass should also contain these
-            arguments.
+                初始化单 pathway 的 ResNet 模型。
 
-        Args:
-            cfg (CfgNode): model building configs, details are in the
-                comments of the config file.
+                参数：
+                    cfg (CfgNode): 模型构建配置，具体含义见配置文件中的注释。
+
         """
         super(ResNet, self).__init__()
         self.norm_module = get_norm(cfg)
@@ -456,11 +460,11 @@ class ResNet(nn.Module):
 
     def _construct_network(self, cfg):
         """
-        Builds a single pathway ResNet model.
+                构建单 pathway 的 ResNet 模型。
 
-        Args:
-            cfg (CfgNode): model building configs, details are in the
-                comments of the config file.
+                参数：
+                    cfg (CfgNode): 模型构建配置，具体含义见配置文件中的注释。
+
         """
         assert cfg.MODEL.ARCH in _POOL1.keys()
         pool_size = _POOL1[cfg.MODEL.ARCH]
@@ -595,7 +599,7 @@ class ResNet(nn.Module):
                         cfg.DATA.TRAIN_CROP_SIZE // 32 // pool_size[0][1],
                         cfg.DATA.TRAIN_CROP_SIZE // 32 // pool_size[0][2],
                     ]
-                ],  # None for AdaptiveAvgPool3d((1, 1, 1))
+                ],  # None 表示使用 AdaptiveAvgPool3d((1, 1, 1))。
                 dropout_rate=cfg.MODEL.DROPOUT_RATE,
                 act_func=cfg.MODEL.HEAD_ACT,
             )
@@ -603,6 +607,9 @@ class ResNet(nn.Module):
             self.add_module(self.head_name, head)
 
     def forward(self, x, bboxes=None):
+        """
+        执行单 pathway ResNet 的 stem、stage、池化和分类头前向计算。
+        """
         x = self.s1(x)
         x = self.s2(x)
         for pathway in range(self.num_pathways):
@@ -623,21 +630,22 @@ class ResNet(nn.Module):
 @MODEL_REGISTRY.register()
 class X3D(nn.Module):
     """
-    X3D model builder. It builds a X3D network backbone, which is a ResNet.
+        X3D 模型构建器。
+        X3D 是一种高效的视频 ResNet 风格网络骨干。
 
-    Christoph Feichtenhofer.
-    "X3D: Expanding Architectures for Efficient Video Recognition."
-    https://arxiv.org/abs/2004.04730
+        说明：Christoph Feichtenhofer.
+        说明："X3D: Expanding Architectures for Efficient Video Recognition."
+        引用/来源：https://arxiv.org/abs/2004.04730
+
     """
 
     def __init__(self, cfg):
         """
-        The `__init__` method of any subclass should also contain these
-            arguments.
+                初始化 X3D 模型。
 
-        Args:
-            cfg (CfgNode): model building configs, details are in the
-                comments of the config file.
+                参数：
+                    cfg (CfgNode): 模型构建配置，具体含义见配置文件中的注释。
+
         """
         super(X3D, self).__init__()
         self.norm_module = get_norm(cfg)
@@ -657,7 +665,7 @@ class X3D(nn.Module):
         self.dim_res5 = self._round_width(self.dim_res4, exp_stage, divisor=8)
 
         self.block_basis = [
-            # blocks, c, stride
+            # 块数量、通道数和步幅。
             [1, self.dim_res2, 2],
             [2, self.dim_res3, 2],
             [5, self.dim_res4, 2],
@@ -669,7 +677,7 @@ class X3D(nn.Module):
         )
 
     def _round_width(self, width, multiplier, min_depth=8, divisor=8):
-        """Round width of filters based on width multiplier."""
+        """根据 width multiplier 将通道宽度调整到 divisor 的整数倍。"""
         if not multiplier:
             return width
 
@@ -683,7 +691,7 @@ class X3D(nn.Module):
         return int(new_filters)
 
     def _round_repeats(self, repeats, multiplier):
-        """Round number of layers based on depth multiplier."""
+        """根据 depth multiplier 计算重复层数。"""
         multiplier = multiplier
         if not multiplier:
             return repeats
@@ -691,11 +699,11 @@ class X3D(nn.Module):
 
     def _construct_network(self, cfg):
         """
-        Builds a single pathway X3D model.
+                构建单 pathway 的 X3D 模型。
 
-        Args:
-            cfg (CfgNode): model building configs, details are in the
-                comments of the config file.
+                参数：
+                    cfg (CfgNode): 模型构建配置，具体含义见配置文件中的注释。
+
         """
         assert cfg.MODEL.ARCH in _POOL1.keys()
         assert cfg.RESNET.DEPTH in _MODEL_STAGE_DEPTH.keys()
@@ -722,7 +730,7 @@ class X3D(nn.Module):
             stem_func_name="x3d_stem",
         )
 
-        # blob_in = s1
+        # s1 的输出作为后续 stage 的输入。
         dim_in = dim_res1
         for stage, block in enumerate(self.block_basis):
             dim_out = self._round_width(block[1], w_mul)
@@ -731,7 +739,7 @@ class X3D(nn.Module):
             n_rep = self._round_repeats(block[0], d_mul)
             prefix = "s{}".format(
                 stage + 2
-            )  # start w res2 to follow convention
+            )  # 从 res2 对应的 s2 开始，保持命名习惯。
 
             s = resnet_helper.ResStage(
                 dim_in=[dim_in],
@@ -775,6 +783,9 @@ class X3D(nn.Module):
             )
 
     def forward(self, x, bboxes=None):
+        """
+        按顺序执行 X3D 的所有子模块并返回最终输出。
+        """
         for module in self.children():
             x = module(x)
         return x

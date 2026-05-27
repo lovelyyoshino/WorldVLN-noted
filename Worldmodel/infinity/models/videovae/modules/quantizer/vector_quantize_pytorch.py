@@ -15,30 +15,38 @@ from einops import rearrange, repeat, reduce, pack, unpack
 from typing import Callable
 
 def exists(val):
+    """返回值是否不是 `None`。"""
     return val is not None
 
 def default(val, d):
+    """若 `val` 存在则返回它，否则返回默认值 `d`。"""
     return val if exists(val) else d
 
 def noop(*args, **kwargs):
+    """空操作回调，常用作可选 all-reduce / hook 的占位函数。"""
     pass
 
 def identity(t):
+    """恒等映射。"""
     return t
 
 def l2norm(t):
+    """沿最后一维做 L2 归一化。"""
     return F.normalize(t, p = 2, dim = -1)
 
 def cdist(x, y):
+    """按批量计算欧氏距离矩阵。"""
     x2 = reduce(x ** 2, 'b n d -> b n', 'sum')
     y2 = reduce(y ** 2, 'b n d -> b n', 'sum')
     xy = einsum('b i d, b j d -> b i j', x, y) * -2
     return (rearrange(x2, 'b i -> b i 1') + rearrange(y2, 'b j -> b 1 j') + xy).clamp(min = 0).sqrt()
 
 def log(t, eps = 1e-20):
+    """带数值保护的对数。"""
     return torch.log(t.clamp(min = eps))
 
 def ema_inplace(old, new, decay):
+    """原地更新指数滑动平均：`old = decay * old + (1 - decay) * new`。"""
     is_mps = str(old.device).startswith('mps:')
 
     if not is_mps:
@@ -47,17 +55,21 @@ def ema_inplace(old, new, decay):
         old.mul_(decay).add_(new * (1 - decay))
 
 def pack_one(t, pattern):
+    """对单个张量执行 `einops.pack`。"""
     return pack([t], pattern)
 
 def unpack_one(t, ps, pattern):
+    """把 `pack_one` 的结果按原始 shape 还原。"""
     return unpack(t, ps, pattern)[0]
 
 def uniform_init(*shape):
+    """用 Kaiming uniform 初始化一个临时张量。"""
     t = torch.empty(shape)
     nn.init.kaiming_uniform_(t)
     return t
 
 def gumbel_noise(t):
+    """采样 Gumbel(0, 1) 噪声，常用于 Gumbel-Softmax。"""
     noise = torch.zeros_like(t).uniform_(0, 1)
     return -log(-log(noise))
 
@@ -70,6 +82,11 @@ def gumbel_sample(
     dim = -1,
     training = True
 ):
+    """执行 Gumbel-Softmax / argmax 采样。
+
+    返回 `(indices, one_hot)`。
+    当 `straight_through=True` 时，前向使用离散 one-hot，反向近似使用 softmax 梯度。
+    """
     dtype, size = logits.dtype, logits.shape[dim]
 
     if training and stochastic and temperature > 0:
@@ -80,13 +97,13 @@ def gumbel_sample(
     ind = sampling_logits.argmax(dim = dim)
     one_hot = F.one_hot(ind, size).type(dtype)
 
-    assert not (reinmax and not straight_through), 'reinmax can only be turned on if using straight through gumbel softmax'
+    assert not (reinmax and not straight_through), 'reinmax 只能在启用 straight through gumbel softmax 时打开'
 
     if not straight_through or temperature <= 0. or not training:
         return ind, one_hot
 
-    # use reinmax for better second-order accuracy - https://arxiv.org/abs/2304.08612
-    # algorithm 2
+    # 代码/形状说明：使用 reinmax 提高二阶精度 - https://arxiv.org/abs/2304.08612
+    # 算法 2。
 
     if reinmax:
         π0 = logits.softmax(dim = dim)
@@ -101,10 +118,12 @@ def gumbel_sample(
     return ind, one_hot
 
 def laplace_smoothing(x, n_categories, eps = 1e-5, dim = -1):
+    """做 Laplace smoothing，避免零计数导致概率和除法不稳定。"""
     denom = x.sum(dim = dim, keepdim = True)
     return (x + eps) / (denom + n_categories * eps)
 
 def sample_vectors(samples, num):
+    """从向量集合中随机采样 `num` 个样本，不足时允许重复采样。"""
     num_samples, device = samples.shape[0], samples.device
     if num_samples >= num:
         indices = torch.randperm(num_samples, device = device)[:num]
@@ -114,12 +133,15 @@ def sample_vectors(samples, num):
     return samples[indices]
 
 def batched_sample_vectors(samples, num):
+    """对 batch 中每个样本集合分别随机采样。"""
     return torch.stack([sample_vectors(sample, num) for sample in samples.unbind(dim = 0)], dim = 0)
 
 def pad_shape(shape, size, dim = 0):
+    """仅替换某一维尺寸，生成用于补齐的目标 shape。"""
     return [size if i == dim else s for i, s in enumerate(shape)]
 
 def sample_multinomial(total_count, probs):
+    """按给定概率采样多项式分布计数，返回每个类别分到的样本数。"""
     device = probs.device
     probs = probs.cpu()
 
@@ -136,12 +158,14 @@ def sample_multinomial(total_count, probs):
     return sample.to(device)
 
 def all_gather_sizes(x, dim):
+    """在分布式环境收集各 rank 指定维度上的长度。"""
     size = torch.tensor(x.shape[dim], dtype = torch.long, device = x.device)
     all_sizes = [torch.empty_like(size) for _ in range(distributed.get_world_size())]
     distributed.all_gather(all_sizes, size)
     return torch.stack(all_sizes)
 
 def all_gather_variably_sized(x, sizes, dim = 0):
+    """收集不同 rank 上长度不一致的张量。"""
     rank = distributed.get_rank()
     all_x = []
 
@@ -154,6 +178,7 @@ def all_gather_variably_sized(x, sizes, dim = 0):
     return all_x
 
 def sample_vectors_distributed(local_samples, num):
+    """在分布式环境下按全局比例采样向量，并通过 all-gather 拼回。"""
     local_samples = rearrange(local_samples, '1 ... -> ...')
 
     rank = distributed.get_rank()
@@ -174,6 +199,7 @@ def sample_vectors_distributed(local_samples, num):
     return rearrange(out, '... -> 1 ...')
 
 def batched_bincount(x, *, minlength):
+    """对 batch 中每一行独立做 bincount。"""
     batch, dtype, device = x.shape[0], x.dtype, x.device
     target = torch.zeros(batch, minlength, dtype = dtype, device = device)
     values = torch.ones_like(x)
@@ -188,6 +214,11 @@ def kmeans(
     sample_fn = batched_sample_vectors,
     all_reduce_fn = noop
 ):
+    """对多个 codebook 并行执行 k-means 初始化。
+
+    当 `use_cosine_sim=True` 时，分配步骤基于 cosine similarity；
+    否则使用欧氏距离。分布式场景可以通过 `all_reduce_fn` 同步统计量。
+    """
     num_codebooks, dim, dtype, device = samples.shape[0], samples.shape[-1], samples.dtype, samples.device
 
     means = sample_fn(samples, num_clusters)
@@ -223,23 +254,38 @@ def kmeans(
     return means, bins
 
 def batched_embedding(indices, embeds):
+    """批量 gather codebook embedding，返回与 `indices` 对齐的码向量。"""
     batch, dim = indices.shape[1], embeds.shape[-1]
     indices = repeat(indices, 'h b n -> h b n d', d = dim)
     embeds = repeat(embeds, 'h c d -> h b c d', b = batch)
     return embeds.gather(2, indices)
 
-# regularization losses
+# 正则化损失。
 
 def orthogonal_loss_fn(t):
-    # eq (2) from https://arxiv.org/abs/2112.00384
+    """正交正则项。
+
+    先把 codes 归一化，再计算任意两码之间的 cosine similarity，
+    惩罚 `cosine_sim^2`，鼓励码向量彼此正交、减少冗余。
+    """
     h, n = t.shape[:2]
     normed_codes = l2norm(t)
     cosine_sim = einsum('h i d, h j d -> h i j', normed_codes, normed_codes)
     return (cosine_sim ** 2).sum() / (h * n ** 2) - (1 / n)
 
-# distance types
+# 距离类型。
 
 class EuclideanCodebook(nn.Module):
+    """基于欧氏距离的向量量化码本。
+
+    码本支持：
+
+    - 可选 k-means 初始化
+    - EMA 更新 `cluster_size` 与 `embed_avg`
+    - 死码（dead code）检测与替换
+    - 分布式同步采样 / 统计
+    """
+
     def __init__(
         self,
         dim,
@@ -262,6 +308,7 @@ class EuclideanCodebook(nn.Module):
         affine_param_batch_decay = 0.99,
         affine_param_codebook_decay = 0.9
     ):
+        """初始化欧氏距离码本及其 EMA / k-means 相关状态。"""
         super().__init__()
         self.transform_input = identity
 
@@ -283,7 +330,7 @@ class EuclideanCodebook(nn.Module):
         self.gumbel_sample = gumbel_sample
         self.sample_codebook_temp = sample_codebook_temp
 
-        assert not (use_ddp and num_codebooks > 1 and kmeans_init), 'kmeans init is not compatible with multiple codebooks in distributed environment for now'
+        assert not (use_ddp and num_codebooks > 1 and kmeans_init), 'kmeans init 目前不兼容分布式环境中的 multiple codebooks'
 
         self.sample_fn = sample_vectors_distributed if use_ddp and sync_kmeans else batched_sample_vectors
         self.kmeans_all_reduce_fn = distributed.all_reduce if use_ddp and sync_kmeans else noop
@@ -299,7 +346,7 @@ class EuclideanCodebook(nn.Module):
         else:
             self.register_buffer('embed', embed)
 
-        # affine related params
+        # 仿射相关参数。
 
         self.affine_param = affine_param
         self.sync_affine_param = sync_affine_param
@@ -320,6 +367,7 @@ class EuclideanCodebook(nn.Module):
 
     @torch.jit.ignore
     def init_embed_(self, data, mask = None):
+        """用 k-means 结果初始化码本；若已初始化则跳过。"""
         if self.initted:
             return
 
@@ -344,6 +392,7 @@ class EuclideanCodebook(nn.Module):
 
     @torch.jit.ignore
     def update_with_decay(self, buffer_name, new_value, decay):
+        """对指定 buffer 执行指数滑动平均更新。"""
         old_value = getattr(self, buffer_name)
 
         needs_init = getattr(self, buffer_name + "_needs_init", False)
@@ -361,11 +410,12 @@ class EuclideanCodebook(nn.Module):
 
     @torch.jit.ignore
     def update_affine(self, data, embed, mask = None):
+        """更新 affine 参数所需的 batch / codebook 均值和方差。"""
         assert self.affine_param
 
         var_fn = partial(torch.var, unbiased = False)
 
-        # calculate codebook mean and variance
+        # 计算 codebook 自身的均值和方差，用于 affine 校准。
 
         embed = rearrange(embed, 'h ... d -> h (...) d')
 
@@ -373,7 +423,7 @@ class EuclideanCodebook(nn.Module):
             self.update_with_decay('codebook_mean', reduce(embed, 'h n d -> h 1 d', 'mean'), self.affine_param_codebook_decay)
             self.update_with_decay('codebook_variance', reduce(embed, 'h n d -> h 1 d', var_fn), self.affine_param_codebook_decay)
 
-        # prepare batch data, which depends on whether it has masking
+        # 准备当前 batch 数据；如果有 mask，只统计有效位置。
 
         data = rearrange(data, 'h ... d -> h (...) d')
 
@@ -381,7 +431,7 @@ class EuclideanCodebook(nn.Module):
             c = data.shape[0]
             data = rearrange(data[mask], '(c n) d -> c n d', c = c)
 
-        # calculate batch mean and variance
+        # 计算当前 batch 的均值和方差。
 
         if not self.sync_affine_param:
             self.update_with_decay('batch_mean', reduce(data, 'h n d -> h 1 d', 'mean'), self.affine_param_batch_decay)
@@ -390,12 +440,12 @@ class EuclideanCodebook(nn.Module):
 
         num_vectors, device, dtype = data.shape[-2], data.device, data.dtype
 
-        # number of vectors, for denominator
+        # 记录有效向量数量，后面作为分布式平均的分母。
 
         num_vectors = torch.tensor([num_vectors], device = device, dtype = dtype)
         distributed.all_reduce(num_vectors)
 
-        # calculate distributed mean
+        # 跨进程汇总后计算全局 batch 均值。
 
         batch_sum = reduce(data, 'h n d -> h 1 d', 'sum')
         distributed.all_reduce(batch_sum)
@@ -403,7 +453,7 @@ class EuclideanCodebook(nn.Module):
 
         self.update_with_decay('batch_mean', batch_mean, self.affine_param_batch_decay)
 
-        # calculate distributed variance
+        # 中文标题：calculate distributed variance
 
         variance_numer = reduce((data - batch_mean) ** 2, 'h n d -> h 1 d', 'sum')
         distributed.all_reduce(variance_numer)
@@ -412,19 +462,21 @@ class EuclideanCodebook(nn.Module):
         self.update_with_decay('batch_variance', batch_variance, self.affine_param_batch_decay)
 
     def replace(self, batch_samples, batch_mask):
+        """用新采样的向量替换死码，重置其计数与均值缓存。"""
         for ind, (samples, mask) in enumerate(zip(batch_samples.unbind(dim = 0), batch_mask.unbind(dim = 0))):
             if not torch.any(mask):
                 continue
 
             sampled = self.sample_fn(rearrange(samples, '... -> 1 ...'), mask.sum().item())
             sampled = rearrange(sampled, '1 ... -> ...')
-            
+
             self.embed.data[ind][mask] = sampled
 
             self.cluster_size.data[ind][mask] = self.reset_cluster_size
             self.embed_avg.data[ind][mask] = sampled * self.reset_cluster_size
 
     def expire_codes_(self, batch_samples):
+        """检测 EMA 计数过低的死码，并触发替换。"""
         if self.threshold_ema_dead_code == 0:
             return
 
@@ -444,6 +496,14 @@ class EuclideanCodebook(nn.Module):
         mask = None,
         freeze_codebook = False
     ):
+        """执行码本查找并在训练时更新 EMA 统计。
+
+        返回：
+
+        - `quantize`: 量化后的 embedding
+        - `embed_ind`: 最近邻码索引
+        - `dist`: 输入到各个码的距离矩阵
+        """
         needs_codebook_dim = x.ndim < 4
         sample_codebook_temp = default(sample_codebook_temp, self.sample_codebook_temp)
 
@@ -515,6 +575,8 @@ class EuclideanCodebook(nn.Module):
         return quantize, embed_ind, dist
 
 class CosineSimCodebook(nn.Module):
+    """基于 cosine similarity 的向量量化码本。"""
+
     def __init__(
         self,
         dim,
@@ -533,6 +595,7 @@ class CosineSimCodebook(nn.Module):
         sample_codebook_temp = 1.,
         ema_update = True
     ):
+        """初始化余弦相似度码本及其 EMA 状态。"""
         super().__init__()
         self.transform_input = l2norm
 
@@ -572,6 +635,7 @@ class CosineSimCodebook(nn.Module):
 
     @torch.jit.ignore
     def init_embed_(self, data, mask = None):
+        """使用 cosine k-means 结果初始化码本。"""
         if self.initted:
             return
 
@@ -596,6 +660,7 @@ class CosineSimCodebook(nn.Module):
         self.initted.data.copy_(torch.Tensor([True]))
 
     def replace(self, batch_samples, batch_mask):
+        """用新采样且已归一化的向量替换死码。"""
         batch_samples = l2norm(batch_samples)
 
         for ind, (samples, mask) in enumerate(zip(batch_samples.unbind(dim = 0), batch_mask.unbind(dim = 0))):
@@ -610,6 +675,7 @@ class CosineSimCodebook(nn.Module):
             self.cluster_size.data[ind][mask] = self.reset_cluster_size
 
     def expire_codes_(self, batch_samples):
+        """检测低频死码并执行替换。"""
         if self.threshold_ema_dead_code == 0:
             return
 
@@ -629,6 +695,7 @@ class CosineSimCodebook(nn.Module):
         mask = None,
         freeze_codebook = False
     ):
+        """基于 cosine similarity 选择最近码，并在训练时更新 EMA。"""
         needs_codebook_dim = x.ndim < 4
         sample_codebook_temp = default(sample_codebook_temp, self.sample_codebook_temp)
 
@@ -688,9 +755,16 @@ class CosineSimCodebook(nn.Module):
         dist = unpack_one(dist, ps, 'h * d')
         return quantize, embed_ind, dist
 
-# main class
+# 主类定义。
 
 class VectorQuantize(nn.Module):
+    """统一封装的向量量化模块。
+
+    这个类负责把输入整理成 codebook 需要的形状，调用底层码本完成量化，
+    再计算 commitment loss、usage/perplexity 等训练统计量。
+    支持多头、多码本、欧氏距离 / 余弦相似度、EMA 与可学习码本。
+    """
+
     def __init__(
         self,
         dim,
@@ -716,17 +790,18 @@ class VectorQuantize(nn.Module):
         stochastic_sample_codes = False,
         sample_codebook_temp = 1.,
         straight_through = False,
-        reinmax = False,  # using reinmax for improved straight-through, assuming straight through helps at all
+        reinmax = False,  # 中文说明：using reinmax for improved straight-through, assuming straight through helps at all
         sync_codebook = None,
         sync_affine_param = False,
         ema_update = True,
         learnable_codebook = False,
-        in_place_codebook_optimizer: Callable[..., Optimizer] = None, # Optimizer used to update the codebook embedding if using learnable_codebook
+        in_place_codebook_optimizer: Callable[..., Optimizer] = None, # 中文标题：Optimizer used to update the codebook embedding if using learnable_codebook
         affine_param = False,
         affine_param_batch_decay = 0.99,
         affine_param_codebook_decay = 0.9,
-        sync_update_v = 0. # the v that controls optimistic vs pessimistic update for synchronous update rule (21) https://minyoungg.github.io/vqtorch/assets/draft_050523.pdf
+        sync_update_v = 0. # 代码/形状说明：控制同步更新规则 (21) 中乐观/悲观更新的 v，见 https://minyoungg.github.io/vqtorch/assets/draft_050523.pdf
     ):
+        """初始化向量量化外壳与底层 codebook。"""
         super().__init__()
         self.dim = dim
         self.heads = heads
@@ -743,7 +818,7 @@ class VectorQuantize(nn.Module):
 
         self.eps = eps
         self.commitment_weight = commitment_weight
-        self.commitment_use_cross_entropy_loss = commitment_use_cross_entropy_loss # whether to use cross entropy loss to codebook as commitment loss
+        self.commitment_use_cross_entropy_loss = commitment_use_cross_entropy_loss # 中文标题：whether to use cross entropy loss to codebook as commitment loss
 
         self.learnable_codebook = learnable_codebook
 
@@ -753,10 +828,10 @@ class VectorQuantize(nn.Module):
         self.orthogonal_reg_active_codes_only = orthogonal_reg_active_codes_only
         self.orthogonal_reg_max_codes = orthogonal_reg_max_codes
 
-        assert not (ema_update and learnable_codebook), 'learnable codebook not compatible with EMA update'
+        assert not (ema_update and learnable_codebook), 'learnable codebook 与 EMA update 不兼容'
 
         assert 0 <= sync_update_v <= 1.
-        assert not (sync_update_v > 0. and not learnable_codebook), 'learnable codebook must be turned on'
+        assert not (sync_update_v > 0. and not learnable_codebook), '必须开启 learnable codebook'
 
         self.sync_update_v = sync_update_v
 
@@ -790,7 +865,7 @@ class VectorQuantize(nn.Module):
         )
 
         if affine_param:
-            assert not use_cosine_sim, 'affine param is only compatible with euclidean codebook'
+            assert not use_cosine_sim, 'affine param 只兼容 euclidean codebook'
             codebook_kwargs = dict(
                 **codebook_kwargs,
                 affine_param = True,
@@ -812,6 +887,7 @@ class VectorQuantize(nn.Module):
 
     @property
     def codebook(self):
+        """返回当前可见的 codebook 张量。"""
         codebook = self._codebook.embed
 
         if self.separate_codebook_per_head:
@@ -821,12 +897,14 @@ class VectorQuantize(nn.Module):
 
     @codebook.setter
     def codebook(self, codes):
+        """直接替换底层 codebook 参数。"""
         if not self.separate_codebook_per_head:
             codes = rearrange(codes, '... -> 1 ...')
 
         self._codebook.embed.copy_(codes)
 
     def get_codes_from_indices(self, indices):
+        """根据索引查回码向量，支持单头和多头两种布局。"""
         codebook = self.codebook
         is_multiheaded = codebook.ndim > 2
 
@@ -846,35 +924,41 @@ class VectorQuantize(nn.Module):
         return codes
 
     def get_output_from_indices(self, indices):
+        """根据索引重建量化输出，并投影回原特征维。"""
         codes = self.get_codes_from_indices(indices)
         return self.project_out(codes)
-    
+
     def get_perplexity(self, encoding_indices, x):
-        encode_onehot = F.one_hot(encoding_indices, self.codebook_size).type_as(x) # [bthw, ncode]
+        """根据 one-hot 平均概率计算 perplexity。
+
+        `perplexity = exp(-sum(p * log(p)))`，数值越高通常说明码本使用越分散。
+        """
+        encode_onehot = F.one_hot(encoding_indices, self.codebook_size).type_as(x) # 代码/形状说明：[bthw, ncode]
         avg_probs = torch.mean(encode_onehot, dim=0)
         perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
         return perplexity
-    
+
 
     def get_usage(self, encoding_indices):
-        # Flatten the batch of encoding indices into a single 1D tensor
+        """统计每个 code 在当前 batch 中的使用占比。"""
+        # 把 batch 内所有 encoding indices 展平成一维，方便统一统计 code 使用率。
         all_indices = encoding_indices.flatten()
-        
-        # Obtain the total number of encoding indices in the batch to calculate percentages
+
+        # 统计当前 batch 中总共有多少个索引，用作百分比的分母。
         total_indices = all_indices.numel()
-        
-        # Initialize a tensor to store the percentage usage of each code
+
+        # 初始化每个 code 的使用占比张量。
         codebook_usage_percentage = torch.zeros(self.codebook_size, device=all_indices.device)
-        
-        # Count the number of occurrences of each index and get their frequency as percentages
+
+        # 统计每个索引出现次数，再换算成使用占比。
         unique_indices, counts = torch.unique(all_indices, return_counts=True)
-        
-        # Calculate the percentage
+
+        # 计算占比。
         percentages = (counts.float() / total_indices)
-        
-        # Populate the corresponding percentages in the codebook_usage_percentage tensor
+
+        # 把占比写回对应 code 的位置，未出现的 code 保持 0。
         codebook_usage_percentage[unique_indices.long()] = percentages
-        
+
         return codebook_usage_percentage
 
 
@@ -886,6 +970,15 @@ class VectorQuantize(nn.Module):
         sample_codebook_temp = None,
         freeze_codebook = False,
     ):
+        """执行向量量化主流程。
+
+        主要步骤：
+
+        1. 规范输入 shape，并按需投影到 codebook 维度。
+        2. 调用底层码本得到量化结果、索引和距离矩阵。
+        3. 训练时使用 STE：`x + (quantize - x).detach()`。
+        4. 计算 commitment loss、交叉熵损失或正交正则，并把索引整理回原布局。
+        """
         orig_input = x
 
         only_one = x.ndim == 2
@@ -899,7 +992,7 @@ class VectorQuantize(nn.Module):
         need_transpose = not self.channel_last and not self.accept_image_fmap
         should_inplace_optimize = exists(self.in_place_codebook_optimizer)
 
-        # rearrange inputs
+        # 中文标题：rearrange inputs
 
         if self.accept_image_fmap:
             nframes, height, width = x.shape[-3:]
@@ -908,21 +1001,21 @@ class VectorQuantize(nn.Module):
         if need_transpose:
             x = rearrange(x, 'b d n -> b n d')
 
-        # project input
+        # 先把输入投影到 codebook 使用的维度。
 
         x = self.project_in(x)
 
-        # handle multi-headed separate codebooks
+        # 多头量化时，把每个 head 的 token 整理到对应 codebook。
 
         if is_multiheaded:
             ein_rhs_eq = 'h b n d' if self.separate_codebook_per_head else '1 (b h) n d'
             x = rearrange(x, f'b n (h d) -> {ein_rhs_eq}', h = heads)
 
-        # l2norm for cosine sim, otherwise identity
+        # 如果使用 cosine 相似度，这里做 L2 归一化；否则保持原值。
 
         x = self._codebook.transform_input(x)
 
-        # codebook forward kwargs
+        # 中文标题：codebook forward kwargs
 
         codebook_forward_kwargs = dict(
             sample_codebook_temp = sample_codebook_temp,
@@ -930,11 +1023,11 @@ class VectorQuantize(nn.Module):
             freeze_codebook = freeze_codebook
         )
 
-        # quantize
+        # 执行一次 codebook 查找/量化，得到量化向量、索引和距离矩阵。
 
         quantize, embed_ind, distances = self._codebook(x, **codebook_forward_kwargs)
 
-        # one step in-place update
+        # 可选：在当前 forward 内对 codebook 做一步原地优化。
 
         if should_inplace_optimize and self.training and not freeze_codebook:
 
@@ -954,28 +1047,29 @@ class VectorQuantize(nn.Module):
             self.in_place_codebook_optimizer.step()
             self.in_place_codebook_optimizer.zero_grad()
 
-            # quantize again
+            # codebook 更新后重新量化，避免返回旧 codebook 的结果。
 
             quantize, embed_ind, distances = self._codebook(x, **codebook_forward_kwargs)
 
         if self.training:
-            # determine code to use for commitment loss
+            # 决定 commitment loss 使用 detach 后的 code，还是可学习 codebook 的原始 code。
             maybe_detach = torch.detach if not self.learnable_codebook or freeze_codebook else identity
 
-            commit_quantize = maybe_detach(quantize)            
+            commit_quantize = maybe_detach(quantize)
 
-            # straight through
+            # straight-through：前向使用量化值，反向让梯度穿过原始输入。
 
             quantize = x + (quantize - x).detach()
 
             if self.sync_update_v > 0.:
-                # (21) in https://minyoungg.github.io/vqtorch/assets/draft_050523.pdf
+                # 代码/形状说明：(21) in https://minyoungg.github.io/vqtorch/assets/draft_050523.pdf
                 quantize = quantize + self.sync_update_v * (quantize - quantize.detach())
 
-        # function for calculating cross entropy loss to distance matrix
-        # used for (1) naturalspeech2 training residual vq latents to be close to the correct codes and (2) cross-entropy based commitment loss
+        # 基于距离矩阵计算 cross entropy loss 的辅助函数。
+        # 用途：(1) NaturalSpeech2 residual VQ latent 对齐正确 code；(2) 基于交叉熵的 commitment loss。
 
         def calculate_ce_loss(codes):
+            """把距离矩阵改排布后送入 `F.cross_entropy`。"""
             if not is_multiheaded:
                 dist_einops_eq = '1 b n l -> b l n'
             elif self.separate_codebook_per_head:
@@ -991,13 +1085,13 @@ class VectorQuantize(nn.Module):
 
             return ce_loss
 
-        # if returning cross entropy loss on codes that were passed in
+        # 中文标题：if returning cross entropy loss on codes that were passed in
 
         if return_loss:
             print(indices)
             return quantize, calculate_ce_loss(indices)
 
-        # transform embedding indices
+        # 中文标题：transform embedding indices
 
         if is_multiheaded:
             if self.separate_codebook_per_head:
@@ -1011,7 +1105,7 @@ class VectorQuantize(nn.Module):
         if only_one:
             embed_ind = rearrange(embed_ind, 'b 1 ... -> b ...')
 
-        # aggregate loss
+        # 中文标题：aggregate loss
 
         loss = torch.tensor([0.], device = device, requires_grad = self.training)
 
@@ -1029,7 +1123,7 @@ class VectorQuantize(nn.Module):
                     commit_loss = calculate_ce_loss(embed_ind)
                 else:
                     if exists(mask):
-                        # with variable lengthed sequences
+                        # 中文标题：with variable lengthed sequences
                         commit_loss = F.mse_loss(commit_quantize, x, reduction = 'none')
 
                         loss_mask = mask
@@ -1045,10 +1139,10 @@ class VectorQuantize(nn.Module):
             if self.has_codebook_orthogonal_loss:
                 codebook = self._codebook.embed
 
-                # only calculate orthogonal loss for the activated codes for this batch
+                # 只对当前 batch 激活的 codes 计算 orthogonal loss。
 
                 if self.orthogonal_reg_active_codes_only:
-                    assert not (is_multiheaded and self.separate_codebook_per_head), 'orthogonal regularization for only active codes not compatible with multi-headed with separate codebooks yet'
+                    assert not (is_multiheaded and self.separate_codebook_per_head), '仅对 active codes 做 orthogonal regularization 暂不兼容 separate codebooks 的 multi-headed 模式'
                     unique_code_ids = torch.unique(embed_ind)
                     codebook = codebook[:, unique_code_ids]
 
@@ -1061,7 +1155,7 @@ class VectorQuantize(nn.Module):
                 orthogonal_reg_loss = orthogonal_loss_fn(codebook)
                 loss = loss + orthogonal_reg_loss * self.orthogonal_reg_weight
 
-        # handle multi-headed quantized embeddings
+        # 多头量化后，把每个 head 的量化 embedding 重新拼回主特征维。
 
         if is_multiheaded:
             if self.separate_codebook_per_head:
@@ -1069,11 +1163,11 @@ class VectorQuantize(nn.Module):
             else:
                 quantize = rearrange(quantize, '1 (b h) n d -> b n (h d)', h = heads)
 
-        # project out
+        # 投影回调用方期望的输出维度。
 
         quantize = self.project_out(quantize)
 
-        # rearrange quantized embeddings
+        # 如果输入曾经转置，这里把量化 embedding 排回原布局。
 
         if need_transpose:
             quantize = rearrange(quantize, 'b n d -> b d n')
@@ -1084,7 +1178,7 @@ class VectorQuantize(nn.Module):
         if only_one:
             quantize = rearrange(quantize, 'b 1 d -> b d')
 
-        # if masking, only return quantized for where mask has True
+        # 代码/形状说明：if masking, only return quantized for where mask has True
 
         if exists(mask):
             quantize = torch.where(
@@ -1093,7 +1187,7 @@ class VectorQuantize(nn.Module):
                 orig_input
             )
 
-        # return quantize, embed_ind, loss
+        # 代码/形状说明：return quantize, embed_ind, loss
         perplexity = self.get_perplexity(embed_ind, x)
         usage = self.get_usage(embed_ind)
 
@@ -1103,8 +1197,8 @@ class VectorQuantize(nn.Module):
             self.codebook_usage.data = 0.99 * self.codebook_usage.data + (1 - 0.99) * usage
 
         self.call_cnt += 1
-        # avg_distribution = self.codebook_usage.data.sum() / self.codebook_size
+        # 代码/形状说明：avg_distribution = self.codebook_usage.data.sum() / self.codebook_size
         avg_usage = (self.codebook_usage.data > (1/self.codebook_size)).sum() / self.codebook_size
-        
+
         return dict(embeddings=quantize, encodings=embed_ind,
                     commitment_loss=loss, perplexity=perplexity, avg_usage=avg_usage, batch_usage=usage)

@@ -7,14 +7,29 @@ import torch
 
 
 class ConsumeVariableFunc(Function):
+    """中文说明：`ConsumeVariableFunc` 封装可求导分布式通信封装中的状态和子模块。
+
+    新手提示：这些包装把 `send`/`recv`/`gather`/`scatter` 接入自动求导，阅读时要把 `forward` 的通信和 `backward` 的梯度回传成对看。
+    关键关系：`forward` 负责数据分发或聚合，`backward` 通常执行互逆通信来传回梯度。
+    """
     @staticmethod
     def forward(ctx, tensor_to_consume, set_ones_grad, *tensors_to_return):
+        """中文说明：`forward` 执行可求导分布式通信封装的前向计算；重点核对输入输出张量 `shape` 是否与调用方约定一致。
+
+        新手提示：这些包装把 `send`/`recv`/`gather`/`scatter` 接入自动求导，阅读时要把 `forward` 的通信和 `backward` 的梯度回传成对看。
+        关键关系：`forward` 负责数据分发或聚合，`backward` 通常执行互逆通信来传回梯度。
+        """
         ctx.save_for_backward(tensor_to_consume)
         ctx.set_ones_grad = set_ones_grad
         return tensors_to_return
 
     @staticmethod
     def backward(ctx, *grad_outputs):
+        """中文说明：`backward` 实现可求导分布式通信封装的反向传播；返回梯度顺序必须和 `forward` 输入顺序一致。
+
+        新手提示：这些包装把 `send`/`recv`/`gather`/`scatter` 接入自动求导，阅读时要把 `forward` 的通信和 `backward` 的梯度回传成对看。
+        关键关系：`forward` 负责数据分发或聚合，`backward` 通常执行互逆通信来传回梯度。
+        """
         tensor_to_consume, = ctx.saved_tensors
         if ctx.set_ones_grad:
             fake_grad = torch.ones_like(tensor_to_consume)
@@ -25,8 +40,18 @@ class ConsumeVariableFunc(Function):
 
 
 class SendFunc(Function):
+    """中文说明：`SendFunc` 封装可求导分布式通信封装中的状态和子模块。
+
+    新手提示：这些包装把 `send`/`recv`/`gather`/`scatter` 接入自动求导，阅读时要把 `forward` 的通信和 `backward` 的梯度回传成对看。
+    关键关系：`forward` 负责数据分发或聚合，`backward` 通常执行互逆通信来传回梯度。
+    """
     @staticmethod
     def forward(ctx, tensor, dst, group=dist.group.WORLD, tag=0):
+        """中文说明：`forward` 执行可求导分布式通信封装的前向计算；重点核对输入输出张量 `shape` 是否与调用方约定一致。
+
+        新手提示：这些包装把 `send`/`recv`/`gather`/`scatter` 接入自动求导，阅读时要把 `forward` 的通信和 `backward` 的梯度回传成对看。
+        关键关系：`forward` 负责数据分发或聚合，`backward` 通常执行互逆通信来传回梯度。
+        """
         ctx.save_for_backward(tensor)
         ctx.dst = dst
         ctx.group = group
@@ -36,8 +61,13 @@ class SendFunc(Function):
 
     @staticmethod
     def backward(ctx, grad_output):
+        """中文说明：`backward` 实现可求导分布式通信封装的反向传播；返回梯度顺序必须和 `forward` 输入顺序一致。
+
+        新手提示：这些包装把 `send`/`recv`/`gather`/`scatter` 接入自动求导，阅读时要把 `forward` 的通信和 `backward` 的梯度回传成对看。
+        关键关系：`forward` 负责数据分发或聚合，`backward` 通常执行互逆通信来传回梯度。
+        """
         tensor, = ctx.saved_tensors
-        # TODO: Add ctx.needs_input_grad check
+        # 待办：增加 ctx.needs_input_grad 检查，避免不需要梯度的输入继续回传。
         grad_tensor = torch.zeros_like(tensor)
         dist.recv(grad_tensor, ctx.dst, ctx.group, ctx.tag)
 
@@ -45,6 +75,11 @@ class SendFunc(Function):
 
 
 class RecvFunc(Function):
+    """中文说明：`RecvFunc` 封装可求导分布式通信封装中的状态和子模块。
+
+    新手提示：这些包装把 `send`/`recv`/`gather`/`scatter` 接入自动求导，阅读时要把 `forward` 的通信和 `backward` 的梯度回传成对看。
+    关键关系：`forward` 负责数据分发或聚合，`backward` 通常执行互逆通信来传回梯度。
+    """
     @staticmethod
     def forward(ctx,
                 tensor,
@@ -52,6 +87,11 @@ class RecvFunc(Function):
                 group=dist.group.WORLD,
                 tag=0,
                 inplace=True):
+        """中文说明：`forward` 执行可求导分布式通信封装的前向计算；重点核对输入输出张量 `shape` 是否与调用方约定一致。
+
+        新手提示：这些包装把 `send`/`recv`/`gather`/`scatter` 接入自动求导，阅读时要把 `forward` 的通信和 `backward` 的梯度回传成对看。
+        关键关系：`forward` 负责数据分发或聚合，`backward` 通常执行互逆通信来传回梯度。
+        """
         if not inplace:
             tensor = torch.zeros_like(tensor).requires_grad_(False)
         ctx.src = src
@@ -68,13 +108,28 @@ class RecvFunc(Function):
 
     @staticmethod
     def backward(ctx, grad_tensor, grad_sender):
+        """中文说明：`backward` 实现可求导分布式通信封装的反向传播；返回梯度顺序必须和 `forward` 输入顺序一致。
+
+        新手提示：这些包装把 `send`/`recv`/`gather`/`scatter` 接入自动求导，阅读时要把 `forward` 的通信和 `backward` 的梯度回传成对看。
+        关键关系：`forward` 负责数据分发或聚合，`backward` 通常执行互逆通信来传回梯度。
+        """
         dist.send(grad_tensor, ctx.src, ctx.group, ctx.tag)
         return grad_tensor, None, None, None, None
 
 
 class BroadcastFunc(Function):
+    """中文说明：`BroadcastFunc` 封装可求导分布式通信封装中的状态和子模块。
+
+    新手提示：这些包装把 `send`/`recv`/`gather`/`scatter` 接入自动求导，阅读时要把 `forward` 的通信和 `backward` 的梯度回传成对看。
+    关键关系：`forward` 负责数据分发或聚合，`backward` 通常执行互逆通信来传回梯度。
+    """
     @staticmethod
     def forward(ctx, tensor, src, group=dist.group.WORLD, inplace=True):
+        """中文说明：`forward` 执行可求导分布式通信封装的前向计算；重点核对输入输出张量 `shape` 是否与调用方约定一致。
+
+        新手提示：这些包装把 `send`/`recv`/`gather`/`scatter` 接入自动求导，阅读时要把 `forward` 的通信和 `backward` 的梯度回传成对看。
+        关键关系：`forward` 负责数据分发或聚合，`backward` 通常执行互逆通信来传回梯度。
+        """
         ctx.src = src
         ctx.group = group
         if dist.get_rank(group) == src:
@@ -89,6 +144,11 @@ class BroadcastFunc(Function):
 
     @staticmethod
     def backward(ctx, grad_output):
+        """中文说明：`backward` 实现可求导分布式通信封装的反向传播；返回梯度顺序必须和 `forward` 输入顺序一致。
+
+        新手提示：这些包装把 `send`/`recv`/`gather`/`scatter` 接入自动求导，阅读时要把 `forward` 的通信和 `backward` 的梯度回传成对看。
+        关键关系：`forward` 负责数据分发或聚合，`backward` 通常执行互逆通信来传回梯度。
+        """
         dist.reduce(grad_output,
                     ctx.src,
                     op=dist.ReduceOp.SUM,
@@ -97,28 +157,68 @@ class BroadcastFunc(Function):
 
 
 class AllReduceFunc(Function):
+    """中文说明：`AllReduceFunc` 封装可求导分布式通信封装中的状态和子模块。
+
+    新手提示：这些包装把 `send`/`recv`/`gather`/`scatter` 接入自动求导，阅读时要把 `forward` 的通信和 `backward` 的梯度回传成对看。
+    关键关系：`forward` 负责数据分发或聚合，`backward` 通常执行互逆通信来传回梯度。
+    """
     @staticmethod
     def forward(ctx, i):
+        """中文说明：`forward` 执行可求导分布式通信封装的前向计算；重点核对输入输出张量 `shape` 是否与调用方约定一致。
+
+        新手提示：这些包装把 `send`/`recv`/`gather`/`scatter` 接入自动求导，阅读时要把 `forward` 的通信和 `backward` 的梯度回传成对看。
+        关键关系：`forward` 负责数据分发或聚合，`backward` 通常执行互逆通信来传回梯度。
+        """
         raise NotImplementedError
 
     @staticmethod
     def backward(ctx, grad_output):
+        """中文说明：`backward` 实现可求导分布式通信封装的反向传播；返回梯度顺序必须和 `forward` 输入顺序一致。
+
+        新手提示：这些包装把 `send`/`recv`/`gather`/`scatter` 接入自动求导，阅读时要把 `forward` 的通信和 `backward` 的梯度回传成对看。
+        关键关系：`forward` 负责数据分发或聚合，`backward` 通常执行互逆通信来传回梯度。
+        """
         raise NotImplementedError
 
 
 class ReduceFunc(Function):
+    """中文说明：`ReduceFunc` 封装可求导分布式通信封装中的状态和子模块。
+
+    新手提示：这些包装把 `send`/`recv`/`gather`/`scatter` 接入自动求导，阅读时要把 `forward` 的通信和 `backward` 的梯度回传成对看。
+    关键关系：`forward` 负责数据分发或聚合，`backward` 通常执行互逆通信来传回梯度。
+    """
     @staticmethod
     def forward(ctx, i):
+        """中文说明：`forward` 执行可求导分布式通信封装的前向计算；重点核对输入输出张量 `shape` 是否与调用方约定一致。
+
+        新手提示：这些包装把 `send`/`recv`/`gather`/`scatter` 接入自动求导，阅读时要把 `forward` 的通信和 `backward` 的梯度回传成对看。
+        关键关系：`forward` 负责数据分发或聚合，`backward` 通常执行互逆通信来传回梯度。
+        """
         raise NotImplementedError
 
     @staticmethod
     def backward(ctx, grad_output):
+        """中文说明：`backward` 实现可求导分布式通信封装的反向传播；返回梯度顺序必须和 `forward` 输入顺序一致。
+
+        新手提示：这些包装把 `send`/`recv`/`gather`/`scatter` 接入自动求导，阅读时要把 `forward` 的通信和 `backward` 的梯度回传成对看。
+        关键关系：`forward` 负责数据分发或聚合，`backward` 通常执行互逆通信来传回梯度。
+        """
         raise NotImplementedError
 
 
 class AllGatherFunc(Function):
+    """中文说明：`AllGatherFunc` 封装可求导分布式通信封装中的状态和子模块。
+
+    新手提示：这些包装把 `send`/`recv`/`gather`/`scatter` 接入自动求导，阅读时要把 `forward` 的通信和 `backward` 的梯度回传成对看。
+    关键关系：`forward` 负责数据分发或聚合，`backward` 通常执行互逆通信来传回梯度。
+    """
     @staticmethod
     def forward(ctx, tensor, group, inplace, *gather_list):
+        """中文说明：`forward` 执行可求导分布式通信封装的前向计算；重点核对输入输出张量 `shape` 是否与调用方约定一致。
+
+        新手提示：这些包装把 `send`/`recv`/`gather`/`scatter` 接入自动求导，阅读时要把 `forward` 的通信和 `backward` 的梯度回传成对看。
+        关键关系：`forward` 负责数据分发或聚合，`backward` 通常执行互逆通信来传回梯度。
+        """
         ctx.save_for_backward(tensor)
         ctx.group = group
         gather_list = list(gather_list)
@@ -129,6 +229,11 @@ class AllGatherFunc(Function):
 
     @staticmethod
     def backward(ctx, *grads):
+        """中文说明：`backward` 实现可求导分布式通信封装的反向传播；返回梯度顺序必须和 `forward` 输入顺序一致。
+
+        新手提示：这些包装把 `send`/`recv`/`gather`/`scatter` 接入自动求导，阅读时要把 `forward` 的通信和 `backward` 的梯度回传成对看。
+        关键关系：`forward` 负责数据分发或聚合，`backward` 通常执行互逆通信来传回梯度。
+        """
         input, = ctx.saved_tensors
         grad_out = torch.zeros_like(input)
         dist_extra.reduce_scatter(grad_out, list(grads), group=ctx.group)
@@ -136,8 +241,18 @@ class AllGatherFunc(Function):
 
 
 class GatherFunc(Function):
+    """中文说明：`GatherFunc` 封装可求导分布式通信封装中的状态和子模块。
+
+    新手提示：这些包装把 `send`/`recv`/`gather`/`scatter` 接入自动求导，阅读时要把 `forward` 的通信和 `backward` 的梯度回传成对看。
+    关键关系：`forward` 负责数据分发或聚合，`backward` 通常执行互逆通信来传回梯度。
+    """
     @staticmethod
     def forward(ctx, input, dst, group, inplace, *gather_list):
+        """中文说明：`forward` 执行可求导分布式通信封装的前向计算；重点核对输入输出张量 `shape` 是否与调用方约定一致。
+
+        新手提示：这些包装把 `send`/`recv`/`gather`/`scatter` 接入自动求导，阅读时要把 `forward` 的通信和 `backward` 的梯度回传成对看。
+        关键关系：`forward` 负责数据分发或聚合，`backward` 通常执行互逆通信来传回梯度。
+        """
         ctx.dst = dst
         ctx.group = group
         ctx.save_for_backward(input)
@@ -153,6 +268,11 @@ class GatherFunc(Function):
 
     @staticmethod
     def backward(ctx, *grads):
+        """中文说明：`backward` 实现可求导分布式通信封装的反向传播；返回梯度顺序必须和 `forward` 输入顺序一致。
+
+        新手提示：这些包装把 `send`/`recv`/`gather`/`scatter` 接入自动求导，阅读时要把 `forward` 的通信和 `backward` 的梯度回传成对看。
+        关键关系：`forward` 负责数据分发或聚合，`backward` 通常执行互逆通信来传回梯度。
+        """
         input, = ctx.saved_tensors
         grad_input = torch.zeros_like(input)
         if dist.get_rank(ctx.group) == ctx.dst:
@@ -168,6 +288,11 @@ class GatherFunc(Function):
 
 
 class ScatterFunc(Function):
+    """中文说明：`ScatterFunc` 封装可求导分布式通信封装中的状态和子模块。
+
+    新手提示：这些包装把 `send`/`recv`/`gather`/`scatter` 接入自动求导，阅读时要把 `forward` 的通信和 `backward` 的梯度回传成对看。
+    关键关系：`forward` 负责数据分发或聚合，`backward` 通常执行互逆通信来传回梯度。
+    """
     @staticmethod
     def forward(ctx,
                 tensor,
@@ -175,6 +300,11 @@ class ScatterFunc(Function):
                 group=dist.group.WORLD,
                 inplace=True,
                 *scatter_list):
+        """中文说明：`forward` 执行可求导分布式通信封装的前向计算；重点核对输入输出张量 `shape` 是否与调用方约定一致。
+
+        新手提示：这些包装把 `send`/`recv`/`gather`/`scatter` 接入自动求导，阅读时要把 `forward` 的通信和 `backward` 的梯度回传成对看。
+        关键关系：`forward` 负责数据分发或聚合，`backward` 通常执行互逆通信来传回梯度。
+        """
         ctx.src = src
         ctx.group = group
         if not inplace:
@@ -189,6 +319,11 @@ class ScatterFunc(Function):
 
     @staticmethod
     def backward(ctx, grad_tensor):
+        """中文说明：`backward` 实现可求导分布式通信封装的反向传播；返回梯度顺序必须和 `forward` 输入顺序一致。
+
+        新手提示：这些包装把 `send`/`recv`/`gather`/`scatter` 接入自动求导，阅读时要把 `forward` 的通信和 `backward` 的梯度回传成对看。
+        关键关系：`forward` 负责数据分发或聚合，`backward` 通常执行互逆通信来传回梯度。
+        """
         if dist.get_rank(ctx.group) == ctx.src:
             grad_outputs = [torch.zeros_like(g) for g in ctx.saved_tensors]
             dist.gather(grad_tensor, grad_outputs, ctx.src, group=ctx.group)

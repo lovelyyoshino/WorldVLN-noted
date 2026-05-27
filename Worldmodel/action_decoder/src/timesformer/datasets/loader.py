@@ -1,6 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
-"""Data loader."""
+"""数据加载器。"""
 
 import itertools
 import numpy as np
@@ -17,13 +17,12 @@ from .build import build_dataset
 
 def detection_collate(batch):
     """
-    Collate function for detection task. Concatanate bboxes, labels and
-    metadata from different samples in the first dimension instead of
-    stacking them to have a batch-size dimension.
-    Args:
-        batch (tuple or list): data batch to collate.
-    Returns:
-        (tuple): collated detection data batch.
+    检测任务的数据合并函数。将不同样本的 bboxes、labels 和 metadata
+    沿第一维拼接，而不是堆叠出 batch 维。
+    参数：
+        batch (tuple or list): 待合并的一批数据。
+    返回：
+        (tuple): 拼接后的检测任务 batch。
     """
     inputs, labels, video_idx, extra_data = zip(*batch)
     inputs, video_idx = default_collate(inputs), default_collate(video_idx)
@@ -33,7 +32,7 @@ def detection_collate(batch):
     for key in extra_data[0].keys():
         data = [d[key] for d in extra_data]
         if key == "boxes" or key == "ori_boxes":
-            # Append idx info to the bboxes before concatenating them.
+            # 在拼接前给每个 bbox 追加样本索引信息。
             bboxes = [
                 np.concatenate(
                     [np.full((data[i].shape[0], 1), float(i)), data[i]], axis=1
@@ -54,12 +53,13 @@ def detection_collate(batch):
 
 def construct_loader(cfg, split, is_precise_bn=False):
     """
-    Constructs the data loader for the given dataset.
-    Args:
-        cfg (CfgNode): configs. Details can be found in
-            slowfast/config/defaults.py
-        split (str): the split of the data loader. Options include `train`,
-            `val`, and `test`.
+        为给定数据集构建数据加载器。
+        参数：
+            cfg (CfgNode): 配置。详见
+                说明：slowfast/config/defaults.py
+            split (str): 数据加载切分。可选 `train`、
+                说明：`val` 和 `test`。
+
     """
     assert split in ["train", "val", "test"]
     if split in ["train"]:
@@ -78,16 +78,16 @@ def construct_loader(cfg, split, is_precise_bn=False):
         shuffle = False
         drop_last = False
 
-    # Construct the dataset
+    # 构建数据集。
     dataset = build_dataset(dataset_name, cfg, split)
 
     if cfg.MULTIGRID.SHORT_CYCLE and split in ["train"] and not is_precise_bn:
-        # Create a sampler for multi-process training
+        # 为多进程训练创建采样器。
         sampler = utils.create_sampler(dataset, shuffle, cfg)
         batch_sampler = ShortCycleBatchSampler(
             sampler, batch_size=batch_size, drop_last=drop_last, cfg=cfg
         )
-        # Create a loader
+        # 创建数据加载器。
         loader = torch.utils.data.DataLoader(
             dataset,
             batch_sampler=batch_sampler,
@@ -96,9 +96,9 @@ def construct_loader(cfg, split, is_precise_bn=False):
             worker_init_fn=utils.loader_worker_init_fn(dataset),
         )
     else:
-        # Create a sampler for multi-process training
+        # 为多进程训练创建采样器。
         sampler = utils.create_sampler(dataset, shuffle, cfg)
-        # Create a loader
+        # 创建数据加载器。
         loader = torch.utils.data.DataLoader(
             dataset,
             batch_size=batch_size,
@@ -115,10 +115,10 @@ def construct_loader(cfg, split, is_precise_bn=False):
 
 def shuffle_dataset(loader, cur_epoch):
     """ "
-    Shuffles the data.
-    Args:
-        loader (loader): data loader to perform shuffle.
-        cur_epoch (int): number of the current epoch.
+    打乱数据顺序。
+    参数：
+        loader (loader): 要打乱读取顺序的数据加载器。
+        cur_epoch (int): 当前 epoch 编号。
     """
     sampler = (
         loader.batch_sampler.sampler
@@ -127,8 +127,8 @@ def shuffle_dataset(loader, cur_epoch):
     )
     assert isinstance(
         sampler, (RandomSampler, DistributedSampler)
-    ), "Sampler type '{}' not supported".format(type(sampler))
-    # RandomSampler handles shuffling automatically
+    ), "不支持的采样器类型 '{}'".format(type(sampler))
+    # 随机采样器会自动处理 shuffle。
     if isinstance(sampler, DistributedSampler):
-        # DistributedSampler shuffles data based on epoch
+        # 分布式采样器会根据 epoch 打乱数据。
         sampler.set_epoch(cur_epoch)

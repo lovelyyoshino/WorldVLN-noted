@@ -1,11 +1,11 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
 """
-timesformer.models package init.
+timesformer.models 包初始化。
 
-The upstream project imports build utilities that depend on `fvcore`.
-For lightweight usage (e.g. importing `timesformer.models.vit.VisionTransformer`)
-we allow importing without `fvcore` installed.
+上游项目会导入依赖 `fvcore` 的 build 工具。
+对于轻量用法（例如只导入 `timesformer.models.vit.VisionTransformer`），
+允许在未安装 `fvcore` 时完成导入。
 """
 
 try:
@@ -13,5 +13,5 @@ try:
     from .custom_video_model_builder import *  # noqa
     from .video_model_builder import ResNet, SlowFast  # noqa
 except ModuleNotFoundError:
-    # Allow minimal imports without optional deps.
+    # 允许在缺少可选依赖时完成最小化导入。
     pass

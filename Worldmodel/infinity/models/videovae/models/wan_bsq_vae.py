@@ -24,36 +24,36 @@ from infinity.models.videovae.utils.dynamic_resolution_two_pyramid import get_ra
 
 
 def patchify(item):
+    """把视频 latent 做 2x2 patch 重排。
+
+    维度关系为：
+    `(B, C, T, H, W) -> (B, 4C, T, H/2, W/2)`。
+    本质上是先把时间维移到 `pixel_unshuffle` 兼容的位置，再把每个 `2x2`
+    空间邻域折叠进通道维。这样后续量化器能在更低空间分辨率上工作。
+    """
     assert item.ndim == 5
-    # (B,c,t,H,W) -> (B,t,c,H,W) -> (B,t,4c,H/2,W/2) -> (B,4c,t,H/2,W/2)
+    # `(H, W)` 上的每个 `2x2` patch 会被重排到通道维，因此通道数变成原来的 4 倍。
     item = torch.nn.functional.pixel_unshuffle(item.permute(0,2,1,3,4), 2).permute(0,2,1,3,4)
     return item
 
 def unpatchify(item):
+    """把 patchified latent 还原回原始空间布局。
+
+    维度关系为：
+    `(B, 4C, T, H/2, W/2) -> (B, C, T, H, W)`。
+    它正好是 `patchify` 的逆操作。
+    """
     assert item.ndim == 5
-    item = item.permute(0,2,1,3,4) # (B,4c,t,H/2,W/2) -> [B, t, 4c, H/2, W/2]
-    item = torch.nn.functional.pixel_shuffle(item, 2) # [B, t, 4c, H/2, W/2] -> [B, t, c, H, W]
-    item = item.permute(0,2,1,3,4) # [B, t, c, H, W] -> [B, c, t, H, W]
+    item = item.permute(0,2,1,3,4) # `(B, 4C, T, H/2, W/2)` 先换成 `pixel_shuffle` 期望的布局。
+    item = torch.nn.functional.pixel_shuffle(item, 2) # 每个位置的 4 个子通道重新铺回 `2x2` 空间邻域。
+    item = item.permute(0,2,1,3,4) # 恢复为 `(B, C, T, H, W)`。
     return item
 
 class CogVideoXDownsample3D(nn.Module):
-    # Todo: Wait for paper relase.
-    r"""
-    A 3D Downsampling layer using in [CogVideoX]() by Tsinghua University & ZhipuAI
+    r"""CogVideoX 风格的 3D 下采样层。
 
-    Args:
-        in_channels (`int`):
-            Number of channels in the input image.
-        out_channels (`int`):
-            Number of channels produced by the convolution.
-        kernel_size (`int`, defaults to `3`):
-            Size of the convolving kernel.
-        stride (`int`, defaults to `2`):
-            Stride of the convolution.
-        padding (`int`, defaults to `0`):
-            Padding added to all four sides of the input.
-        compress_time (`bool`, defaults to `False`):
-            Whether or not to compress the time dimension.
+    该层可以只压缩空间，也可以同时压缩时间。对视频特征来说，这一步相当于把
+    时空分辨率换成更粗的 latent 网格，供后续编码器或量化器继续处理。
     """
 
     def __init__(
@@ -66,9 +66,10 @@ class CogVideoXDownsample3D(nn.Module):
         compress_time = None,
         down_layer = "conv",
         down_norm = False,
-        pad_mode = "constant", 
+        pad_mode = "constant",
         norm_type=None,
     ):
+        """根据 `down_layer` 选择 2D 卷积、2D DC 块或 3D DC 块实现。"""
         super().__init__()
 
         self.pad_mode = pad_mode
@@ -82,6 +83,7 @@ class CogVideoXDownsample3D(nn.Module):
         self.compress_time = compress_time
 
     def forward(self, x: torch.Tensor, conv_cache: Optional[Dict[str, torch.Tensor]] = None) -> torch.Tensor:
+        """执行下采样，并在需要时压缩时间维。"""
         new_conv_cache = {}
         conv_cache = conv_cache or {}
 
@@ -91,22 +93,20 @@ class CogVideoXDownsample3D(nn.Module):
             if self.compress_time == 2:
                 batch_size, channels, frames, height, width = x.shape
 
-                # (batch_size, channels, frames, height, width) -> (batch_size, height, width, channels, frames) -> (batch_size * height * width, channels, frames)
+                # 先把每个空间位置上的时间序列抽出来，再沿时间维做 1D 平均池化。
                 x = x.permute(0, 3, 4, 1, 2).reshape(batch_size * height * width, channels, frames)
 
                 if x.shape[-1] % 2 == 1:
                     x_first, x_rest = x[..., 0], x[..., 1:]
                     if x_rest.shape[-1] > 0:
-                        # (batch_size * height * width, channels, frames - 1) -> (batch_size * height * width, channels, (frames - 1) // 2)
+                        # 若首帧被单独保留，其余帧按 2 倍时间步长做平均池化。
                         x_rest = F.avg_pool1d(x_rest, kernel_size=2, stride=2)
 
                     x = torch.cat([x_first[..., None], x_rest], dim=-1)
-                    # (batch_size * height * width, channels, (frames // 2) + 1) -> (batch_size, height, width, channels, (frames // 2) + 1) -> (batch_size, channels, (frames // 2) + 1, height, width)
+                    # 把压缩后的时间序列重新还原回视频张量布局。
                     x = x.reshape(batch_size, height, width, channels, x.shape[-1]).permute(0, 3, 4, 1, 2)
                 else:
-                    # (batch_size * height * width, channels, frames) -> (batch_size * height * width, channels, frames // 2)
                     x = F.avg_pool1d(x, kernel_size=2, stride=2)
-                    # (batch_size * height * width, channels, frames // 2) -> (batch_size, height, width, channels, frames // 2) -> (batch_size, channels, frames // 2, height, width)
                     x = x.reshape(batch_size, height, width, channels, x.shape[-1]).permute(0, 3, 4, 1, 2)
             elif self.compress_time == 3:
                 batch_size, channels, frames, height, width = x.shape
@@ -118,15 +118,15 @@ class CogVideoXDownsample3D(nn.Module):
                         x_rest = F.avg_pool1d(x_rest, kernel_size=3, stride=3)
 
                     x = torch.cat([x_first[..., None], x_rest], dim=-1)
-                    # (batch_size * height * width, channels, (frames // 2) + 1) -> (batch_size, height, width, channels, (frames // 2) + 1) -> (batch_size, channels, (frames // 2) + 1, height, width)
+                    # 代码/形状说明：(batch_size * height * width, channels, (frames // 2) + 1) -> (batch_size, height, width, channels, (frames // 2) + 1) -> (batch_size, channels, (frames // 2) + 1, height, width)
                     x = x.reshape(batch_size, height, width, channels, x.shape[-1]).permute(0, 3, 4, 1, 2)
                 else:
-                    # (batch_size * height * width, channels, frames) -> (batch_size * height * width, channels, frames // 2)
+                    # 代码/形状说明：(batch_size * height * width, channels, frames) -> (batch_size * height * width, channels, frames // 2)
                     x = F.avg_pool1d(x, kernel_size=3, stride=3)
-                    # (batch_size * height * width, channels, frames // 2) -> (batch_size, height, width, channels, frames // 2) -> (batch_size, channels, frames // 2, height, width)
+                    # 代码/形状说明：(batch_size * height * width, channels, frames // 2) -> (batch_size, height, width, channels, frames // 2) -> (batch_size, channels, frames // 2, height, width)
                     x = x.reshape(batch_size, height, width, channels, x.shape[-1]).permute(0, 3, 4, 1, 2)
 
-            # Pad the tensor
+            # 普通 2D 卷积路径需要手动补齐右侧和下侧，保证偶数下采样更平滑。
             if self.down_layer == "conv":
                 pad = (0, 1, 0, 1)
                 if self.pad_mode == "constant":
@@ -135,34 +135,17 @@ class CogVideoXDownsample3D(nn.Module):
                     _shape = x.shape
                     x = F.pad(x, pad, mode="replicate")
                     inputs = inputs.view(*_shape[:-2], *inputs.shape[-2:])
-                
+
             batch_size, channels, frames, height, width = x.shape
-            # (batch_size, channels, frames, height, width) -> (batch_size, frames, channels, height, width) -> (batch_size * frames, channels, height, width)
+            # 将视频拆成逐帧 2D 特征图后执行卷积，再拼回时间维。
             x = x.permute(0, 2, 1, 3, 4).reshape(batch_size * frames, channels, height, width)
             x = self.conv(x)
-            # (batch_size * frames, channels, height, width) -> (batch_size, frames, channels, height, width) -> (batch_size, channels, frames, height, width)
             x = x.reshape(batch_size, frames, x.shape[1], x.shape[2], x.shape[3]).permute(0, 2, 1, 3, 4)
         return x, new_conv_cache
 
 
 class CogVideoXUpsample3D(nn.Module):
-    r"""
-    A 3D Upsample layer using in CogVideoX by Tsinghua University & ZhipuAI # Todo: Wait for paper relase.
-
-    Args:
-        in_channels (`int`):
-            Number of channels in the input image.
-        out_channels (`int`):
-            Number of channels produced by the convolution.
-        kernel_size (`int`, defaults to `3`):
-            Size of the convolving kernel.
-        stride (`int`, defaults to `1`):
-            Stride of the convolution.
-        padding (`int`, defaults to `1`):
-            Padding added to all four sides of the input.
-        compress_time (`bool`, defaults to `False`):
-            Whether or not to compress the time dimension.
-    """
+    r"""CogVideoX 风格的 3D 上采样层。"""
 
     def __init__(
         self,
@@ -177,6 +160,7 @@ class CogVideoXUpsample3D(nn.Module):
         norm_type = None,
         pad_mode = "constant",
     ) -> None:
+        """根据 `up_layer` 选择不同的上采样后端。"""
         super().__init__()
 
         self.up_layer = up_layer
@@ -189,6 +173,7 @@ class CogVideoXUpsample3D(nn.Module):
         self.compress_time = compress_time
 
     def forward(self, inputs: torch.Tensor, conv_cache: Optional[Dict[str, torch.Tensor]] = None, split_first=False) -> torch.Tensor:
+        """执行上采样并返回新的卷积缓存。"""
         new_conv_cache = {}
         conv_cache = conv_cache or {}
 
@@ -203,7 +188,7 @@ class CogVideoXUpsample3D(nn.Module):
             if self.compress_time:
                 temporal_scale = (float(self.compress_time), *spatial_scale)
                 if inputs.shape[2] > 1 and inputs.shape[2] % 2 == 1:
-                    # split first frame
+                    # 单独处理第一帧。
                     x_first, x_rest = inputs[:, :, 0], inputs[:, :, 1:]
                     x_first = F.interpolate(x_first, scale_factor=spatial_scale)
                     x_rest = F.interpolate(x_rest, scale_factor=temporal_scale)
@@ -216,7 +201,7 @@ class CogVideoXUpsample3D(nn.Module):
                     inputs = F.interpolate(inputs, scale_factor=spatial_scale)
                     inputs = inputs[:, :, None, :, :]
             else:
-                # only interpolate 2D
+                # 只在二维空间上插值。
                 b, c, t, h, w = inputs.shape
                 inputs = inputs.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w)
                 inputs = F.interpolate(inputs, scale_factor=spatial_scale)
@@ -229,19 +214,10 @@ class CogVideoXUpsample3D(nn.Module):
         return inputs, new_conv_cache
 
 class CogVideoXSpatialNorm3D(nn.Module):
-    r"""
-    Spatially conditioned normalization as defined in https://arxiv.org/abs/2209.09002. This implementation is specific
-    to 3D-video like data.
+    r"""3D 版本的空间条件归一化。
 
-    CogVideoXSafeConv3d is used instead of nn.Conv3d to avoid OOM in CogVideoX Model.
-
-    Args:
-        f_channels (`int`):
-            The number of channels for input to group normalization layer, and output of the spatial norm layer.
-        zq_channels (`int`):
-            The number of channels for the quantized vector as described in the paper.
-        groups (`int`):
-            Number of groups to separate the channels into for group normalization.
+    先对主特征 `f` 做归一化，再由条件特征 `zq` 预测缩放项 `gamma` 与偏置项 `beta`，
+    输出形式为 `Norm(f) * gamma + beta`。这与 SPADE/SpatialNorm 的思路一致。
     """
 
     def __init__(
@@ -252,6 +228,7 @@ class CogVideoXSpatialNorm3D(nn.Module):
         norm_type = None,
         pad_mode = "constant"
     ):
+        """构造条件归一化所需的归一化层和两条 1x1 因果卷积分支。"""
         super().__init__()
         norm_layer = get_norm(norm_type)
         self.norm_layer = norm_layer(num_channels=f_channels, num_groups=groups, eps=1e-6, affine=True)
@@ -261,6 +238,7 @@ class CogVideoXSpatialNorm3D(nn.Module):
     def forward(
         self, f: torch.Tensor, zq: torch.Tensor, conv_cache: Optional[Dict[str, torch.Tensor]] = None
     ) -> torch.Tensor:
+        """用量化特征 `zq` 调制主特征 `f`。"""
         new_conv_cache = {}
         conv_cache = conv_cache or {}
 
@@ -283,28 +261,11 @@ class CogVideoXSpatialNorm3D(nn.Module):
 
 
 class CogVideoXResnetBlock3D(nn.Module):
-    r"""
-    A 3D ResNet block used in the CogVideoX model.
+    r"""CogVideoX 使用的 3D ResNet 块。
 
-    Args:
-        in_channels (`int`):
-            Number of input channels.
-        out_channels (`int`, *optional*):
-            Number of output channels. If None, defaults to `in_channels`.
-        dropout (`float`, defaults to `0.0`):
-            Dropout rate.
-        temb_channels (`int`, defaults to `512`):
-            Number of time embedding channels.
-        groups (`int`, defaults to `32`):
-            Number of groups to separate the channels into for group normalization.
-        eps (`float`, defaults to `1e-6`):
-            Epsilon value for normalization layers.
-        conv_shortcut (bool, defaults to `False`):
-            Whether or not to use a convolution shortcut.
-        spatial_norm_dim (`int`, *optional*):
-            The dimension to use for spatial norm if it is to be used instead of group norm.
-        pad_mode (str, defaults to `"constant"`):
-            Padding mode.
+    该块支持两类条件信息：
+    1. `temb` 作为时间/步数嵌入，在第一层卷积后加到特征上；
+    2. `zq` 作为空间条件特征，走 `CogVideoXSpatialNorm3D` 调制归一化输出。
     """
 
     def __init__(
@@ -320,6 +281,7 @@ class CogVideoXResnetBlock3D(nn.Module):
         pad_mode: str = "constant",
         norm_type = None,
     ):
+        """构造两层因果卷积、归一化和可选捷径投影。"""
         super().__init__()
         norm_layer = get_norm(norm_type)
         out_channels = out_channels or in_channels
@@ -378,6 +340,7 @@ class CogVideoXResnetBlock3D(nn.Module):
         zq: Optional[torch.Tensor] = None,
         conv_cache: Optional[Dict[str, torch.Tensor]] = None,
     ) -> torch.Tensor:
+        """执行 3D ResNet 前向传播。"""
         new_conv_cache = {}
         conv_cache = conv_cache or {}
 
@@ -416,30 +379,10 @@ class CogVideoXResnetBlock3D(nn.Module):
 
 
 class CogVideoXDownBlock3D(nn.Module):
-    r"""
-    A downsampling block used in the CogVideoX model.
+    r"""编码器中的 3D 下采样阶段。
 
-    Args:
-        in_channels (`int`):
-            Number of input channels.
-        out_channels (`int`, *optional*):
-            Number of output channels. If None, defaults to `in_channels`.
-        temb_channels (`int`, defaults to `512`):
-            Number of time embedding channels.
-        num_layers (`int`, defaults to `1`):
-            Number of resnet layers.
-        dropout (`float`, defaults to `0.0`):
-            Dropout rate.
-        resnet_eps (`float`, defaults to `1e-6`):
-            Epsilon value for normalization layers.
-        resnet_groups (`int`, defaults to `32`):
-            Number of groups to separate the channels into for group normalization.
-        add_downsample (`bool`, defaults to `True`):
-            Whether or not to use a downsampling layer. If not used, output dimension would be same as input dimension.
-        compress_time (`bool`, defaults to `False`):
-            Whether or not to downsample across temporal dimension.
-        pad_mode (str, defaults to `"constant"`):
-            Padding mode.
+    该模块先堆叠若干 `CogVideoXResnetBlock3D`，再可选接一个下采样层，
+    用于逐步把视频压缩到更粗的 latent 网格。
     """
 
     _supports_gradient_checkpointing = True
@@ -463,6 +406,7 @@ class CogVideoXDownBlock3D(nn.Module):
         down_block_mode = "cogvideox",
         down_norm = False,
     ):
+        """根据配置构造残差堆栈与可选下采样器。"""
         super().__init__()
 
         if down_block_mode == "cogvideox":
@@ -517,7 +461,7 @@ class CogVideoXDownBlock3D(nn.Module):
                     ]
                 )
         else:
-            raise NotImplementedError(f"Invalid `down_block_mode` {down_block_mode} encountered. ")
+            raise NotImplementedError(f"遇到无效的 `down_block_mode`：{down_block_mode}。")
 
         self.gradient_checkpointing = False
 
@@ -528,7 +472,7 @@ class CogVideoXDownBlock3D(nn.Module):
         zq: Optional[torch.Tensor] = None,
         conv_cache: Optional[Dict[str, torch.Tensor]] = None,
     ) -> torch.Tensor:
-        r"""Forward method of the `CogVideoXDownBlock3D` class."""
+        r"""顺序执行残差块和下采样器。"""
 
         new_conv_cache = {}
         conv_cache = conv_cache or {}
@@ -539,7 +483,9 @@ class CogVideoXDownBlock3D(nn.Module):
             if self.training and self.gradient_checkpointing:
 
                 def create_custom_forward(module):
+                    """为 gradient checkpointing 构造无关键字参数的包装函数。"""
                     def create_forward(*inputs):
+                        """把 checkpoint 提供的位置参数转发给目标模块。"""
                         return module(*inputs)
 
                     return create_forward
@@ -566,27 +512,7 @@ class CogVideoXDownBlock3D(nn.Module):
 
 
 class CogVideoXMidBlock3D(nn.Module):
-    r"""
-    A middle block used in the CogVideoX model.
-
-    Args:
-        in_channels (`int`):
-            Number of input channels.
-        temb_channels (`int`, defaults to `512`):
-            Number of time embedding channels.
-        dropout (`float`, defaults to `0.0`):
-            Dropout rate.
-        num_layers (`int`, defaults to `1`):
-            Number of resnet layers.
-        resnet_eps (`float`, defaults to `1e-6`):
-            Epsilon value for normalization layers.
-        resnet_groups (`int`, defaults to `32`):
-            Number of groups to separate the channels into for group normalization.
-        spatial_norm_dim (`int`, *optional*):
-            The dimension to use for spatial norm if it is to be used instead of group norm.
-        pad_mode (str, defaults to `"constant"`):
-            Padding mode.
-    """
+    r"""编码器/解码器中间瓶颈块。"""
 
     _supports_gradient_checkpointing = True
 
@@ -602,6 +528,7 @@ class CogVideoXMidBlock3D(nn.Module):
         pad_mode: str = "constant",
         norm_type = None
     ):
+        """构造中间阶段的若干 3D ResNet 块。"""
         super().__init__()
 
         resnets = []
@@ -630,7 +557,7 @@ class CogVideoXMidBlock3D(nn.Module):
         zq: Optional[torch.Tensor] = None,
         conv_cache: Optional[Dict[str, torch.Tensor]] = None,
     ) -> torch.Tensor:
-        r"""Forward method of the `CogVideoXMidBlock3D` class."""
+        r"""顺序执行中间阶段的所有残差块。"""
 
         new_conv_cache = {}
         conv_cache = conv_cache or {}
@@ -641,7 +568,9 @@ class CogVideoXMidBlock3D(nn.Module):
             if self.training and self.gradient_checkpointing:
 
                 def create_custom_forward(module):
+                    """为 gradient checkpointing 构造包装函数。"""
                     def create_forward(*inputs):
+                        """把 checkpoint 的位置参数直接转发给模块。"""
                         return module(*inputs)
 
                     return create_forward
@@ -658,33 +587,7 @@ class CogVideoXMidBlock3D(nn.Module):
 
 
 class CogVideoXUpBlock3D(nn.Module):
-    r"""
-    An upsampling block used in the CogVideoX model.
-
-    Args:
-        in_channels (`int`):
-            Number of input channels.
-        out_channels (`int`, *optional*):
-            Number of output channels. If None, defaults to `in_channels`.
-        temb_channels (`int`, defaults to `512`):
-            Number of time embedding channels.
-        dropout (`float`, defaults to `0.0`):
-            Dropout rate.
-        num_layers (`int`, defaults to `1`):
-            Number of resnet layers.
-        resnet_eps (`float`, defaults to `1e-6`):
-            Epsilon value for normalization layers.
-        resnet_groups (`int`, defaults to `32`):
-            Number of groups to separate the channels into for group normalization.
-        spatial_norm_dim (`int`, defaults to `16`):
-            The dimension to use for spatial norm if it is to be used instead of group norm.
-        add_upsample (`bool`, defaults to `True`):
-            Whether or not to use a upsampling layer. If not used, output dimension would be same as input dimension.
-        compress_time (`bool`, defaults to `False`):
-            Whether or not to downsample across temporal dimension.
-        pad_mode (str, defaults to `"constant"`):
-            Padding mode.
-    """
+    r"""解码器中的 3D 上采样阶段。"""
 
     def __init__(
         self,
@@ -706,6 +609,7 @@ class CogVideoXUpBlock3D(nn.Module):
         up_block_mode="cogvideox",
         up_norm = False,
     ):
+        """构造残差堆栈与可选上采样器。"""
         super().__init__()
 
         if up_block_mode == "cogvideox":
@@ -762,7 +666,7 @@ class CogVideoXUpBlock3D(nn.Module):
                     ]
                 )
         else:
-            raise NotImplementedError(f"Invalid `up_block_mode` {up_block_mode} encountered. ")
+            raise NotImplementedError(f"遇到无效的 `up_block_mode`：{up_block_mode}。")
 
         self.gradient_checkpointing = False
 
@@ -774,7 +678,7 @@ class CogVideoXUpBlock3D(nn.Module):
         conv_cache: Optional[Dict[str, torch.Tensor]] = None,
         split_first = False,
     ) -> torch.Tensor:
-        r"""Forward method of the `CogVideoXUpBlock3D` class."""
+        r"""顺序执行残差块和上采样器。"""
 
         new_conv_cache = {}
         conv_cache = conv_cache or {}
@@ -785,7 +689,9 @@ class CogVideoXUpBlock3D(nn.Module):
             if self.training and self.gradient_checkpointing:
 
                 def create_custom_forward(module):
+                    """为 gradient checkpointing 构造包装函数。"""
                     def create_forward(*inputs):
+                        """把 checkpoint 的位置参数直接转发给模块。"""
                         return module(*inputs)
 
                     return create_forward
@@ -812,6 +718,11 @@ class CogVideoXUpBlock3D(nn.Module):
 
 
 class CogVideoXEncoder3D(nn.Module):
+    """3D 视频编码器。
+
+    输入视频会先经过因果 3D 卷积，再通过多个下采样阶段逐步压缩，最终输出
+    `2 * latent_channels` 个通道，对应 VAE 的均值和对数方差。
+    """
     _supports_gradient_checkpointing = True
     def __init__(
         self,
@@ -837,17 +748,18 @@ class CogVideoXEncoder3D(nn.Module):
         down_block_mode = "cogvideox",
         down_norm=False,
     ):
+        """根据给定的下采样配置构造编码器。"""
         super().__init__()
 
         norm_layer = get_norm(norm_type)
-        # log2 of temporal_compress_times
-        # temporal_compress_level = int(np.log2(temporal_compression_ratio))
+        # 中文说明：temporal_compress_times 的 log2。
+        # 代码/形状说明：temporal_compress_level = int(np.log2(temporal_compression_ratio))
 
         self.conv_in = CogVideoXCausalConv3d(in_channels, block_out_channels[0], kernel_size=3, pad_mode=pad_mode)
 
         self.down_blocks = nn.ModuleList([])
 
-        # down blocks
+        # 下采样 block。
         for i, down_block_type in enumerate(down_block_types):
             input_channel = block_out_channels[i]
             output_channel = block_out_channels[i+1]
@@ -873,11 +785,11 @@ class CogVideoXEncoder3D(nn.Module):
                     down_norm=down_norm,
                 )
             else:
-                raise ValueError("Invalid `down_block_type` encountered. Must be `CogVideoXDownBlock3D`")
+                raise ValueError("遇到无效的 `down_block_type`。必须为 `CogVideoXDownBlock3D`")
 
             self.down_blocks.append(down_block)
 
-        # mid block
+        # 中间 block。
         self.mid_block = CogVideoXMidBlock3D(
             in_channels=block_out_channels[len(down_block_types)],
             temb_channels=0,
@@ -903,7 +815,7 @@ class CogVideoXEncoder3D(nn.Module):
         temb: Optional[torch.Tensor] = None,
         conv_cache: Optional[Dict[str, torch.Tensor]] = None,
     ) -> torch.Tensor:
-        r"""The forward method of the `CogVideoXEncoder3D` class."""
+        r"""把输入视频编码为高斯分布参数张量。"""
 
         new_conv_cache = {}
         conv_cache = conv_cache or {}
@@ -913,12 +825,14 @@ class CogVideoXEncoder3D(nn.Module):
         if self.training and self.gradient_checkpointing:
 
             def create_custom_forward(module):
+                """为 checkpoint 包装编码器子模块。"""
                 def custom_forward(*inputs):
+                    """把位置参数转发给被包装模块。"""
                     return module(*inputs)
 
                 return custom_forward
 
-            # 1. Down
+            # 中文说明：1. 下采样阶段
             for i, down_block in enumerate(self.down_blocks):
                 conv_cache_key = f"down_block_{i}"
                 hidden_states, new_conv_cache[conv_cache_key] = torch.utils.checkpoint.checkpoint(
@@ -930,7 +844,7 @@ class CogVideoXEncoder3D(nn.Module):
                     use_reentrant=False
                 )
 
-            # 2. Mid
+            # 2. 中间瓶颈阶段
             hidden_states, new_conv_cache["mid_block"] = torch.utils.checkpoint.checkpoint(
                 create_custom_forward(self.mid_block),
                 hidden_states,
@@ -940,19 +854,19 @@ class CogVideoXEncoder3D(nn.Module):
                 use_reentrant=False
             )
         else:
-            # 1. Down
+            # 中文说明：1. 下采样阶段
             for i, down_block in enumerate(self.down_blocks):
                 conv_cache_key = f"down_block_{i}"
                 hidden_states, new_conv_cache[conv_cache_key] = down_block(
                     hidden_states, temb, None, conv_cache=conv_cache.get(conv_cache_key)
                 )
 
-            # 2. Mid
+            # 2. 中间瓶颈阶段
             hidden_states, new_conv_cache["mid_block"] = self.mid_block(
                 hidden_states, temb, None, conv_cache=conv_cache.get("mid_block")
             )
 
-        # 3. Post-process
+        # 中文说明：3. 后处理阶段
         hidden_states = self.norm_out(hidden_states)
         hidden_states = self.conv_act(hidden_states)
 
@@ -962,25 +876,10 @@ class CogVideoXEncoder3D(nn.Module):
 
 
 class CogVideoXDecoder3D(nn.Module):
-    r"""
-    The `CogVideoXDecoder3D` layer of a variational autoencoder that decodes its latent representation into an output
-    sample.
+    r"""3D 视频解码器。
 
-    Args:
-        in_channels (`int`, *optional*, defaults to 3):
-            The number of input channels.
-        out_channels (`int`, *optional*, defaults to 3):
-            The number of output channels.
-        up_block_types (`Tuple[str, ...]`, *optional*, defaults to `("UpDecoderBlock2D",)`):
-            The types of up blocks to use. See `~diffusers.models.unet_2d_blocks.get_up_block` for available options.
-        block_out_channels (`Tuple[int, ...]`, *optional*, defaults to `(64,)`):
-            The number of output channels for each block.
-        act_fn (`str`, *optional*, defaults to `"silu"`):
-            The activation function to use. See `~diffusers.models.activations.get_activation` for available options.
-        layers_per_block (`int`, *optional*, defaults to 2):
-            The number of layers per block.
-        norm_num_groups (`int`, *optional*, defaults to 32):
-            The number of groups for normalization.
+    它接收潜变量 `z`，通过中间块和多个上采样阶段逐步恢复时空分辨率，
+    最终输出重建视频帧。
     """
 
     _supports_gradient_checkpointing = True
@@ -1009,6 +908,7 @@ class CogVideoXDecoder3D(nn.Module):
         up_block_mode="cogvideox",
         up_norm=False,
     ):
+        """根据给定的上采样配置构造解码器。"""
         super().__init__()
 
         reversed_block_out_channels = list(reversed(block_out_channels))
@@ -1017,7 +917,7 @@ class CogVideoXDecoder3D(nn.Module):
             in_channels, reversed_block_out_channels[0], kernel_size=3, pad_mode=pad_mode
         )
 
-        # mid block
+        # 中间 block。
         self.mid_block = CogVideoXMidBlock3D(
             in_channels=reversed_block_out_channels[0],
             temb_channels=0,
@@ -1029,11 +929,11 @@ class CogVideoXDecoder3D(nn.Module):
             norm_type=norm_type,
         )
 
-        # up blocks
+        # 上采样 block。
         self.up_blocks = nn.ModuleList([])
 
-        # output_channel = reversed_block_out_channels[0]
-        # temporal_compress_level = int(np.log2(temporal_compression_ratio))
+        # 输出通道取反向 block 通道列表的第一个值。
+        # 代码/形状说明：temporal_compress_level = int(np.log2(temporal_compression_ratio))
 
         for i, up_block_type in enumerate(up_block_types):
             prev_output_channel = reversed_block_out_channels[i]
@@ -1044,13 +944,13 @@ class CogVideoXDecoder3D(nn.Module):
                 compress_time = temporal_compression_list[i] if i < len(temporal_compression_list) else None
                 compress_spatial = spatial_compression_list[i] if i < len(spatial_compression_list) else None
             elif up_block_mode == "dc":
-                # is_final_block = i == 0
+                # 代码/形状说明：is_final_block = i == 0
                 idx_temporal = i - (len(up_block_types) - len(temporal_compression_list))
                 compress_time = temporal_compression_list[-idx_temporal] if idx_temporal >= 0 else None
                 idx_spatial = i - (len(up_block_types) - len(spatial_compression_list))
                 compress_spatial = spatial_compression_list[-idx_spatial] if idx_spatial >= 0 else None
-                # print(temporal_compression_list, idx_temporal, compress_time, spatial_compression_list, idx_spatial, compress_spatial, compress_time or compress_spatial)
-            
+                # 代码/形状说明：print(temporal_compression_list, idx_temporal, compress_time, spatial_compression_list, idx_spatial, compress_spatial, compress_time or compress_spatial)
+
             if up_block_type == "CogVideoXUpBlock3D":
                 up_block = CogVideoXUpBlock3D(
                     in_channels=prev_output_channel,
@@ -1072,7 +972,7 @@ class CogVideoXDecoder3D(nn.Module):
                 )
                 prev_output_channel = output_channel
             else:
-                raise ValueError("Invalid `up_block_type` encountered. Must be `CogVideoXUpBlock3D`")
+                raise ValueError("遇到无效的 `up_block_type`。必须为 `CogVideoXUpBlock3D`")
 
             self.up_blocks.append(up_block)
 
@@ -1091,7 +991,7 @@ class CogVideoXDecoder3D(nn.Module):
         conv_cache: Optional[Dict[str, torch.Tensor]] = None,
         split_first = False,
     ) -> torch.Tensor:
-        r"""The forward method of the `CogVideoXDecoder3D` class."""
+        r"""把潜变量解码为视频特征或重建帧。"""
 
         new_conv_cache = {}
         conv_cache = conv_cache or {}
@@ -1101,12 +1001,14 @@ class CogVideoXDecoder3D(nn.Module):
         if self.training and self.gradient_checkpointing:
 
             def create_custom_forward(module):
+                """为 checkpoint 包装解码器子模块。"""
                 def custom_forward(*inputs):
+                    """把位置参数转发给被包装模块。"""
                     return module(*inputs)
 
                 return custom_forward
 
-            # 1. Mid
+            # 1. 中间瓶颈阶段
             hidden_states, new_conv_cache["mid_block"] = torch.utils.checkpoint.checkpoint(
                 create_custom_forward(self.mid_block),
                 hidden_states,
@@ -1116,7 +1018,7 @@ class CogVideoXDecoder3D(nn.Module):
                 use_reentrant=False
             )
 
-            # 2. Up
+            # 2. 上采样阶段
             for i, up_block in enumerate(self.up_blocks):
                 conv_cache_key = f"up_block_{i}"
                 hidden_states, new_conv_cache[conv_cache_key] = torch.utils.checkpoint.checkpoint(
@@ -1125,23 +1027,23 @@ class CogVideoXDecoder3D(nn.Module):
                     temb,
                     sample,
                     conv_cache.get(conv_cache_key),
-                    split_first, 
+                    split_first,
                     use_reentrant=False
                 )
         else:
-            # 1. Mid
+            # 1. 中间瓶颈阶段
             hidden_states, new_conv_cache["mid_block"] = self.mid_block(
                 hidden_states, temb, sample, conv_cache=conv_cache.get("mid_block")
             )
 
-            # 2. Up
+            # 2. 上采样阶段
             for i, up_block in enumerate(self.up_blocks):
                 conv_cache_key = f"up_block_{i}"
                 hidden_states, new_conv_cache[conv_cache_key] = up_block(
                     hidden_states, temb, sample, conv_cache=conv_cache.get(conv_cache_key), split_first=split_first
                 )
 
-        # 3. Post-process
+        # 中文说明：3. 后处理阶段
         hidden_states, new_conv_cache["norm_out"] = self.norm_out(
             hidden_states, sample, conv_cache=conv_cache.get("norm_out")
         )
@@ -1152,6 +1054,14 @@ class CogVideoXDecoder3D(nn.Module):
 
 
 class AutoencoderKLCogVideoX(nn.Module):
+    """带 KL 采样与多尺度量化器的 VideoVAE 主模型。
+
+    整体流程可以概括为：
+    1. 编码器输出高斯分布参数；
+    2. 通过 `DiagonalGaussianDistribution` 采样潜变量；
+    3. 对 latent 做 patchify 与量化；
+    4. 再 unpatchify 并送入解码器重建视频。
+    """
     _supports_gradient_checkpointing = True
     _no_split_modules = ["CogVideoXResnetBlock3D"]
 
@@ -1159,6 +1069,7 @@ class AutoencoderKLCogVideoX(nn.Module):
         self,
         args
     ):
+        """根据训练参数组装编码器、解码器和量化器。"""
         super().__init__()
         self.args = args
         self.embed_dim = args.latent_channels
@@ -1203,7 +1114,7 @@ class AutoencoderKLCogVideoX(nn.Module):
         if args.use_checkpoint:
             self._set_gradient_checkpointing(self.encoder, True)
             self._set_gradient_checkpointing(self.decoder, True)
-        
+
         if args.fix_model != ["no"]:
             for _model in args.fix_model:
                 if _model == "encoder":
@@ -1221,25 +1132,25 @@ class AutoencoderKLCogVideoX(nn.Module):
                     self._set_no_grad(self.decoder.norm_out)
                     for idx in range(fix_block_num):
                         total_num = len(self.decoder.up_blocks)
-                        self._set_no_grad(self.decoder.up_blocks[total_num - idx - 1]) # reverse fix
+                        self._set_no_grad(self.decoder.up_blocks[total_num - idx - 1]) # 反向顺序修正。
                 else:
                     raise NotImplementedError
 
-            print("Learnable Parameters:")
+            print("可学习参数：")
             for name, param in self.named_parameters():
                 if param.requires_grad:
                     print(name)
-        
-        # for down_block in self.encoder.down_blocks:
-        #     if down_block.downsamplers is not None:
-        #         print(f"downsample compress time {down_block.downsamplers[0].compress_time}")
-        #     else:
-        #         print(f"downsample None")
-        # for up_block in self.decoder.up_blocks:
-        #     if up_block.upsamplers is not None:
-        #         print(f"upsample compress time {up_block.upsamplers[0].compress_time}")
-        #     else:
-        #         print("upsample None")
+
+        # 代码/形状说明：for down_block in self.encoder.down_blocks:
+        # 代码/形状说明：if down_block.downsamplers is not None:
+        # 代码/形状说明：print(f"下采样时间压缩倍数 {down_block.downsamplers[0].compress_time}")
+        # 代码/形状说明：else:
+        # 代码/形状说明：print(f"下采样器为空")
+        # 代码/形状说明：for up_block in self.decoder.up_blocks:
+        # 代码/形状说明：if up_block.upsamplers is not None:
+        # 代码/形状说明：print(f"上采样时间压缩倍数 {up_block.upsamplers[0].compress_time}")
+        # 代码/形状说明：else:
+        # 代码/形状说明：print("上采样器为空")
 
         self.quant_conv = CogVideoXSafeConv3d(2 * args.out_channels, 2 * args.out_channels, 1) if args.use_quant_conv else None
         self.post_quant_conv = CogVideoXSafeConv3d(args.out_channels, args.out_channels, 1) if args.use_post_quant_conv else None
@@ -1247,26 +1158,14 @@ class AutoencoderKLCogVideoX(nn.Module):
         self.use_slicing = False
         self.use_tiling = False
 
-        # Can be increased to decode more latent frames at once, but comes at a reasonable memory cost and it is not
-        # recommended because the temporal parts of the VAE, here, are tricky to understand.
-        # If you decode X latent frames together, the number of output frames is:
-        #     (X + (2 conv cache) + (2 time upscale_1) + (4 time upscale_2) - (2 causal conv downscale)) => X + 6 frames
-        #
-        # Example with num_latent_frames_batch_size = 2:
-        #     - 12 latent frames: (0, 1), (2, 3), (4, 5), (6, 7), (8, 9), (10, 11) are processed together
-        #         => (12 // 2 frame slices) * ((2 num_latent_frames_batch_size) + (2 conv cache) + (2 time upscale_1) + (4 time upscale_2) - (2 causal conv downscale))
-        #         => 6 * 8 = 48 frames
-        #     - 13 latent frames: (0, 1, 2) (special case), (3, 4), (5, 6), (7, 8), (9, 10), (11, 12) are processed together
-        #         => (1 frame slice) * ((3 num_latent_frames_batch_size) + (2 conv cache) + (2 time upscale_1) + (4 time upscale_2) - (2 causal conv downscale)) +
-        #            ((13 - 3) // 2) * ((2 num_latent_frames_batch_size) + (2 conv cache) + (2 time upscale_1) + (4 time upscale_2) - (2 causal conv downscale))
-        #         => 1 * 9 + 5 * 8 = 49 frames
-        # It has been implemented this way so as to not have "magic values" in the code base that would be hard to explain. Note that
-        # setting it to anything other than 2 would give poor results because the VAE hasn't been trained to be adaptive with different
-        # number of temporal frames.
+        # 这里固定一次解码 2 个 latent 帧，是为了和训练时的时间卷积缓存语义保持一致。
+        # 若一次处理 `X` 个 latent 帧，因果卷积缓存和两级时间上采样会额外引入若干输出帧，
+        # 粗略关系可写成：`输出帧数 ≈ X + 2 + 2 + 4 - 2 = X + 6`。
+        # 继续增大这个批量虽能提高吞吐，但会显著增加显存，而且会偏离模型训练时见过的时间模式。
         self.num_latent_frames_batch_size = 2
         self.num_sample_frames_batch_size = 2 * int(math.prod([float(a) for a in self.args.temporal_compression_list]))
 
-        # We make the minimum height and width of sample for tiling half that of the generally supported
+        # tile 阈值通常取官方推荐分辨率的一半，便于在大分辨率下做分块编解码。
         self.tile_sample_min_height = args.sample_height // 2
         self.tile_sample_min_width = args.sample_width // 2
         self.tile_latent_min_height = int(
@@ -1274,9 +1173,7 @@ class AutoencoderKLCogVideoX(nn.Module):
         )
         self.tile_latent_min_width = int(self.tile_sample_min_width / 8)
 
-        # These are experimental overlap factors that were chosen based on experimentation and seem to work best for
-        # 720x480 (WxH) resolution. The above resolution is the strongly recommended generation resolution in CogVideoX
-        # and so the tiling implementation has only been tested on those specific resolutions.
+        # overlap 系数控制相邻 tile 的重叠区域，用于后续平滑拼接，减少块状边界。
         self.tile_overlap_factor_height = 1 / 6
         self.tile_overlap_factor_width = 1 / 5
 
@@ -1286,7 +1183,7 @@ class AutoencoderKLCogVideoX(nn.Module):
 
         self.lfq_weight = args.lfq_weight
         self.commitment_loss_weight = args.commitment_loss_weight
-        self.compute_all_commitment = args.compute_all_commitment # compute commitment between input and rq-output
+        self.compute_all_commitment = args.compute_all_commitment # 中文标题：compute commitment between input and rq-output
         if args.quantizer_type == 'MultiScaleBSQ':
             quantizer_class = MultiScaleBSQ
         elif args.quantizer_type == 'MultiScaleBSQTP':
@@ -1299,7 +1196,7 @@ class AutoencoderKLCogVideoX(nn.Module):
             quantizer_class = MultiScaleFSQSIM
         else:
             raise NotImplementedError
-       
+
         ratio2hws_video_common_v2, total_pixels2scales = get_ratio2hws_video_v2()
         scales_256 = total_pixels2scales['0.06M']
         h_div_w2hw = {}
@@ -1314,9 +1211,9 @@ class AutoencoderKLCogVideoX(nn.Module):
         args.scales_256 = scales_256
         dim = args.codebook_dim if args.codebook_dim_low < 0 else args.codebook_dim_low * 4
         self.quantizer = quantizer_class(
-            dim = args.codebook_dim_low * 4, # this is the input feature dimension, defaults to log2(codebook_size) if not defined  
-            entropy_loss_weight = args.entropy_loss_weight, # how much weight to place on entropy loss
-            commitment_loss_weight=args.commitment_loss_weight, # loss weight of commitment loss
+            dim = args.codebook_dim_low * 4, # 中文说明：这里是输入特征维度；未显式指定时，默认使用 log2(codebook_size)。
+            entropy_loss_weight = args.entropy_loss_weight, # 中文标题：entropy loss 的权重大小
+            commitment_loss_weight=args.commitment_loss_weight, # 中文标题：commitment loss 的权重大小
             use_stochastic_depth=args.use_stochastic_depth,
             drop_rate=args.drop_rate,
             schedule_mode=args.schedule_mode,
@@ -1357,9 +1254,9 @@ class AutoencoderKLCogVideoX(nn.Module):
         if args.freeze_decoder:
             for param in self.decoder.parameters():
                 param.requires_grad = False
-        
+
         self.origin_dim = 64
-        assert args.use_feat_proj in [0, 1, 2], f'use_feat_proj must be 0, 1, 2'
+        assert args.use_feat_proj in [0, 1, 2], f'use_feat_proj 只支持 0、1、2，实际为 {args.use_feat_proj}'
         if args.use_feat_proj > 0:
             if args.use_feat_proj == 1:
                 self.proj_down = nn.Linear(self.origin_dim*2, self.origin_dim*2)
@@ -1375,14 +1272,16 @@ class AutoencoderKLCogVideoX(nn.Module):
         self.scale_learnable_parameters = nn.Parameter(torch.ones(4))
 
     def _set_gradient_checkpointing(self, module, value=False, subset=True):
+        """为编码器/解码器及其子模块统一开关 gradient checkpointing。"""
         if isinstance(module, (CogVideoXEncoder3D, CogVideoXDecoder3D)):
             module.gradient_checkpointing = value
 
         for n, m in module.named_modules():
             if hasattr(m, 'gradient_checkpointing') and subset:
                 m.gradient_checkpointing = value
-    
+
     def _set_no_grad(self, module):
+        """冻结指定模块的全部参数。"""
         for param in module.parameters():
             param.requires_grad = False
 
@@ -1393,10 +1292,9 @@ class AutoencoderKLCogVideoX(nn.Module):
         tile_overlap_factor_height: Optional[float] = None,
         tile_overlap_factor_width: Optional[float] = None,
     ) -> None:
-        r"""
-        Enable tiled VAE decoding. When this option is enabled, the VAE will split the input tensor into tiles to
-        compute decoding and encoding in several steps. This is useful for saving a large amount of memory and to allow
-        processing larger images.
+        r"""开启分块编解码。
+
+        当输入分辨率过大时，VAE 会把视频切成带重叠的小块分别编解码，以显著降低显存占用。
         """
         self.use_tiling = True
         self.tile_sample_min_height = tile_sample_min_height or self.tile_sample_min_height
@@ -1409,27 +1307,19 @@ class AutoencoderKLCogVideoX(nn.Module):
         self.tile_overlap_factor_width = tile_overlap_factor_width or self.tile_overlap_factor_width
 
     def disable_tiling(self) -> None:
-        r"""
-        Disable tiled VAE decoding. If `enable_tiling` was previously enabled, this method will go back to computing
-        decoding in one step.
-        """
+        r"""关闭分块编解码，恢复整图/整视频处理。"""
         self.use_tiling = False
 
     def enable_slicing(self) -> None:
-        r"""
-        Enable sliced VAE decoding. When this option is enabled, the VAE will split the input tensor in slices to
-        compute decoding in several steps. This is useful to save some memory and allow larger batch sizes.
-        """
+        r"""开启 batch slicing，用逐样本切片的方式节省显存。"""
         self.use_slicing = True
 
     def disable_slicing(self) -> None:
-        r"""
-        Disable sliced VAE decoding. If `enable_slicing` was previously enabled, this method will go back to computing
-        decoding in one step.
-        """
+        r"""关闭 batch slicing。"""
         self.use_slicing = False
 
     def _encode(self, x: torch.Tensor) -> torch.Tensor:
+        """执行底层编码流程，并处理时间分片与 context-parallel 缓存。"""
         batch_size, num_channels, num_frames, height, width = x.shape
         self.raw_height = height
         self.raw_width = width
@@ -1438,8 +1328,8 @@ class AutoencoderKLCogVideoX(nn.Module):
             return self.tiled_encode(x)
 
         frame_batch_size = self.num_sample_frames_batch_size
-        # Note: We expect the number of frames to be either `1` or `frame_batch_size * k` or `frame_batch_size * k + 1` for some k.
-        # As the extra single frame is handled inside the loop, it is not required to round up here.
+        # 说明：帧数应为 `1`、`frame_batch_size * k` 或 `frame_batch_size * k + 1`，其中 k 为整数。
+        # 中文说明：多出来的单帧会在循环内部处理，所以这里不需要向上取整。
         num_batches = max(num_frames // frame_batch_size, 1)
         if num_batches > 1:
             if cp.is_cp_initialized():
@@ -1462,14 +1352,14 @@ class AutoencoderKLCogVideoX(nn.Module):
             end_frame = frame_batch_size * (i + 1) + remaining_frames
             x_intermediate = x[:, :, start_frame:end_frame]
 
-            
+
             torch._dynamo.mark_dynamic(x_intermediate, 0)
             torch._dynamo.mark_dynamic(x_intermediate, 2)
             if conv_cache is not None:
                 for key, tensor in conv_cache.items():
                     if tensor is not None and isinstance(tensor, torch.Tensor):
                         torch._dynamo.mark_dynamic(tensor, 0)
-            
+
             x_intermediate, conv_cache = self.encoder(x_intermediate, conv_cache=conv_cache)
 
             if self.quant_conv is not None:
@@ -1485,11 +1375,12 @@ class AutoencoderKLCogVideoX(nn.Module):
         return enc
 
     def encode_for_raw_features(
-        self, x: torch.Tensor, 
+        self, x: torch.Tensor,
         scale_schedule,
         return_residual_norm_per_scale=False,
         slice=None,
     ):
+        """返回未量化的连续 latent 特征，供外部模块直接消费。"""
         is_image = x.ndim == 4
         if not is_image:
             B, C, T, H, W = x.shape
@@ -1500,7 +1391,7 @@ class AutoencoderKLCogVideoX(nn.Module):
 
         with torch.amp.autocast("cuda", dtype=self.encoder_dtype):
             h = self.encode(x)
-        # adjust latent dim
+        # 先做 patchify，把空间上的 `2x2` 邻域折叠进通道维，便于后续量化。
         h = patchify(h) # (B,c,t,H,W) -> (B,4c,t,H/2,W/2)
 
         posterior = DiagonalGaussianDistribution(h)
@@ -1515,6 +1406,7 @@ class AutoencoderKLCogVideoX(nn.Module):
     def encode(
         self, x: torch.Tensor, return_dict: bool = True
     ):
+        """编码输入视频，返回连续 latent 参数张量。"""
         h = None
         if self.use_slicing and x.shape[0] > 1:
             encoded_slices = [self._encode(x_slice) for x_slice in x.split(1)]
@@ -1527,6 +1419,7 @@ class AutoencoderKLCogVideoX(nn.Module):
         return h
 
     def _decode(self, z: torch.Tensor, return_dict: bool = True):
+        """执行底层解码流程，并处理时间分片与 context-parallel 缓存。"""
         batch_size, num_channels, num_frames, height, width = z.shape
 
         if self.use_tiling and (width > self.tile_latent_min_width or height > self.tile_latent_min_height):
@@ -1590,11 +1483,16 @@ class AutoencoderKLCogVideoX(nn.Module):
         return dec
 
     def decode(self, z: torch.Tensor, return_dict: bool = True, **kwargs):
+        """把量化后的 latent 解码回视频。
+
+        这里会先撤销尺度放缩与线性投影，再执行 `unpatchify` 恢复空间布局，
+        最后进入 3D 解码器。
+        """
 
         z = z / self.scale_learnable_parameters[0]
         z = self.proj_up(z.permute(0,2,3,4,1)).permute(0,4,1,2,3)
 
-        z = unpatchify(z) 
+        z = unpatchify(z)
         if self.use_slicing and z.shape[0] > 1:
             decoded_slices = [self._decode(z_slice) for z_slice in z.split(1)]
             decoded = torch.cat(decoded_slices)
@@ -1606,6 +1504,7 @@ class AutoencoderKLCogVideoX(nn.Module):
         return decoded
 
     def blend_v(self, a: torch.Tensor, b: torch.Tensor, blend_extent: int) -> torch.Tensor:
+        """在垂直方向平滑拼接两个重叠 tile。"""
         blend_extent = min(a.shape[3], b.shape[3], blend_extent)
         for y in range(blend_extent):
             b[:, :, :, y, :] = a[:, :, :, -blend_extent + y, :] * (1 - y / blend_extent) + b[:, :, :, y, :] * (
@@ -1614,6 +1513,7 @@ class AutoencoderKLCogVideoX(nn.Module):
         return b
 
     def blend_h(self, a: torch.Tensor, b: torch.Tensor, blend_extent: int) -> torch.Tensor:
+        """在水平方向平滑拼接两个重叠 tile。"""
         blend_extent = min(a.shape[4], b.shape[4], blend_extent)
         for x in range(blend_extent):
             b[:, :, :, :, x] = a[:, :, :, :, -blend_extent + x] * (1 - x / blend_extent) + b[:, :, :, :, x] * (
@@ -1622,22 +1522,12 @@ class AutoencoderKLCogVideoX(nn.Module):
         return b
 
     def tiled_encode(self, x: torch.Tensor) -> torch.Tensor:
-        r"""Encode a batch of images using a tiled encoder.
+        r"""按 tile 编码视频。
 
-        When this option is enabled, the VAE will split the input tensor into tiles to compute encoding in several
-        steps. This is useful to keep memory use constant regardless of image size. The end result of tiled encoding is
-        different from non-tiled encoding because each tile uses a different encoder. To avoid tiling artifacts, the
-        tiles overlap and are blended together to form a smooth output. You may still see tile-sized changes in the
-        output, but they should be much less noticeable.
-
-        Args:
-            x (`torch.Tensor`): Input batch of videos.
-
-        Returns:
-            `torch.Tensor`:
-                The latent representation of the encoded videos.
+        输入会被切成带重叠的小块分别送入编码器，再通过 `blend_v/blend_h`
+        在重叠区域做线性混合，减少块边界造成的接缝。
         """
-        # For a rough memory estimate, take a look at the `tiled_decode` method.
+        # 显存估算可参考下方 `tiled_decode` 的注释。
         batch_size, num_channels, num_frames, height, width = x.shape
 
         overlap_height = int(self.tile_sample_min_height * (1 - self.tile_overlap_factor_height))
@@ -1648,14 +1538,13 @@ class AutoencoderKLCogVideoX(nn.Module):
         row_limit_width = self.tile_latent_min_width - blend_extent_width
         frame_batch_size = self.num_sample_frames_batch_size
 
-        # Split x into overlapping tiles and encode them separately.
-        # The tiles have an overlap to avoid seams between tiles.
+        # 逐 tile 编码，并保留重叠区域，后续通过线性混合消除拼接缝。
         rows = []
         for i in range(0, height, overlap_height):
             row = []
             for j in range(0, width, overlap_width):
-                # Note: We expect the number of frames to be either `1` or `frame_batch_size * k` or `frame_batch_size * k + 1` for some k.
-                # As the extra single frame is handled inside the loop, it is not required to round up here.
+                # 说明：帧数应为 `1`、`frame_batch_size * k` 或 `frame_batch_size * k + 1`，其中 k 为整数。
+                # 中文说明：多出来的单帧会在循环内部处理，所以这里不需要向上取整。
                 num_batches = max(num_frames // frame_batch_size, 1)
                 conv_cache = None
                 time = []
@@ -1683,8 +1572,7 @@ class AutoencoderKLCogVideoX(nn.Module):
         for i, row in enumerate(rows):
             result_row = []
             for j, tile in enumerate(row):
-                # blend the above tile and the left tile
-                # to the current tile and add the current tile to the result row
+                # 与上方、左侧 tile 的重叠区域做平滑混合。
                 if i > 0:
                     tile = self.blend_v(rows[i - 1][j], tile, blend_extent_height)
                 if j > 0:
@@ -1696,15 +1584,11 @@ class AutoencoderKLCogVideoX(nn.Module):
         return enc
 
     def tiled_decode(self, z: torch.Tensor, return_dict: bool = True):
-        # Rough memory assessment:
-        #   - In CogVideoX-2B, there are a total of 24 CausalConv3d layers.
-        #   - The biggest intermediate dimensions are: [1, 128, 9, 480, 720].
-        #   - Assume fp16 (2 bytes per value).
-        # Memory required: 1 * 128 * 9 * 480 * 720 * 24 * 2 / 1024**3 = 17.8 GB
-        #
-        # Memory assessment when using tiling:
-        #   - Assume everything as above but now HxW is 240x360 by tiling in half
-        # Memory required: 1 * 128 * 9 * 240 * 360 * 24 * 2 / 1024**3 = 4.5 GB
+        """按 tile 解码 latent。
+
+        整图解码时，中间 3D 卷积激活会非常大；按半分辨率 tile 处理后，
+        激活量大致会随空间面积缩小到原来的四分之一，因此显存占用显著下降。
+        """
 
         batch_size, num_channels, num_frames, height, width = z.shape
 
@@ -1716,8 +1600,7 @@ class AutoencoderKLCogVideoX(nn.Module):
         row_limit_width = self.tile_sample_min_width - blend_extent_width
         frame_batch_size = self.num_latent_frames_batch_size
 
-        # Split z into overlapping tiles and decode them separately.
-        # The tiles have an overlap to avoid seams between tiles.
+        # 逐 tile 解码，并保留重叠区域供后续平滑拼接。
         rows = []
         for i in range(0, height, overlap_height):
             row = []
@@ -1749,8 +1632,7 @@ class AutoencoderKLCogVideoX(nn.Module):
         for i, row in enumerate(rows):
             result_row = []
             for j, tile in enumerate(row):
-                # blend the above tile and the left tile
-                # to the current tile and add the current tile to the result row
+                # 与上方、左侧 tile 的重叠区域做平滑混合。
                 if i > 0:
                     tile = self.blend_v(rows[i - 1][j], tile, blend_extent_height)
                 if j > 0:
@@ -1765,26 +1647,31 @@ class AutoencoderKLCogVideoX(nn.Module):
 
         return dec
 
-    ### original cogvideox forward
-    # def forward(
-    #     self,
-    #     sample: torch.Tensor,
-    #     sample_posterior: bool = False,
-    #     return_dict: bool = True,
-    #     generator: Optional[torch.Generator] = None,
-    # ) -> Union[torch.Tensor, torch.Tensor]:
-    #     x = sample
-    #     posterior = self.encode(x).latent_dist
-    #     if sample_posterior:
-    #         z = posterior.sample(generator=generator)
-    #     else:
-    #         z = posterior.mode()
-    #     dec = self.decode(z)
-    #     if not return_dict:
-    #         return (dec,)
-    #     return dec
+    ### 中文标题：原始 CogVideoX forward 示例
+    # 代码/形状说明：def forward(
+    # 中文说明：self,
+    # 中文说明：sample: torch.Tensor,
+    # 代码/形状说明：sample_posterior: bool = False,
+    # 代码/形状说明：return_dict: bool = True,
+    # 代码/形状说明：generator: Optional[torch.Generator] = None,
+    # 代码/形状说明：) -> Union[torch.Tensor, torch.Tensor]:
+    # 中文标题：x = sample
+    # 代码/形状说明：posterior = self.encode(x).latent_dist
+    # 代码/形状说明：if sample_posterior:
+    # 代码/形状说明：z = posterior.sample(generator=generator)
+    # 代码/形状说明：else:
+    # 代码/形状说明：z = posterior.mode()
+    # 代码/形状说明：dec = self.decode(z)
+    # 代码/形状说明：if not return_dict:
+    # 代码/形状说明：return (dec,)
+    # 中文标题：return dec
 
     def forward(self, x, disc_factor, image_disc=None, video_disc=None, image_perceptual_model=None, video_perceptual_model=None, is_train=True):
+        """执行训练态或推理态前向。
+
+        训练态下会返回重建结果以及重建损失、感知损失、GAN 损失等统计；
+        推理态下则直接返回输入与重建结果。
+        """
         device = x.device
         is_image = x.ndim == 4
         if not is_image:
@@ -1793,10 +1680,10 @@ class AutoencoderKLCogVideoX(nn.Module):
             B, C, H, W = x.shape
             T = 1
             x = x.unsqueeze(2)
-        
-        semantic_enlarge_factor = torch.clamp(self.scale_learnable_parameters, min=0.01)[0] # for low resolution
-        detail_enlarge_factor = torch.clamp(self.scale_learnable_parameters, min=0.01)[1] # for high resolution
-        
+
+        semantic_enlarge_factor = torch.clamp(self.scale_learnable_parameters, min=0.01)[0] # 低分辨率语义分支的可学习放缩。
+        detail_enlarge_factor = torch.clamp(self.scale_learnable_parameters, min=0.01)[1] # 高分辨率细节分支的可学习放缩。
+
         h_div_w = H / W
         h_div_w_template = self.h_div_w_templates[np.argmin(np.abs(self.h_div_w_templates - h_div_w))]
         hh, ww = self.h_div_w2hw[h_div_w_template]
@@ -1810,7 +1697,7 @@ class AutoencoderKLCogVideoX(nn.Module):
         for i, x in enumerate(x_list):
             with torch.amp.autocast("cuda", dtype=self.encoder_dtype):
                 h = self.encode(x)
-            # adjust latent dim
+            # 先做 patchify，把空间上的 `2x2` 邻域折叠进通道维。
             h = patchify(h) # (B,c,t,H,W) -> (B,4c,t,H/2,W/2)
 
             if self.other_args.use_feat_proj == 1:
@@ -1834,10 +1721,8 @@ class AutoencoderKLCogVideoX(nn.Module):
             elif i==1:
                 z_list.append(z.clone() * detail_enlarge_factor)
 
-        # quantize
-        # z_list_bk = z_list
+        # 把连续 latent 送入多尺度量化器，得到离散近似与码本索引。
         z_list, all_indices, all_loss = self.quantizer(z_list) # (B,24,t,H/2,W/2)
-        # z_list = z_list_bk
 
         x_recon_list = []
         for i in range(len(z_list)):
@@ -1862,22 +1747,21 @@ class AutoencoderKLCogVideoX(nn.Module):
             vq_output = {"encodings": all_indices}
         else:
             vq_output = {
-                "commitment_loss": torch.mean(all_loss) * self.lfq_weight, # here commitment loss is sum of commitment loss and entropy penalty
-                "encodings": all_indices, 
+                "commitment_loss": torch.mean(all_loss) * self.lfq_weight, # 中文标题：这里的 commitment loss 是 commitment loss 与 entropy penalty 的总和
+                "encodings": all_indices,
             }
 
-        # assert x.shape == x_recon.shape, f"x.shape {x.shape}, x_recon.shape {x_recon.shape}"
         if is_train == False:
             if self.other_args.return_256_res:
                 return x_list[0], x_recon_list[0]
             else:
                 return x_list[-1], x_recon_list[-1]
 
-        # if is_high_resolution_video:
-        #     x_recon_list, x_list = x_recon_list[1:], x_list[1:]
+        # 代码/形状说明：if is_high_resolution_video:
+        # 代码/形状说明：x_recon_list, x_list = x_recon_list[1:], x_list[1:]
         if "FSQ" not in self.args.quantizer_type:
             loss_dict["train/commitment_loss"] = vq_output['commitment_loss']
-            # loss_dict["train/all_commitment_loss"] = vq_output['all_commitment_loss']
+            # 代码/形状说明：loss_dict["train/all_commitment_loss"] = vq_output['all_commitment_loss']
         for (x_recon, x) in zip(x_recon_list, x_list):
             if self.args.recon_loss_type == 'l1':
                 recon_loss = F.l1_loss(x_recon, x) * self.args.l1_weight
@@ -1887,15 +1771,15 @@ class AutoencoderKLCogVideoX(nn.Module):
                 loss_dict['train/recon_loss'] = recon_loss
             else:
                 loss_dict['train/recon_loss'] += recon_loss
-            
-            if is_image: # handle the cases with 4 dims
+
+            if is_image: # 图像输入会临时补成单帧视频，这里再压回 4D。
                 flat_frames = x = x.squeeze(2)
                 flat_frames_recon = x_recon = x_recon.squeeze(2)
             else:
                 flat_frames = rearrange(x, "B C T H W -> (B T) C H W")
                 flat_frames_recon = rearrange(x_recon, "B C T H W -> (B T) C H W")
 
-            # Perceptual loss
+            # 感知损失更关注纹理与结构相似性，而不只是逐像素误差。
             if is_image:
                 image_perceptual_loss = image_perceptual_model(flat_frames, flat_frames_recon).mean() * self.args.perceptual_weight
                 if "train/image_perceptual_loss" not in loss_dict:
@@ -1912,7 +1796,7 @@ class AutoencoderKLCogVideoX(nn.Module):
                 else:
                     loss_dict["train/video_perceptual_loss"] += video_perceptual_loss
 
-            ### GAN loss
+            ### GAN 损失鼓励重建结果在判别器看来更像真实样本。
             if self.args.image_gan_weight > 0 and (self.args.gan_image4video == "yes" or is_image):
                 logits_image_fake = image_disc(flat_frames_recon)
                 g_image_loss = -torch.mean(logits_image_fake) * self.args.image_gan_weight * disc_factor
@@ -1927,7 +1811,7 @@ class AutoencoderKLCogVideoX(nn.Module):
                     loss_dict["train/g_video_loss"] = g_video_loss
                 else:
                     loss_dict["train/g_video_loss"] += g_video_loss
-        
+
         loss_dict['train/recon_loss'] /= len(x_list)
         if "train/image_perceptual_loss" in loss_dict:
             loss_dict["train/image_perceptual_loss"] /= len(x_list)
@@ -1941,6 +1825,7 @@ class AutoencoderKLCogVideoX(nn.Module):
 
     @staticmethod
     def add_model_specific_args(parent_parser):
+        """向外部 `ArgumentParser` 注册 VideoVAE 相关命令行参数。"""
         from infinity.models.videovae.utils import str2bool
 
         parser = argparse.ArgumentParser(parents=[parent_parser], add_help=False)
@@ -1966,7 +1851,7 @@ class AutoencoderKLCogVideoX(nn.Module):
         parser.add_argument("--act_fn", type=str, default="silu")
         parser.add_argument("--norm_eps", type=float, default=1e-6)
         parser.add_argument("--norm_num_groups", type=int, default=32)
-        # parser.add_argument("--temporal_compression_ratio", type=float, default=4) # deprecated
+        # 中文说明：parser.add_argument("--temporal_compression_ratio", type=float, default=4) # 已废弃
         parser.add_argument("--spatial_compression_list", type=int, nargs='+', default=[2, 2, 2], choices=[2])
         parser.add_argument("--temporal_compression_list", type=int, nargs='+', default=[2, 2], choices=[2, 3])
         parser.add_argument("--sample_height", type=int, default=480)
@@ -1983,4 +1868,3 @@ class AutoencoderKLCogVideoX(nn.Module):
 
 if __name__ == '__main__':
     pass
-

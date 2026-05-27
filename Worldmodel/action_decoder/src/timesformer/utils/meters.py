@@ -1,6 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
-"""Meters."""
+"""训练、验证和测试过程中的统计计量器。"""
 
 import datetime
 import numpy as np
@@ -19,10 +19,10 @@ logger = logging.get_logger(__name__)
 
 class TestMeter(object):
     """
-    Perform the multi-view ensemble for testing: each video with an unique index
-    will be sampled with multiple clips, and the predictions of the clips will
-    be aggregated to produce the final prediction for the video.
-    The accuracy is calculated with the given ground truth labels.
+    在测试阶段执行 multi-view ensemble。
+
+    每个带唯一索引的视频会采样多个 clips，这些 clips 的预测会聚合成该视频的
+    最终预测。准确率会使用给定的 ground truth labels 计算。
     """
 
     def __init__(
@@ -35,18 +35,18 @@ class TestMeter(object):
         ensemble_method="sum",
     ):
         """
-        Construct tensors to store the predictions and labels. Expect to get
-        num_clips predictions from each video, and calculate the metrics on
-        num_videos videos.
-        Args:
-            num_videos (int): number of videos to test.
-            num_clips (int): number of clips sampled from each video for
-                aggregating the final prediction for the video.
-            num_cls (int): number of classes for each prediction.
-            overall_iters (int): overall iterations for testing.
-            multi_label (bool): if True, use map as the metric.
-            ensemble_method (str): method to perform the ensemble, options
-                include "sum", and "max".
+                构造用于保存预测和标签的 tensor。
+
+                期望每个视频得到 num_clips 个预测，并在 num_videos 个视频上计算指标。
+
+                参数：
+                    num_videos (int): 待测试视频数量。
+                    num_clips (int): 每个视频采样的 clips 数量，用于聚合视频最终预测。
+                    num_cls (int): 每个预测的类别数。
+                    overall_iters (int): 测试阶段的总迭代次数。
+                    multi_label (bool): 如果为 True，使用 mAP 作为指标。
+                    ensemble_method (str): ensemble 方法，可选 "sum" 或 "max"。
+
         """
 
         self.iter_timer = Timer()
@@ -56,7 +56,7 @@ class TestMeter(object):
         self.overall_iters = overall_iters
         self.multi_label = multi_label
         self.ensemble_method = ensemble_method
-        # Initialize tensors.
+        # 初始化 tensor。
         self.video_preds = torch.zeros((num_videos, num_cls))
         if multi_label:
             self.video_preds -= 1e10
@@ -70,12 +70,12 @@ class TestMeter(object):
         self.topk_accs = []
         self.stats = {}
 
-        # Reset metric.
+        # 重置指标。
         self.reset()
 
     def reset(self):
         """
-        Reset the metric.
+        重置测试指标缓存。
         """
         self.clip_count.zero_()
         self.video_preds.zero_()
@@ -85,16 +85,14 @@ class TestMeter(object):
 
     def update_stats(self, preds, labels, clip_ids):
         """
-        Collect the predictions from the current batch and perform on-the-flight
-        summation as ensemble.
-        Args:
-            preds (tensor): predictions from the current batch. Dimension is
-                N x C where N is the batch size and C is the channel size
-                (num_cls).
-            labels (tensor): the corresponding labels of the current batch.
-                Dimension is N.
-            clip_ids (tensor): clip indexes of the current batch, dimension is
-                N.
+                收集当前 batch 的预测，并即时执行 ensemble 累加。
+
+                参数：
+                    preds (tensor): 当前 batch 的预测，维度为 N x C，其中 N 是 batch size，
+                        C 是通道数（num_cls）。
+                    labels (tensor): 当前 batch 对应的标签，维度为 N。
+                    clip_ids (tensor): 当前 batch 的 clip 索引，维度为 N。
+
         """
         for ind in range(preds.shape[0]):
             vid_id = int(clip_ids[ind]) // self.num_clips
@@ -112,7 +110,7 @@ class TestMeter(object):
                 )
             else:
                 raise NotImplementedError(
-                    "Ensemble Method {} is not supported".format(
+                    "不支持的 ensemble_method：{}".format(
                         self.ensemble_method
                     )
                 )
@@ -120,9 +118,11 @@ class TestMeter(object):
 
     def log_iter_stats(self, cur_iter):
         """
-        Log the stats.
-        Args:
-            cur_iter (int): the current iteration of testing.
+                记录当前测试迭代的统计信息。
+
+                参数：
+                    cur_iter (int): 当前测试迭代编号。
+
         """
         eta_sec = self.iter_timer.seconds() * (self.overall_iters - cur_iter)
         eta = str(datetime.timedelta(seconds=int(eta_sec)))
@@ -136,31 +136,33 @@ class TestMeter(object):
 
     def iter_tic(self):
         """
-        Start to record time.
+        开始记录一次迭代的耗时。
         """
         self.iter_timer.reset()
         self.data_timer.reset()
 
     def iter_toc(self):
         """
-        Stop to record time.
+        停止记录一次迭代的耗时。
         """
         self.iter_timer.pause()
         self.net_timer.pause()
 
     def data_toc(self):
+        """结束数据加载计时，并开始网络前向计时。"""
         self.data_timer.pause()
         self.net_timer.reset()
 
     def finalize_metrics(self, ks=(1, 5)):
         """
-        Calculate and log the final ensembled metrics.
-        ks (tuple): list of top-k values for topk_accuracies. For example,
-            ks = (1, 5) correspods to top-1 and top-5 accuracy.
+        计算并记录最终 ensemble 后的指标。
+
+        ks (tuple): topk_accuracies 使用的 top-k 列表。例如 ks = (1, 5)
+            对应 top-1 和 top-5 accuracy。
         """
         if not all(self.clip_count == self.num_clips):
             logger.warning(
-                "clip count {} ~= num clips {}".format(
+                "clip 数量 {} ~= num clips {}".format(
                     ", ".join(
                         [
                             "{}: {}".format(i, k)
@@ -196,15 +198,17 @@ class TestMeter(object):
 
 class ScalarMeter(object):
     """
-    A scalar meter uses a deque to track a series of scaler values with a given
-    window size. It supports calculating the median and average values of the
-    window, and also supports calculating the global average.
+    用 deque 跟踪一串标量值的计量器。
+
+    它会使用给定窗口大小保存近期数值，支持计算窗口内的中位数、平均值，也支持
+    计算全局平均值。
     """
 
     def __init__(self, window_size):
         """
-        Args:
-            window_size (int): size of the max length of the deque.
+                参数：
+                    window_size (int): deque 的最大长度。
+
         """
         self.deque = deque(maxlen=window_size)
         self.total = 0.0
@@ -212,7 +216,7 @@ class ScalarMeter(object):
 
     def reset(self):
         """
-        Reset the deque.
+        清空 deque 和累计统计量。
         """
         self.deque.clear()
         self.total = 0.0
@@ -220,7 +224,7 @@ class ScalarMeter(object):
 
     def add_value(self, value):
         """
-        Add a new scalar value to the deque.
+        向 deque 中加入一个新的标量值。
         """
         self.deque.append(value)
         self.count += 1
@@ -228,33 +232,34 @@ class ScalarMeter(object):
 
     def get_win_median(self):
         """
-        Calculate the current median value of the deque.
+        计算当前窗口内数值的中位数。
         """
         return np.median(self.deque)
 
     def get_win_avg(self):
         """
-        Calculate the current average value of the deque.
+        计算当前窗口内数值的平均值。
         """
         return np.mean(self.deque)
 
     def get_global_avg(self):
         """
-        Calculate the global mean value.
+        计算从上次 reset 以来的全局平均值。
         """
         return self.total / self.count
 
 
 class TrainMeter(object):
     """
-    Measure training stats.
+    统计训练阶段的 loss、error、学习率和耗时等信息。
     """
 
     def __init__(self, epoch_iters, cfg):
         """
-        Args:
-            epoch_iters (int): the overall number of iterations of one epoch.
-            cfg (CfgNode): configs.
+                参数：
+                    epoch_iters (int): 一个 epoch 中的总迭代次数。
+                    cfg (CfgNode): 配置对象。
+
         """
         self._cfg = cfg
         self.epoch_iters = epoch_iters
@@ -265,10 +270,10 @@ class TrainMeter(object):
         self.loss = ScalarMeter(cfg.LOG_PERIOD)
         self.loss_total = 0.0
         self.lr = None
-        # Current minibatch errors (smoothed over a window).
+        # 当前小批量的错误率（按窗口平滑）。
         self.mb_top1_err = ScalarMeter(cfg.LOG_PERIOD)
         self.mb_top5_err = ScalarMeter(cfg.LOG_PERIOD)
-        # Number of misclassified examples.
+        # 分类错误样本数量。
         self.num_top1_mis = 0
         self.num_top5_mis = 0
         self.num_samples = 0
@@ -279,7 +284,7 @@ class TrainMeter(object):
 
     def reset(self):
         """
-        Reset the Meter.
+        重置训练计量器中的累计统计量。
         """
         self.loss.reset()
         self.loss_total = 0.0
@@ -296,31 +301,34 @@ class TrainMeter(object):
 
     def iter_tic(self):
         """
-        Start to record time.
+        开始记录一次训练迭代的耗时。
         """
         self.iter_timer.reset()
         self.data_timer.reset()
 
     def iter_toc(self):
         """
-        Stop to record time.
+        停止记录一次训练迭代的耗时。
         """
         self.iter_timer.pause()
         self.net_timer.pause()
 
     def data_toc(self):
+        """结束数据加载计时，并开始网络前向/反向计时。"""
         self.data_timer.pause()
         self.net_timer.reset()
 
     def update_stats(self, top1_err, top5_err, loss, lr, mb_size, stats={}):
         """
-        Update the current stats.
-        Args:
-            top1_err (float): top1 error rate.
-            top5_err (float): top5 error rate.
-            loss (float): loss value.
-            lr (float): learning rate.
-            mb_size (int): mini batch size.
+                更新当前训练统计信息。
+
+                参数：
+                    top1_err (float): top1 错误率。
+                    top5_err (float): top5 错误率。
+                    loss (float): loss 值。
+                    lr (float): 学习率。
+                    mb_size (int): mini batch 大小。
+
         """
         self.loss.add_value(loss)
         self.lr = lr
@@ -328,10 +336,10 @@ class TrainMeter(object):
         self.num_samples += mb_size
 
         if not self._cfg.DATA.MULTI_LABEL:
-            # Current minibatch stats
+            # 当前小批量统计。
             self.mb_top1_err.add_value(top1_err)
             self.mb_top5_err.add_value(top5_err)
-            # Aggregate stats
+            # 累计统计。
             self.num_top1_mis += top1_err * mb_size
             self.num_top5_mis += top5_err * mb_size
 
@@ -344,10 +352,12 @@ class TrainMeter(object):
 
     def log_iter_stats(self, cur_epoch, cur_iter):
         """
-        log the stats of the current iteration.
-        Args:
-            cur_epoch (int): the number of current epoch.
-            cur_iter (int): the number of current iteration.
+                记录当前训练迭代的统计信息。
+
+                参数：
+                    cur_epoch (int): 当前 epoch 编号。
+                    cur_iter (int): 当前迭代编号。
+
         """
         if (cur_iter + 1) % self._cfg.LOG_PERIOD != 0:
             return
@@ -376,9 +386,11 @@ class TrainMeter(object):
 
     def log_epoch_stats(self, cur_epoch):
         """
-        Log the stats of the current epoch.
-        Args:
-            cur_epoch (int): the number of current epoch.
+                记录当前 epoch 的训练统计信息。
+
+                参数：
+                    cur_epoch (int): 当前 epoch 编号。
+
         """
         eta_sec = self.iter_timer.seconds() * (
             self.MAX_EPOCH - (cur_epoch + 1) * self.epoch_iters
@@ -409,27 +421,28 @@ class TrainMeter(object):
 
 class ValMeter(object):
     """
-    Measures validation stats.
+    统计验证阶段的 error、mAP 和耗时等信息。
     """
 
     def __init__(self, max_iter, cfg):
         """
-        Args:
-            max_iter (int): the max number of iteration of the current epoch.
-            cfg (CfgNode): configs.
+                参数：
+                    max_iter (int): 当前 epoch 的最大迭代次数。
+                    cfg (CfgNode): 配置对象。
+
         """
         self._cfg = cfg
         self.max_iter = max_iter
         self.iter_timer = Timer()
         self.data_timer = Timer()
         self.net_timer = Timer()
-        # Current minibatch errors (smoothed over a window).
+        # 当前小批量的错误率（按窗口平滑）。
         self.mb_top1_err = ScalarMeter(cfg.LOG_PERIOD)
         self.mb_top5_err = ScalarMeter(cfg.LOG_PERIOD)
-        # Min errors (over the full val set).
+        # 全验证集上的最小错误率。
         self.min_top1_err = 100.0
         self.min_top5_err = 100.0
-        # Number of misclassified examples.
+        # 分类错误样本数量。
         self.num_top1_mis = 0
         self.num_top5_mis = 0
         self.num_samples = 0
@@ -442,7 +455,7 @@ class ValMeter(object):
 
     def reset(self):
         """
-        Reset the Meter.
+        重置验证计量器中的累计统计量。
         """
         self.iter_timer.reset()
         self.mb_top1_err.reset()
@@ -459,29 +472,32 @@ class ValMeter(object):
 
     def iter_tic(self):
         """
-        Start to record time.
+        开始记录一次验证迭代的耗时。
         """
         self.iter_timer.reset()
         self.data_timer.reset()
 
     def iter_toc(self):
         """
-        Stop to record time.
+        停止记录一次验证迭代的耗时。
         """
         self.iter_timer.pause()
         self.net_timer.pause()
 
     def data_toc(self):
+        """结束数据加载计时，并开始网络前向计时。"""
         self.data_timer.pause()
         self.net_timer.reset()
 
     def update_stats(self, top1_err, top5_err, mb_size, stats={}):
         """
-        Update the current stats.
-        Args:
-            top1_err (float): top1 error rate.
-            top5_err (float): top5 error rate.
-            mb_size (int): mini batch size.
+                更新当前验证统计信息。
+
+                参数：
+                    top1_err (float): top1 错误率。
+                    top5_err (float): top5 错误率。
+                    mb_size (int): mini batch 大小。
+
         """
         self.mb_top1_err.add_value(top1_err)
         self.mb_top5_err.add_value(top5_err)
@@ -499,21 +515,25 @@ class ValMeter(object):
 
     def update_predictions(self, preds, labels):
         """
-        Update predictions and labels.
-        Args:
-            preds (tensor): model output predictions.
-            labels (tensor): labels.
+                缓存当前 batch 的预测和标签，供多标签 mAP 计算使用。
+
+                参数：
+                    preds (tensor): 模型输出预测。
+                    labels (tensor): 标签。
+
         """
-        # TODO: merge update_prediction with update_stats.
+        # 待办：将 update_prediction 与 update_stats 合并。
         self.all_preds.append(preds)
         self.all_labels.append(labels)
 
     def log_iter_stats(self, cur_epoch, cur_iter):
         """
-        log the stats of the current iteration.
-        Args:
-            cur_epoch (int): the number of current epoch.
-            cur_iter (int): the number of current iteration.
+                记录当前验证迭代的统计信息。
+
+                参数：
+                    cur_epoch (int): 当前 epoch 编号。
+                    cur_iter (int): 当前迭代编号。
+
         """
         if (cur_iter + 1) % self._cfg.LOG_PERIOD != 0:
             return
@@ -536,9 +556,11 @@ class ValMeter(object):
 
     def log_epoch_stats(self, cur_epoch):
         """
-        Log the stats of the current epoch.
-        Args:
-            cur_epoch (int): the number of current epoch.
+                记录当前 epoch 的验证统计信息。
+
+                参数：
+                    cur_epoch (int): 当前 epoch 编号。
+
         """
         stats = {
             "_type": "val_epoch",
@@ -571,15 +593,18 @@ class ValMeter(object):
 
 def get_map(preds, labels):
     """
-    Compute mAP for multi-label case.
-    Args:
-        preds (numpy tensor): num_examples x num_classes.
-        labels (numpy tensor): num_examples x num_classes.
-    Returns:
-        mean_ap (int): final mAP score.
+        计算多标签任务的 mAP。
+
+        参数：
+            说明：preds（numpy tensor）：样本数 x 类别数。
+            说明：labels（numpy tensor）：样本数 x 类别数。
+
+        返回：
+            mean_ap (int): 最终 mAP 分数。
+
     """
 
-    logger.info("Getting mAP for {} examples".format(preds.shape[0]))
+    logger.info("正在为 {} 个样本计算 mAP".format(preds.shape[0]))
 
     preds = preds[:, ~(np.all(labels == 0, axis=0))]
     labels = labels[:, ~(np.all(labels == 0, axis=0))]
@@ -588,8 +613,8 @@ def get_map(preds, labels):
         aps = average_precision_score(labels, preds, average=None)
     except ValueError:
         print(
-            "Average precision requires a sufficient number of samples \
-            in a batch which are missing in this sample."
+            "平均精度（Average precision）需要 batch 中包含足够数量的样本，"
+            "当前样本不满足要求。"
         )
 
     mean_ap = np.mean(aps)

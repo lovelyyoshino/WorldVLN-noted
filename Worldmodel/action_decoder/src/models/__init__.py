@@ -1,4 +1,2 @@
-"""
-Local model modules for the action decoder package.
-"""
+"""动作解码模型包初始化文件。这里集中暴露模型模块，便于训练和推理代码按包路径导入。"""
 

@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Make this script runnable from any working directory.
+# 允许从任意工作目录启动该脚本。
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 echo "[cwd] $(pwd)"
 
-# Avoid writing .pyc on quota-limited filesystems; flush logs immediately.
+# 避免在配额受限的文件系统写 .pyc，并让日志立即刷新。
 export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
 export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 
-# Stage-1 (DDP): distill an Adapter mapping InfinityStar VAE up_block_3 features
-# to TSformer PatchEmbed tokens.
-# Required paths are provided through environment variables below.
+# Stage-1 (DDP)：蒸馏一个 Adapter，把 InfinityStar VAE up_block_3 feature
+# 映射到 TSformer PatchEmbed tokens。
+# 必需路径由下面的环境变量提供。
 
-# Optional conda env. If unset, use the current `python` on PATH.
+# 可选 conda 环境；若不设置，则使用 PATH 中的当前 `python`。
 CONDA_ENV_PREFIX="${CONDA_ENV_PREFIX:-}"
 CONDA_ROOT_HINT="${CONDA_ROOT_HINT:-}"
 
@@ -35,7 +35,7 @@ activate_conda_prefix() {
   if [[ -f "${prefix}/bin/activate" ]]; then
     source "${prefix}/bin/activate"; return 0
   fi
-  echo "[error] Failed to activate conda env prefix: ${prefix}" >&2; exit 1
+  echo "[error] 激活 conda env prefix 失败：${prefix}" >&2; exit 1
 }
 
 if [[ -n "${CONDA_ENV_PREFIX}" ]]; then
@@ -48,7 +48,7 @@ python -V
 TORCHRUN_BIN="${TORCHRUN_BIN:-torchrun}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 
-# DDP rendezvous (avoid port conflicts on shared machines)
+# DDP rendezvous 配置：在共享机器上尽量避免端口冲突。
 MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 MASTER_PORT="${MASTER_PORT:-$(
 python - <<'PY'
@@ -74,7 +74,7 @@ require_env() {
   local name="$1"
   local val="${!name:-}"
   if [[ -z "${val}" ]]; then
-    echo "[error] Missing required env var: ${name}" >&2
+    echo "[error] 缺少必需环境变量：${name}" >&2
     exit 2
   fi
 }
@@ -97,4 +97,3 @@ ${TORCHRUN_BIN} --nproc_per_node="${NPROC_PER_NODE}" --master_addr="${MASTER_ADD
   --tsformer_ckpt "${TSFORMER_CKPT}" \
   --infinitystar_vae_path "${INF_VAE_PATH}" \
   ${EXTRA_ARGS}
-

@@ -25,10 +25,10 @@ predefined_HW_Scales_dynamic = {}
 for ratio in full_ratio2hws:
     dynamic_resolution_h_w[ratio] ={}
     for ind, leng in enumerate([7, 10, 13]):
-        h, w = full_ratio2hws[ratio][leng-1][0], full_ratio2hws[ratio][leng-1][1] # feature map size
-        pixel = (h * vae_stride, w * vae_stride) # The original image (H, W)
+        h, w = full_ratio2hws[ratio][leng-1][0], full_ratio2hws[ratio][leng-1][1] # 特征图尺寸。
+        pixel = (h * vae_stride, w * vae_stride) # 原始图像尺寸 (H, W)。
         dynamic_resolution_h_w[ratio][pixel[1]] = {
             'pixel': pixel,
             'scales': full_ratio2hws[ratio][:leng]
-        } # W as key
+        } # 用 W 作为 key。
         predefined_HW_Scales_dynamic[(h, w)] = full_ratio2hws[ratio][:leng]

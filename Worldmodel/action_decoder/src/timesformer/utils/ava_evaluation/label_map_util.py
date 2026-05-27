@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Label map utility functions."""
+"""检测 label map 读取与类别索引工具。"""
 
 from __future__ import (
     absolute_import,
@@ -22,37 +22,25 @@ from __future__ import (
 )
 import logging
 
-# from google.protobuf import text_format
-# from google3.third_party.tensorflow_models.object_detection.protos import string_int_label_map_pb2
+# 保留的上游调试/兼容代码：from google.protobuf import text_format
+# 保留的上游调试/兼容代码：from google3.third_party.tensorflow_models.object_detection.protos import string_int_label_map_pb2
 
 
 def _validate_label_map(label_map):
-    """Checks if a label map is valid.
+    """检查 label map 条目是否合法，尤其是类别 id 和名称。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
 
-  Args:
-    label_map: StringIntLabelMap to validate.
-
-  Raises:
-    ValueError: if label map is invalid.
-  """
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
+    """
     for item in label_map.item:
         if item.id < 1:
-            raise ValueError("Label map ids should be >= 1.")
+            raise ValueError("标签映射 id 应 >= 1。")
 
 
 def create_category_index(categories):
-    """Creates dictionary of COCO compatible categories keyed by category id.
+    """把类别列表转换成按类别 id 索引的字典。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
 
-  Args:
-    categories: a list of dicts, each of which has the following keys:
-      'id': (required) an integer id uniquely identifying this category.
-      'name': (required) string representing category name
-        e.g., 'cat', 'dog', 'pizza'.
-
-  Returns:
-    category_index: a dict containing the same entries as categories, but keyed
-      by the 'id' field of each category.
-  """
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
+    """
     category_index = {}
     for cat in categories:
         category_index[cat["id"]] = cat
@@ -60,42 +48,20 @@ def create_category_index(categories):
 
 
 def get_max_label_map_index(label_map):
-    """Get maximum index in label map.
+    """读取 label map 中最大的类别 id。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
 
-  Args:
-    label_map: a StringIntLabelMapProto
-
-  Returns:
-    an integer
-  """
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
+    """
     return max([item.id for item in label_map.item])
 
 
 def convert_label_map_to_categories(
     label_map, max_num_classes, use_display_name=True
 ):
-    """Loads label map proto and returns categories list compatible with eval.
+    """把 label map proto 转换成 COCO/检测评估兼容的类别列表。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
 
-  This function loads a label map and returns a list of dicts, each of which
-  has the following keys:
-    'id': (required) an integer id uniquely identifying this category.
-    'name': (required) string representing category name
-      e.g., 'cat', 'dog', 'pizza'.
-  We only allow class into the list if its id-label_id_offset is
-  between 0 (inclusive) and max_num_classes (exclusive).
-  If there are several items mapping to the same id in the label map,
-  we will only keep the first one in the categories list.
-
-  Args:
-    label_map: a StringIntLabelMapProto or None.  If None, a default categories
-      list is created with max_num_classes categories.
-    max_num_classes: maximum number of (consecutive) label indices to include.
-    use_display_name: (boolean) choose whether to load 'display_name' field
-      as category name.  If False or if the display_name field does not exist,
-      uses 'name' field as category names instead.
-  Returns:
-    categories: a list of dictionaries representing all possible categories.
-  """
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
+    """
     categories = []
     list_of_ids_already_added = []
     if not label_map:
@@ -111,8 +77,7 @@ def convert_label_map_to_categories(
     for item in label_map.item:
         if not 0 < item.id <= max_num_classes:
             logging.info(
-                "Ignore item %d since it falls outside of requested "
-                "label range.",
+                "忽略条目 %d，因为它超出了请求的标签范围。",
                 item.id,
             )
             continue
@@ -127,13 +92,10 @@ def convert_label_map_to_categories(
 
 
 def load_labelmap(path):
-    """Loads label map proto.
+    """从文件读取 label map proto。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
 
-  Args:
-    path: path to StringIntLabelMap proto text file.
-  Returns:
-    a StringIntLabelMapProto
-  """
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
+    """
     with open(path, "r") as fid:
         label_map_string = fid.read()
         label_map = string_int_label_map_pb2.StringIntLabelMap()
@@ -146,15 +108,10 @@ def load_labelmap(path):
 
 
 def get_label_map_dict(label_map_path, use_display_name=False):
-    """Reads a label map and returns a dictionary of label names to id.
+    """读取 label map 并生成类别名称到 id 的映射。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
 
-  Args:
-    label_map_path: path to label_map.
-    use_display_name: whether to use the label map items' display names as keys.
-
-  Returns:
-    A dictionary mapping label names to id.
-  """
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
+    """
     label_map = load_labelmap(label_map_path)
     label_map_dict = {}
     for item in label_map.item:
@@ -166,16 +123,10 @@ def get_label_map_dict(label_map_path, use_display_name=False):
 
 
 def create_category_index_from_labelmap(label_map_path):
-    """Reads a label map and returns a category index.
+    """从 label map 文件直接创建类别索引。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
 
-  Args:
-    label_map_path: Path to `StringIntLabelMap` proto text file.
-
-  Returns:
-    A category index, which is a dictionary that maps integer ids to dicts
-    containing categories, e.g.
-    {1: {'id': 1, 'name': 'dog'}, 2: {'id': 2, 'name': 'cat'}, ...}
-  """
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
+    """
     label_map = load_labelmap(label_map_path)
     max_num_classes = max(item.id for item in label_map.item)
     categories = convert_label_map_to_categories(label_map, max_num_classes)
@@ -183,5 +134,8 @@ def create_category_index_from_labelmap(label_map_path):
 
 
 def create_class_agnostic_category_index():
-    """Creates a category index with a single `object` class."""
+    """创建类别无关评估时使用的单一目标类别索引。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
+    """
     return {1: {"id": 1, "name": "object"}}

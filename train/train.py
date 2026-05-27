@@ -1,5 +1,16 @@
 # Copyright (c) 2025 FoundationVision
 # SPDX-License-Identifier: MIT
+"""
+WorldVLN 世界模型的 Stage-1 监督微调入口。
+
+中文导读：
+这个文件负责把视频生成骨干迁移到导航数据上。训练脚本会把语言指令编码为文本条件，
+把视频帧经 InfinityStar video VAE 编成 latent token，然后训练 causal/VAR transformer
+在真实历史 latent 上预测下一段 latent 世界状态变化。
+
+读代码时建议先看 `build_everything_from_args()`：它串起 T5、VAE、GPT/Infinity transformer、
+optimizer 和 trainer；真正的训练循环在 `infinity.trainer.sft_trainer` 中。
+"""
 import gc
 import json
 import math
@@ -16,8 +27,8 @@ from distutils.util import strtobool
 from typing import List, Optional, Tuple
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ['XFORMERS_FORCE_DISABLE_TRITON'] = '1'
-# os.environ["TORCH_LOGS"] = "+dynamo"
-# os.environ["TORCHDYNAMO_VERBOSE"] = '1'
+# 代码/形状说明：os.environ["TORCH_LOGS"] = "+dynamo"
+# 代码/形状说明：os.environ["TORCHDYNAMO_VERBOSE"] = '1'
 
 import numpy as np
 import torch
@@ -34,16 +45,23 @@ from infinity.utils.save_and_load import CKPTSaver, omnistoreCheckpoint, auto_re
 from infinity.models.ema import get_ema_model
 from infinity.utils import arg_util, misc, wandb_utils
 from infinity.trainer import get_trainer
-# from infinity.utils.mfu.mfu import mfutool
+# 代码/形状说明：from infinity.utils.mfu.mfu import mfutool
 
 def build_everything_from_args(args: arg_util.Args, saver):
-    # set seed
+    """
+    根据解析后的 args 构建 Stage-1 监督训练所需的全部组件。
+
+    中文导读：
+    这里是 Stage 1 的组装点：文本编码器负责语言条件，VAE 负责把导航视频压成 latent，
+    GPT/Infinity transformer 负责自回归预测 latent，Trainer 负责把这些部件接到监督训练循环。
+    """
+    # 设置随机种子，保证分布式训练各 rank 的初始化和数据采样可复现。
     args.set_initial_seed(benchmark=True)
-    # build tokenizer
-    print(f'Loading T5 from {args.t5_path}...')
+    # 构建文本 tokenizer / encoder：导航指令会被编码成世界模型的文本条件。
+    print(f'正在从 {args.t5_path} 加载 T5...')
     if 'flan-t5' in args.t5_path:
         from transformers import T5EncoderModel, T5TokenizerFast
-        text_tokenizer: T5TokenizerFast = AutoTokenizer.from_pretrained(args.t5_path, revision=None, legacy=True) # text_tokenizer.model_max_length is 512
+        text_tokenizer: T5TokenizerFast = AutoTokenizer.from_pretrained(args.t5_path, revision=None, legacy=True) # text_tokenizer.model_max_length 默认为 512
         text_tokenizer.model_max_length = args.tlen
         text_encoder: T5EncoderModel = T5EncoderModel.from_pretrained(args.t5_path, torch_dtype=torch.float16)
         text_encoder.to(args.device)
@@ -51,55 +69,63 @@ def build_everything_from_args(args: arg_util.Args, saver):
         text_encoder.requires_grad_(False)
         args.text_tokenizer_type = 'flan_t5'
         args.text_tokenizer = text_tokenizer
-    else: # umt5
-        raise ValueError("Only flan-t5 is supported now.")
+    else: # umt5 分支目前未启用。
+        raise ValueError("当前 Stage-1 训练入口仅支持 flan-t5 文本编码器。")
 
-    # build models. Note that here gpt is the causal VAR transformer which performs next scale prediciton with text guidance
+    # 构建模型。这里的 gpt 不是纯文本 GPT，而是带文本条件的 causal/VAR 世界模型，
+    # 目标是按多尺度 schedule 预测下一段视频 latent。
     vae_local, gpt_uncompiled, gpt_wo_ddp, gpt_ddp, gpt_wo_ddp_ema, gpt_ddp_ema, gpt_optim = build_model_optimizer(args)
-    
-    # IMPORTANT: import heavy package `InfinityTrainer` after the Dataloader object creation/iteration to avoid OOM
+
+    # 注意：InfinityTrainer 依赖较重；这里延迟导入，避免训练启动阶段不必要的显存/内存峰值。
     InfinityTrainer = get_trainer(args)
-    # build trainer
+    # 构建 trainer：它把 VAE、世界模型、optimizer 和损失计算封装到 train_step()。
     trainer = InfinityTrainer(
-        device=args.device, 
+        device=args.device,
         raw_scale_schedule=args.scale_schedule,
-        vae_local=vae_local, 
+        vae_local=vae_local,
         gpt_wo_ddp=gpt_wo_ddp, gpt=gpt_ddp,
-        gpt_opt=gpt_optim, 
-        label_smooth=args.label_smooth, 
-        zero=args.zero, 
+        gpt_opt=gpt_optim,
+        label_smooth=args.label_smooth,
+        zero=args.zero,
         vae_type=args.vae_type,
-        reweight_loss_by_scale=args.reweight_loss_by_scale, 
-        gpt_wo_ddp_ema=gpt_wo_ddp_ema, 
-        gpt_ema=gpt_ddp_ema, 
-        use_fsdp_model_ema=args.use_fsdp_model_ema, 
+        reweight_loss_by_scale=args.reweight_loss_by_scale,
+        gpt_wo_ddp_ema=gpt_wo_ddp_ema,
+        gpt_ema=gpt_ddp_ema,
+        use_fsdp_model_ema=args.use_fsdp_model_ema,
         other_args=args,
     )
-    
-    # auto resume from broken experiment
+
+    # 从中断的实验自动 resume。
     global_it = 0
     if args.checkpoint_type == 'torch':
-        auto_resume_info, start_ep, global_it, acc_str, _, trainer_state, _ = auto_resume(args, 'global_step_*')        
+        auto_resume_info, start_ep, global_it, acc_str, _, trainer_state, _ = auto_resume(args, 'global_step_*')
         if trainer_state is not None and len(trainer_state):
-            trainer.load_state_dict(trainer_state, strict=False, skip_vae=True) 
+            trainer.load_state_dict(trainer_state, strict=False, skip_vae=True)
     elif args.checkpoint_type == 'omnistore':
         resume_path, info = omnistore_auto_resume(args, 'global_step_*')
         if not resume_path and args.rush_omnistore_resume:
             resume_path = args.rush_omnistore_resume
         if resume_path:
-            print(f"omnistore resume from {resume_path}", flush=True)
+            print(f"omnistore 从断点恢复：{resume_path}", flush=True)
             args_state, start_ep, start_it, global_it, acc_str, eval_milestone = saver.load(resume_path, fsdp_object=trainer.gpt, optimizer_object=trainer.gpt_opt.optimizer)
             dist.barrier()
         if args.rush_omnistore_resume == resume_path:
             global_it = 0
         auto_resume_info, acc_str, eval_milestone, trainer_state, args_state =  info, '[no acc str]', [], {}, {}
-        
+
     del vae_local, gpt_uncompiled, gpt_wo_ddp, gpt_ddp, gpt_wo_ddp_ema, gpt_ddp_ema, gpt_optim
     dist.barrier()
     return text_tokenizer, text_encoder, trainer, global_it
 
 
 def build_model_optimizer(args):
+    """
+    构建 VAE、world-model transformer 和分布式 optimizer。
+
+    中文导读：
+    `gpt_wo_ddp` 是这里的世界模型主体，不是传统文本 GPT；它消费文本条件和视频 latent
+    token，学习按 schedule 预测后续 latent scale。FSDP/ZeRO 相关代码只负责大模型分布式训练。
+    """
     from torch.nn.parallel import DistributedDataParallel as DDP
     from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
     from infinity.models.infinity import Infinity, MultipleLayers
@@ -107,14 +133,14 @@ def build_model_optimizer(args):
     from infinity.utils.amp_opt import AmpOptimizer
     from infinity.utils.lr_control import filter_params
     from infinity.utils.load import build_vae_gpt
-    
-    # disable builtin initialization for speed
+
+    # 关闭 PyTorch Linear/LayerNorm 默认初始化，加快大模型构建；后面会调用自定义 init_weights。
     setattr(torch.nn.Linear, 'reset_parameters', lambda self: None)
     setattr(torch.nn.LayerNorm, 'reset_parameters', lambda self: None)
     vae_local, gpt_wo_ddp = build_vae_gpt(args, device=args.model_init_device)
     count_p = lambda m: sum(p.numel() for p in m.parameters()) / 1e6
     num_para = count_p(gpt_wo_ddp)
-    if num_para/1000 < 20: # < 20B
+    if num_para/1000 < 20: # 小于 20B 参数时直接放到 cuda。
         gpt_wo_ddp = gpt_wo_ddp.to('cuda')
 
     if args.tini < 0:
@@ -125,7 +151,7 @@ def build_model_optimizer(args):
         gpt_wo_ddp_ema = get_ema_model(gpt_wo_ddp)
     else:
         gpt_wo_ddp_ema = None
-    
+
     if args.rush_resume:
         print(f"{args.rush_resume=}")
         cpu_d = torch.load(args.rush_resume, 'cpu')
@@ -136,30 +162,31 @@ def build_model_optimizer(args):
             state_dict = cpu_d
             ema_state_dict = state_dict
         def drop_unfit_weights(state_dict):
+            """rush_resume 时丢弃 shape 不匹配的旧权重，允许从相近结构继续微调。"""
             if 'word_embed.weight' in state_dict and (state_dict['word_embed.weight'].shape[1] != gpt_wo_ddp.word_embed.in_features):
-                print(f'[rush_resume] drop word_embed.weight')
+                print(f'[rush_resume] 丢弃 word_embed.weight')
                 del state_dict['word_embed.weight']
             if 'head.weight' in state_dict and (state_dict['head.weight'].shape[0] != gpt_wo_ddp.head.out_features):
-                print(f'[rush_resume] drop head.weight')
+                print(f'[rush_resume] 丢弃 head.weight')
                 del state_dict['head.weight']
             if 'head.bias' in state_dict and (state_dict['head.bias'].shape[0] != gpt_wo_ddp.head.bias.shape[0]):
-                print(f'[rush_resume] drop head.bias')
+                print(f'[rush_resume] 丢弃 head.bias')
                 del state_dict['head.bias']
             if 'text_proj_for_sos.ca.mat_kv.weight' in state_dict and \
                 (state_dict['text_proj_for_sos.ca.mat_kv.weight'].shape != gpt_wo_ddp.text_proj_for_sos.ca.mat_kv.weight.shape):
-                print(f'[rush_resume] drop cfg_uncond')
+                print(f'[rush_resume] 丢弃 cfg_uncond')
                 del state_dict['cfg_uncond']
                 for key in list(state_dict.keys()):
                     if 'text' in key:
                         del state_dict[key]
             if 'semantic_head.weight' in state_dict:
-                print(f'[rush_resume] replace semantic_head with semantic_head2')
+                print(f'[rush_resume] 用 semantic_head2 替换 semantic_head')
                 state_dict['semantic_head2.weight'] = state_dict['semantic_head.weight']
                 state_dict['semantic_head2.bias'] = state_dict['semantic_head.bias']
                 del state_dict['semantic_head.weight']
                 del state_dict['semantic_head.bias']
             if 'semantic_head2.weight' in state_dict and (state_dict['semantic_head2.weight'].shape[0] != gpt_wo_ddp.semantic_head2.out_features):
-                print(f'[rush_resume] drop semantic_head2.weight, semantic_head2.bias')
+                print(f'[rush_resume] 丢弃 semantic_head2.weight 和 semantic_head2.bias')
                 del state_dict['semantic_head2.weight']
                 del state_dict['semantic_head2.bias']
             return state_dict
@@ -171,10 +198,10 @@ def build_model_optimizer(args):
         load_sharded_checkpoint(gpt_wo_ddp, args.torchshard_resume, strict=False)
 
     ndim_dict = {name: para.ndim for name, para in gpt_wo_ddp.named_parameters() if para.requires_grad}
-    
-    print(f'[PT] GPT model = {gpt_wo_ddp}\n\n')
+
+    print(f'[PT] GPT 模型 = {gpt_wo_ddp}\n\n')
     print(f'[PT][#para], GPT={num_para:.2f}\n\n')
-    
+
     gpt_uncompiled = gpt_wo_ddp
 
     gpt_ddp_ema = None
@@ -183,12 +210,12 @@ def build_model_optimizer(args):
         from torch.distributed.fsdp.wrap import ModuleWrapPolicy
         from torch.distributed.device_mesh import init_device_mesh
 
-        # use mix prec: https://github.com/pytorch/pytorch/issues/76607
-        if gpt_wo_ddp.num_block_chunks == 1:  # no chunks
+        # 使用混合精度；背景见 https://github.com/pytorch/pytorch/issues/76607
+        if gpt_wo_ddp.num_block_chunks == 1:  # 没有 block chunks。
             auto_wrap_policy = ModuleWrapPolicy([type(gpt_wo_ddp.unregistered_blocks[0]), ])
         else:
             auto_wrap_policy = ModuleWrapPolicy([MultipleLayers, ])
-        
+
         if args.enable_hybrid_shard:
             sharding_strategy = ShardingStrategy.HYBRID_SHARD if args.zero == 3 else ShardingStrategy._HYBRID_SHARD_ZERO2
             world_size = dist.get_world_size()
@@ -198,33 +225,33 @@ def build_model_optimizer(args):
         else:
             sharding_strategy = ShardingStrategy.FULL_SHARD if args.zero == 3 else ShardingStrategy.SHARD_GRAD_OP
             device_mesh = None
-        print(f'{">" * 45 + " " * 5} FSDP INIT with {args.zero=} {sharding_strategy=} {auto_wrap_policy=} {" " * 5 + "<" * 45}', flush=True)
+        print(f'{">" * 45 + " " * 5} FSDP 初始化：{args.zero=} {sharding_strategy=} {auto_wrap_policy=} {" " * 5 + "<" * 45}', flush=True)
 
         if args.fsdp_init_device == 'cpu':
             gpt_wo_ddp = gpt_wo_ddp.cpu()
 
         gpt_ddp: FSDP = FSDP(
-            gpt_wo_ddp, 
+            gpt_wo_ddp,
             device_id=dist.get_local_rank(),
-            sharding_strategy=sharding_strategy, 
+            sharding_strategy=sharding_strategy,
             mixed_precision=None,
-            auto_wrap_policy=auto_wrap_policy, 
-            use_orig_params=True, 
-            sync_module_states=True, 
+            auto_wrap_policy=auto_wrap_policy,
+            use_orig_params=True,
+            sync_module_states=True,
             limit_all_gathers=True,
             device_mesh=device_mesh,
         ).to(args.device)
-        
+
         if args.use_fsdp_model_ema:
             gpt_wo_ddp_ema = gpt_wo_ddp_ema.to(args.device)
             gpt_ddp_ema: FSDP = FSDP(
-                gpt_wo_ddp_ema, 
+                gpt_wo_ddp_ema,
                 device_id=dist.get_local_rank(),
-                sharding_strategy=sharding_strategy, 
+                sharding_strategy=sharding_strategy,
                 mixed_precision=None,
-                auto_wrap_policy=auto_wrap_policy, 
-                use_orig_params=args.fsdp_orig, 
-                sync_module_states=True, 
+                auto_wrap_policy=auto_wrap_policy,
+                use_orig_params=args.fsdp_orig,
+                sync_module_states=True,
                 limit_all_gathers=True,
             )
     else:
@@ -232,7 +259,7 @@ def build_model_optimizer(args):
         gpt_ddp: DDP = ddp_class(gpt_wo_ddp, device_ids=[dist.get_local_rank()], find_unused_parameters=False, broadcast_buffers=False)
     torch.cuda.synchronize()
 
-    # =============== build optimizer ===============
+    # =============== 构建 optimizer ===============
     nowd_keys = set()
     if args.disable_weight_decay:
         nowd_keys |= {
@@ -249,7 +276,7 @@ def build_model_optimizer(args):
         beta0, beta1 = map(float, args.ada.split('_'))
     else:
         beta0, beta1 = float(args.ada), -1
-    
+
     opt_clz = {
         'sgd':   partial(torch.optim.SGD, momentum=beta0, nesterov=True),
         'adam':  partial(torch.optim.AdamW, betas=(beta0, beta1), fused=args.fused_adam),
@@ -264,54 +291,73 @@ def build_model_optimizer(args):
 
 
 def build_dataset(args):
+    """
+    构建 Stage-1 监督训练数据集。
+
+    返回的 dataset 不是普通 image-label 样本，而是导航视频训练样本：
+    `images` 是可选 RGB 帧，`raw_features_bcthw` 是可选预缓存 VAE latent，
+    `captions` 是语言指令，`media`/`feature_cache_files4images` 用于 trainer 判断样本来源和缓存。
+    这里保持 `load_vae_instead_of_image=False`，表示是否使用预缓存 latent 由 dataset 内部按样本决定。
+    """
     train_dataset = build_joint_dataset(
-        args, 
+        args,
         args.data_path,
         args.video_data_path,
-        max_caption_len=args.tlen, 
-        short_prob=args.short_cap_prob, 
+        max_caption_len=args.tlen,
+        short_prob=args.short_cap_prob,
         load_vae_instead_of_image=False
     )
     return train_dataset
 
 def main_train(args: arg_util.Args):
+    """
+    Stage-1 主训练循环。
+
+    这个函数只负责编排：checkpoint saver、模型组件、dataset/dataloader、epoch loop。
+    反向传播和损失细节在 `trainer.train_step()` 内部；读训练主线时可以先把这里看成
+    “每个 iteration 准备语言条件 + 视频 latent，再交给 trainer”。
+    """
+    # checkpoint_type 决定保存/恢复格式：
+    # - torch: 普通 .pth 风格，便于单机或简单调试；
+    # - omnistore: 大规模分布式训练环境的对象存储 checkpoint。
     if args.checkpoint_type == 'torch':
         saver = CKPTSaver(dist.is_master(), eval_milestone=None)
     elif args.checkpoint_type == 'omnistore':
         saver = omnistoreCheckpoint(eval_milestone=None)
     else:
-        raise ValueError(f'{args.checkpoint_type=}')
+        raise ValueError(f"不支持的 checkpoint_type：{args.checkpoint_type}")
     ret = build_everything_from_args(args, saver)
-    
+
     if ret is None:
         return
-    
+
     text_tokenizer, text_encoder, trainer, start_global_it = ret
     gc.collect(), torch.cuda.empty_cache()
     seg5 = np.linspace(1, args.epoch, 5+1, dtype=int).tolist()
-    
+
     time.sleep(3), gc.collect(), torch.cuda.empty_cache(), time.sleep(3)
     ep_lg = max(1, args.epoch // 10) if args.epoch <= 100 else max(1, args.epoch // 20)
-    
-    # ============================================= epoch loop begins =============================================
-    # build wandb logger
+
+    # ============================================= epoch 循环开始 =============================================
+    # 主进程初始化 wandb 日志。
     if dist.is_master():
         wandb_utils.wandb.init(project=args.project_name, name=args.exp_name, config={})
     total_epochs = int(args.epoch)
     for ep in range(total_epochs):
-        # build data at each epoch to ensure read meta take effects for each dataloader worker
-        # IMPORTANT: keep args.epoch as *total epochs*; store current epoch in args.cur_epoch for datasets.
+        # 每个 epoch 重新构建 dataset，是为了让 worker 重新读取 meta/采样配置。
+        # 注意：args.epoch 始终表示总 epoch 数；当前 epoch 写到 args.cur_epoch，供 dataset 做采样策略。
         args.cur_epoch = ep
 
         if ep == 0:
             train_dataset = build_dataset(args)
             iters_train = len(train_dataset)
+            # 未显式指定保存间隔时，默认一轮保存一次；这样 resume 时 next_ep/next_it 语义最直观。
             if int(getattr(args, "save_model_iters_freq", 0)) <= 0:
                 args.save_model_iters_freq = int(iters_train)
-                print(f'[PT info] auto save_model_iters_freq={args.save_model_iters_freq} (once per epoch)')
+                print(f'[PT 信息] 自动设置 save_model_iters_freq={args.save_model_iters_freq}（每个 epoch 保存一次）')
             start_ep = start_global_it // iters_train
             start_it = start_global_it % iters_train
-            print(f'[PT info]  from ep{start_ep} it{start_it} {iters_train=}=======>  bed: {args.bed}  <=======\n')
+            print(f'[PT 信息] 从 ep{start_ep} it{start_it} 继续，{iters_train=} =======> bed: {args.bed} <=======\n')
 
         if ep < start_ep:
             continue
@@ -320,9 +366,15 @@ def main_train(args: arg_util.Args):
             iters_train = len(train_dataset)
             if int(getattr(args, "save_model_iters_freq", 0)) <= 0:
                 args.save_model_iters_freq = int(iters_train)
-                print(f'[PT info] auto save_model_iters_freq={args.save_model_iters_freq} (once per epoch)')
+                print(f'[PT 信息] 自动设置 save_model_iters_freq={args.save_model_iters_freq}（每个 epoch 保存一次）')
 
-        # [train one epoch]
+        # [训练一个 epoch]
+        # 到这里为止，准备逻辑都结束了：
+        # - build_everything_from_args() 负责“模型/optimizer/trainer”；
+        # - build_dataset() 负责“样本从哪里来、每个样本带哪些字段”；
+        # - train_one_epoch() 负责“把字段送进 trainer.train_step()”。
+        # dataset 已经负责 batching/拼样本，所以这里 batch_size=None。
+        # DataLoader 只承担 worker 并行、pin memory 和迭代器封装。
         train_dataloader = DataLoader(dataset=train_dataset, num_workers=args.workers, pin_memory=True, batch_size=None)
         stats = train_one_epoch(
             epoch=ep,
@@ -337,7 +389,7 @@ def main_train(args: arg_util.Args):
             text_tokenizer=text_tokenizer, text_encoder=text_encoder,
             trainer=trainer,
         )
-        
+
         del stats, train_dataset, train_dataloader
     return
 
@@ -345,20 +397,32 @@ def main_train(args: arg_util.Args):
 g_speed_ls = deque(maxlen=128)
 def train_one_epoch(
     epoch: int, is_first_ep: bool, start_it: int, start_global_it: int, me: misc.MetricLogger,
-    saver: CKPTSaver, args: arg_util.Args, dataloader_iter, iters_train: int, 
+    saver: CKPTSaver, args: arg_util.Args, dataloader_iter, iters_train: int,
     text_tokenizer: T5TokenizerFast, text_encoder: T5EncoderModel, trainer,
 ):
-    # IMPORTANT: import heavy packages after the Dataloader object creation/iteration to avoid OOM
+    """
+    执行一个 epoch 的 Stage-1 SFT。
+
+    输入 batch 的关键字段：
+    - `captions`: 语言导航指令，会被 T5 编成 compact KV 条件；
+    - `images`: 原始 RGB 帧列表，供 trainer 内部 VAE 编码；
+    - `raw_features_bcthw`: 已预缓存的视频 latent，能绕过重复 VAE 编码；
+    - `feature_cache_files4images`: RGB 对应的 cache 路径，trainer 可按需写回/读取；
+    - `media`: 样本媒体类型或来源标记，用于多数据集混训统计。
+
+    `stepping` 由梯度累积间隔 `args.ac` 决定：不是每个 micro-batch 都会 optimizer.step()。
+    """
+    # 注意：重依赖尽量放在 DataLoader 之后，避免 worker/主进程初始化时出现额外 OOM。
     step_cnt = 0
     header = f'[Ep]: [{epoch:4d}/{args.epoch}]'
-    
+
     last_touch = time.time()
     g_it, max_it = epoch * iters_train, args.epoch * iters_train
-    
+
     doing_profiling = args.prof and epoch == 0 and (args.profall or dist.is_master())
     maybe_record_function = record_function if doing_profiling else nullcontext
     trainer.gpt_wo_ddp.maybe_record_function = maybe_record_function
-    
+
     last_t_perf = time.time()
     speed_ls: deque = g_speed_ls
     FREQ = min(args.prof_freq, iters_train//2-1)
@@ -373,12 +437,12 @@ def train_one_epoch(
     [me.add_meter(x, misc.SmoothedValue(window_size=1, fmt='{median:.3f} ({global_avg:.3f})')) for x in ['L', 'L_i', 'L_v']]
     [me.add_meter(x, misc.SmoothedValue(window_size=1, fmt='{median:.2f} ({global_avg:.2f})')) for x in ['Acc', 'Acc_i', 'Acc_v']]
     [me.add_meter(x, misc.SmoothedValue(window_size=1, fmt='{median:.2f} ({global_avg:.2f})')) for x in ['seq_usage']]
-    # ============================================= iteration loop begins =============================================
+    # ============================================= iteration 循环开始 =============================================
     for it, data in me.log_every(start_it, iters_train, dataloader_iter, args.log_freq, args.log_every_iter, header, args):
         g_it = epoch * iters_train + it
-        # mfutool.step()
-        # mfu_val = mfutool.get_mfu() * 100 # to percent
-        # print(f"[MFU] step={g_it}, mfu={mfu_val:.2f} %, mfu.iter_time = {mfutool.iter_time():.4f} s")
+        # 中文说明：mfutool.step()
+        # mfu_val = mfutool.get_mfu() * 100 # 转成百分比。
+        # 代码/形状说明：print(f"[MFU] step={g_it}, mfu={mfu_val:.2f} %, mfu.iter_time = {mfutool.iter_time():.4f} s")
 
 
         if (it+1) % FREQ == 0:
@@ -390,14 +454,20 @@ def train_one_epoch(
                 saver.sav(args=args, g_it=(g_it+1), next_ep=epoch, next_it=it+1, trainer=trainer, acc_str=f'[todo]', eval_milestone=None, also_save_to=None, best_save_to=None)
             elif args.checkpoint_type == 'omnistore':
                 saver.sav(args=args, global_it=(g_it+1), next_ep=epoch, next_it=it+1, fsdp_object=trainer.gpt, optimizer_object=trainer.gpt_opt.optimizer, acc_str=None, eval_milestone=None)
-        
+
         with maybe_record_function('before_train'):
-            # [get data]
+            # [取数据]
+            # 这里的 data 已经是 dataset 组好的一个训练 item/batch。
+            # 同一批里可能既有 RGB，也有预缓存 latent；trainer.train_step() 会按非空字段选择路径。
             images, captions, raw_features_bcthw, feature_cache_files4images, media = data['images'], data['captions'], data['raw_features_bcthw'], data['feature_cache_files4images'], data['media']
 
-            # # [prepare text features]
+            # [准备文本特征]
+            # T5 输出是 padded batch `(B,L,C)`；Infinity attention 更偏好 compact 形式：
+            # - kv_compact: 把每条 caption 的有效 token 串接成 `(sum_lens,C)`；
+            # - lens/cu_seqlens_k: 记录每条样本的边界，供 flash-attn/varlen attention 使用；
+            # - Ltext: 当前 batch 最大文本长度，用于 shape/位置编码相关逻辑。
             if args.text_tokenizer_type == 'flan_t5':
-                tokens = text_tokenizer(text=captions, max_length=text_tokenizer.model_max_length, padding='max_length', truncation=True, return_tensors='pt')  # todo: put this into dataset
+                tokens = text_tokenizer(text=captions, max_length=text_tokenizer.model_max_length, padding='max_length', truncation=True, return_tensors='pt')  # 待办：后续可下沉到 dataset。
                 input_ids = tokens.input_ids.cuda(non_blocking=True)
                 mask = tokens.attention_mask.cuda(non_blocking=True)
                 text_features = text_encoder(input_ids=input_ids, attention_mask=mask)['last_hidden_state'].float()
@@ -424,47 +494,54 @@ def train_one_epoch(
                 images = [item.to(args.device, non_blocking=True) for item in images]
             if len(raw_features_bcthw):
                 raw_features_bcthw = [item.to(args.device, non_blocking=True) for item in raw_features_bcthw]
-            
-            # [logging]
+
+            # [日志]
+            # 长时间训练时周期性把 args/log 刷到磁盘，避免中断后只剩 stdout。
             if dist.is_local_master() and (it >= start_it + 10) and (time.time() - last_touch > 90):
                 args.dump_log()
                 last_touch = time.time()
-                        
-            # [get scheduled hyperparameters]
+
+            # [获取调度后的超参数]
+            # clip_decay_ratio 是训练后期更严格/更温和裁剪的调度项；具体使用在 trainer 内部。
             progress = g_it / (max_it - 1)
             clip_decay_ratio = (0.3 ** (20 * progress) + 0.2) if args.cdec else 1
-            
+
+            # 梯度累积：只有到达 args.ac 的边界才做 optimizer step，其余 iteration 只累积梯度。
             stepping = (g_it + 1) % args.ac == 0
             step_cnt += int(stepping)
-        
+
         with maybe_record_function('in_training'):
+            # Stage-1 的核心训练调用：
+            # 语言条件 text_cond_tuple + 视频观测 latent/RGB 被送入世界模型，
+            # 监督目标是下一段真实 latent token，而不是直接预测动作。
             grad_norm_t, scale_log2_t = trainer.train_step(
-                epoch=epoch, 
-                it=it, 
-                g_it=g_it, 
-                stepping=stepping, 
+                epoch=epoch,
+                it=it,
+                g_it=g_it,
+                stepping=stepping,
                 clip_decay_ratio=clip_decay_ratio,
-                metric_lg=me, 
-                inp_B3HW=images, 
+                metric_lg=me,
+                inp_B3HW=images,
                 raw_features_bcthw=raw_features_bcthw,
                 feature_cache_files4images=feature_cache_files4images,
                 text_cond_tuple=text_cond_tuple,
                 media=media,
                 args=args,
             )
-        
+
         with maybe_record_function('after_train'):
             me.update(tlr=args.tlr)
-    # ============================================= iteration loop ends =============================================
-    
+    # ============================================= iteration 循环结束 =============================================
+
     me.synchronize_between_processes()
     return {k: meter.global_avg for k, meter in me.meters.items()}
 
 
-def main():    
+def main():
+    """CLI 入口：初始化分布式参数、启动 Stage-1 训练并在退出前落盘最终 args。"""
     args: arg_util.Args = arg_util.init_dist_and_get_args()
     main_train(args)
-    print(f'final args:\n\n{str(args)}')
+    print(f'最终 args:\n\n{str(args)}')
     args.dump_log()
     if isinstance(sys.stdout, dist.BackupStreamToFile) and isinstance(sys.stderr, dist.BackupStreamToFile):
         sys.stdout.close(), sys.stderr.close()

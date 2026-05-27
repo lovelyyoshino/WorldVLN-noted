@@ -12,7 +12,9 @@ import torch.distributed as dist
 from infinity.models.videovae.utils.misc import shift_dim
 
 class Codebook(nn.Module):
+    """单尺度 EMA 码本。"""
     def __init__(self, n_codes, embedding_dim, no_random_restart=False, restart_thres=1.0, usage_sigma=0.99, fp32_quant=False):
+        """构造 EMA 更新的离散码本。"""
         super().__init__()
         self.register_buffer('embeddings', torch.randn(n_codes, embedding_dim))
         self.register_buffer('N', torch.zeros(n_codes))
@@ -31,6 +33,7 @@ class Codebook(nn.Module):
         self.fp32_quant = fp32_quant
 
     def _tile(self, x):
+        """在样本数不足时重复并加少量噪声，满足码本初始化需要。"""
         d, ew = x.shape
         if d < self.n_codes:
             n_repeats = (self.n_codes + d - 1) // d
@@ -40,7 +43,7 @@ class Codebook(nn.Module):
         return x
 
     def _init_embeddings(self, z):
-        # z: [b, c, t, h, w]
+        """用当前 batch 的潜变量初始化码本向量。"""
         self._need_init = False
         flat_inputs = shift_dim(z, 1, -1).flatten(end_dim=-2)
         y = self._tile(flat_inputs)
@@ -52,50 +55,51 @@ class Codebook(nn.Module):
         self.embeddings.data.copy_(_k_rand)
         self.z_avg.data.copy_(_k_rand)
         self.N.data.copy_(torch.ones(self.n_codes))
-    
+
 
     def calculate_batch_codebook_usage_percentage(self, batch_encoding_indices):
-        # Flatten the batch of encoding indices into a single 1D tensor
+        """统计一个 batch 内每个码字的使用占比。"""
+        # 先把整批离散索引压成一维，便于做全局计数。
         all_indices = batch_encoding_indices.flatten()
-        
-        # Obtain the total number of encoding indices in the batch to calculate percentages
+
+        # 统计总 token 数，后续把计数换成百分比。
         total_indices = all_indices.numel()
-        
-        # Initialize a tensor to store the percentage usage of each code
+
+        # 预先分配每个码字的使用率槽位。
         codebook_usage_percentage = torch.zeros(self.n_codes, device=all_indices.device)
-        
-        # Count the number of occurrences of each index and get their frequency as percentages
+
+        # 统计每个离散索引出现了多少次。
         unique_indices, counts = torch.unique(all_indices, return_counts=True)
-        # Calculate the percentage
+        # 把次数换成占比。
         percentages = (counts.float() / total_indices)
-        
-        # Populate the corresponding percentages in the codebook_usage_percentage tensor
+
+        # 把非零占比写回对应码字位置。
         codebook_usage_percentage[unique_indices.long()] = percentages
-        
+
         return codebook_usage_percentage
-    
+
 
 
     def forward(self, z):
-        # z: [b, c, t, h, w]
+        """执行单尺度向量量化并返回码本统计信息。"""
         if self._need_init and self.training:
             self._init_embeddings(z)
-        flat_inputs = shift_dim(z, 1, -1).flatten(end_dim=-2) # [bthw, c]
-        
+        flat_inputs = shift_dim(z, 1, -1).flatten(end_dim=-2) # 把 `(B, C, T, H, W)` 展平为 token 列表。
+
         distances = (flat_inputs ** 2).sum(dim=1, keepdim=True) \
                     - 2 * flat_inputs @ self.embeddings.t() \
-                    + (self.embeddings.t() ** 2).sum(dim=0, keepdim=True) # [bthw, c]
+                    + (self.embeddings.t() ** 2).sum(dim=0, keepdim=True) # 这里对应平方欧氏距离展开式。
 
         encoding_indices = torch.argmin(distances, dim=1)
-        encode_onehot = F.one_hot(encoding_indices, self.n_codes).type_as(flat_inputs) # [bthw, ncode]
-        encoding_indices = encoding_indices.view(z.shape[0], *z.shape[2:]) # [b, t, h, w, ncode]
+        encode_onehot = F.one_hot(encoding_indices, self.n_codes).type_as(flat_inputs) # 代码/形状说明：[bthw, ncode]
+        encoding_indices = encoding_indices.view(z.shape[0], *z.shape[2:]) # 代码/形状说明：[b, t, h, w, ncode]
 
         embeddings = F.embedding(encoding_indices, self.embeddings) # [b, t, h, w, c]
         embeddings = shift_dim(embeddings, -1, 1) # [b, c, t, h, w]
 
         commitment_loss = 0.25 * F.mse_loss(z, embeddings.detach())
 
-        # EMA codebook update
+        # 使用 EMA 更新码本中心，避免每步都通过梯度直接改 embedding。
         if self.training:
             n_total = encode_onehot.sum(dim=0)
             encode_sum = flat_inputs.t() @ encode_onehot
@@ -129,9 +133,9 @@ class Codebook(nn.Module):
             usage = self.calculate_batch_codebook_usage_percentage(encoding_indices)
         except:
             usage = torch.zeros(self.n_codes, device=encoding_indices.device)
-        
 
-        # print(usage.shape, torch.zeros(self.n_codes).shape)
+
+        # 代码/形状说明：print(usage.shape, torch.zeros(self.n_codes).shape)
 
         if self.call_cnt == 0:
             self.codebook_usage.data = usage
@@ -139,75 +143,96 @@ class Codebook(nn.Module):
             self.codebook_usage.data = self.usage_sigma * self.codebook_usage.data + (1 - self.usage_sigma) * usage
 
         self.call_cnt += 1
-        # avg_distribution = self.codebook_usage.data.sum() / self.n_codes
+        # 代码/形状说明：avg_distribution = self.codebook_usage.data.sum() / self.n_codes
         avg_usage = (self.codebook_usage.data > (1/self.n_codes)).sum() / self.n_codes
-            
+
         return dict(embeddings=embeddings_st, encodings=encoding_indices,
                     commitment_loss=commitment_loss, perplexity=perplexity, avg_usage=avg_usage, batch_usage=usage)
 
     def dictionary_lookup(self, encodings):
+        """根据离散索引查回连续码本向量。"""
         embeddings = F.embedding(encodings, self.embeddings)
         return embeddings
-    
 
-# Multi-scale Codebook
+
+# 中文标题：多尺度 Codebook
 from typing import List, Optional, Tuple, Sequence, Union
 
 
 class ResConvAfterUpsample(nn.Conv3d):
+    """上采样后的量化残差卷积。"""
     def __init__(self, embed_dim, quant_resi):
+        """构造量化残差卷积头。"""
         ks = 3 if quant_resi < 0 else 1
         super().__init__(in_channels=embed_dim, out_channels=embed_dim, kernel_size=ks, stride=1, padding=ks//2)
         self.resi_ratio = abs(quant_resi)
-    
+
     def forward(self, h_BCthw):
+        """把卷积残差按比例混入上采样后的量化特征。"""
         return h_BCthw.mul(1-self.resi_ratio) + super().forward(h_BCthw).mul_(self.resi_ratio)
 
 
 class SharedResConvAfterUpsample(nn.Module):
+    """所有尺度共享同一个残差卷积头的包装器。"""
     def __init__(self, qresi: ResConvAfterUpsample):
+        """包装单个共享残差卷积头。"""
         super().__init__()
         self.qresi: ResConvAfterUpsample = qresi
-    
+
     def __getitem__(self, _) -> ResConvAfterUpsample:
+        """忽略索引，始终返回同一个残差卷积头。"""
         return self.qresi
 
 
 class ResConvAfterUpsampleList(nn.Module):
+    """按尺度位置选择残差卷积头的容器。"""
     def __init__(self, qresi_ls: nn.ModuleList):
+        """按比例位置选择不同的残差卷积头。"""
         super().__init__()
         self.qresi_ls = qresi_ls
         K = len(qresi_ls)
         self.ticks = np.linspace(1/3/K, 1-1/3/K, K) if K == 4 else np.linspace(1/2/K, 1-1/2/K, K)
-    
+
     def __getitem__(self, at_from_0_to_1: float) -> ResConvAfterUpsample:
+        """根据 `0~1` 的尺度位置返回最近的残差头。"""
         return self.qresi_ls[np.argmin(np.abs(self.ticks - at_from_0_to_1)).item()]
-    
+
     def extra_repr(self) -> str:
+        """打印每个残差头对应的尺度刻度。"""
         return f'ticks={self.ticks}'
 
 
 class ResConvAfterUpsampleModuleList(nn.ModuleList):
+    """`ModuleList` 形式的尺度残差卷积头容器。"""
     def __init__(self, qresi: List):
+        """`ModuleList` 版尺度残差头容器。"""
         super().__init__(qresi)
-        # self.qresi = qresi
+        # 代码/形状说明：self.qresi = qresi
         K = len(qresi)
         self.ticks = np.linspace(1/3/K, 1-1/3/K, K) if K == 4 else np.linspace(1/2/K, 1-1/2/K, K)
-    
+
     def __getitem__(self, at_from_0_to_1: float) -> ResConvAfterUpsample:
+        """根据尺度位置选择最近的模块。"""
         return super().__getitem__(np.argmin(np.abs(self.ticks - at_from_0_to_1)).item())
-    
+
     def extra_repr(self) -> str:
+        """打印每个模块对应的尺度刻度。"""
         return f'ticks={self.ticks}'
 
 class MultiScaleCodebook(nn.Module):
-    def __init__(self, n_codes, 
-                embedding_dim, no_random_restart=False, 
+    """多尺度码本。
+
+    它不是只在单一分辨率上找最近邻，而是在多个 `(T, H, W)` 尺度上逐步量化残差。
+    可以把它理解成“从粗到细”的离散重建：前面尺度先抓全局结构，后面尺度再补细节。
+    """
+    def __init__(self, n_codes,
+                embedding_dim, no_random_restart=False,
                 restart_thres=1.0, usage_sigma=0.99, fp32_quant=False,
                 quant_resi = -0.5, share_quant_resi = 4, default_qresi_counts = 10,
                 t_patch_nums = (1, 1, 2, 2, 2, 4, 4, 4, 4, 4),
                 v_patch_nums = (1, 2, 3, 4, 5, 6, 8, 10, 13, 16),
             ):
+        """构造多尺度量化器及其量化残差卷积头。"""
         super().__init__()
         self.register_buffer('embeddings', torch.randn(n_codes, embedding_dim))
         self.register_buffer('N', torch.zeros(n_codes))
@@ -225,25 +250,26 @@ class MultiScaleCodebook(nn.Module):
 
         self.fp32_quant = fp32_quant
 
-        # quant resi
+        # `quant_resi` 控制每个尺度在上采样后是否再走一层残差卷积做细修正。
 
         self.t_patch_nums = t_patch_nums
         self.v_patch_nums = v_patch_nums
         self.quant_resi_ratio = quant_resi
 
-        if share_quant_resi == 1:   # args.qsr
+        if share_quant_resi == 1:   # 中文说明：args.qsr
             self.quant_resi = SharedResConvAfterUpsample(ResConvAfterUpsample(embedding_dim, quant_resi) if abs(quant_resi) > 1e-6 else nn.Identity())
         elif share_quant_resi == 0:
             self.quant_resi = ResConvAfterUpsampleModuleList([(ResConvAfterUpsample(embedding_dim, quant_resi) if abs(quant_resi) > 1e-6 else nn.Identity()) for _ in range(default_qresi_counts or len(self.v_patch_nums))])
         else:
             self.quant_resi = ResConvAfterUpsampleList(nn.ModuleList([(ResConvAfterUpsample(embedding_dim, quant_resi) if abs(quant_resi) > 1e-6 else nn.Identity()) for _ in range(share_quant_resi)]))
-        
+
         self.z_interplote_down = 'area'
         self.z_interplote_up = 'trilinear'
 
 
 
     def _tile(self, x):
+        """在初始化阶段补足码本需要的样本数。"""
         d, ew = x.shape
         if d < self.n_codes:
             n_repeats = (self.n_codes + d - 1) // d
@@ -253,7 +279,7 @@ class MultiScaleCodebook(nn.Module):
         return x
 
     def _init_embeddings(self, z):
-        # z: [b, c, t, h, w]
+        """使用当前 batch 的潜变量初始化多尺度码本。"""
         self._need_init = False
         flat_inputs = shift_dim(z, 1, -1).flatten(end_dim=-2)
         y = self._tile(flat_inputs)
@@ -265,36 +291,36 @@ class MultiScaleCodebook(nn.Module):
         self.embeddings.data.copy_(_k_rand)
         self.z_avg.data.copy_(_k_rand)
         self.N.data.copy_(torch.ones(self.n_codes))
-    
+
 
     def calculate_batch_codebook_usage_percentage(self, batch_encoding_indices):
-        # Flatten the batch of encoding indices into a single 1D tensor
+        """统计一个 batch 在当前尺度下的码字使用占比。"""
         all_indices = batch_encoding_indices.flatten()
-        
-        # Obtain the total number of encoding indices in the batch to calculate percentages
+
         total_indices = all_indices.numel()
-        
-        # Initialize a tensor to store the percentage usage of each code
+
         codebook_usage_percentage = torch.zeros(self.n_codes, device=all_indices.device)
-        
-        # Count the number of occurrences of each index and get their frequency as percentages
+
         unique_indices, counts = torch.unique(all_indices, return_counts=True)
-        # Calculate the percentage
         percentages = (counts.float() / total_indices)
-        
-        # Populate the corresponding percentages in the codebook_usage_percentage tensor
+
         codebook_usage_percentage[unique_indices.long()] = percentages
-        
+
         return codebook_usage_percentage
-    
+
 
 
     def forward(self, z):
-        # z: [b, c, t, h, w]
+        """执行多尺度残差量化。
+
+        第 `si` 个尺度会先取出当前残差 `rest_z`，把它缩放到较粗尺度后做最近邻量化，
+        再上采样回原尺度并累加到 `accu_h`。因此 `accu_h` 可以理解为“到当前尺度为止的
+        累积重建”，其与原始 `z` 的差值就是下一尺度要继续编码的残差。
+        """
         if self._need_init and self.training:
             self._init_embeddings(z)
 
-        # Always keep the (T,H,W) structure. For nearest-neighbor search we flatten, then apply quant_res.
+        # 保留 `(T, H, W)` 结构做多尺度插值；仅在最近邻搜索时临时展平。
         B, C, T, H, W = z.shape
 
         z_no_grad = z.detach()
@@ -303,52 +329,50 @@ class MultiScaleCodebook(nn.Module):
 
         if self.training:
             all_flat_inputs, all_encode_onehot = [], []
-        
+
         commitment_loss = 0.0
         scale_num = len(self.v_patch_nums)
         ms_encoding_indices = []
 
 
         with torch.cuda.amp.autocast(enabled=False):
-            
-            for si, (tpn, pn) in enumerate(zip(self.t_patch_nums, self.v_patch_nums)):
-                tpn = min(tpn, T) 
 
-                # latents
+            for si, (tpn, pn) in enumerate(zip(self.t_patch_nums, self.v_patch_nums)):
+                tpn = min(tpn, T)
+
+                # 当前尺度要处理的是“原特征 - 已累计重建”的残差。
                 rest_z = z_no_grad - accu_h.data
 
-                if si != scale_num - 1:  # downsample z
+                if si != scale_num - 1:  # 非最后一层时，先缩到当前尺度。
                     rest_z = F.interpolate(rest_z, size=(tpn, pn, pn), mode=self.z_interplote_down)
-                
+
                 z_NC =  rest_z.permute(0, 2, 3, 4, 1).reshape(-1, C)
 
-                # Distances between rest_z (at this scale) and the codebook embeddings
+                # 计算当前尺度残差与所有码字的距离。
                 d_no_grad = torch.sum(z_NC.square(), dim=1, keepdim=True) + torch.sum(self.embeddings.square(), dim=1, keepdim=False)
-                d_no_grad.addmm_(z_NC, self.embeddings.t(), alpha=-2, beta=1)  
-                
-                # Convert to discrete ids
+                d_no_grad.addmm_(z_NC, self.embeddings.t(), alpha=-2, beta=1)
+
+                # 选取最近邻码字，得到离散索引。
                 encoding_indices = torch.argmin(d_no_grad, dim=1)
-                encode_onehot = F.one_hot(encoding_indices, self.n_codes).type_as(z_NC) # [bthw, ncode]
-                encoding_indices = encoding_indices.view(rest_z.shape[0], *rest_z.shape[2:]) # [b, t, h, w, ncode]
+                encode_onehot = F.one_hot(encoding_indices, self.n_codes).type_as(z_NC) # 代码/形状说明：[bthw, ncode]
+                encoding_indices = encoding_indices.view(rest_z.shape[0], *rest_z.shape[2:]) # 代码/形状说明：[b, t, h, w, ncode]
 
                 ms_encoding_indices.append(encoding_indices)
 
-                # Convert ids back to continuous embeddings (denoted as h_)
+                # 再把离散索引查回连续 embedding，得到当前尺度重建。
                 h_BTHWC = F.embedding(encoding_indices, self.embeddings)    # [b, t, h, w, c]
                 h_BCTHW = h_BTHWC.permute(0, 4, 1, 2, 3).contiguous()    # [b, c, t, h, w]
 
-                # up & quant resi
-                                
+                # 上采样回原始 latent 尺度，并可选做一层量化残差卷积修正。
                 h_BCTHW = F.interpolate(h_BCTHW, size=(T, H, W), mode=self.z_interplote_up).contiguous()
 
-                # Apply a quantization residual convolution
                 quant_head = si / max(1, (scale_num - 1))
                 h_BCTHW = self.quant_resi[quant_head](h_BCTHW)
 
-                # Accumulate h
+                # 累积到当前的整体重建中，供下一尺度继续编码残差。
                 accu_h = accu_h + h_BCTHW
 
-                commitment_loss += 0.25 * F.mse_loss(accu_h, z.detach())  # 0.25 is a beta coefficient
+                commitment_loss += 0.25 * F.mse_loss(accu_h, z.detach())  # 0.25 对应常见 VQ-VAE beta 系数。
 
                 if self.training:
                     all_flat_inputs.append(z_NC)
@@ -392,9 +416,9 @@ class MultiScaleCodebook(nn.Module):
             usage = self.calculate_batch_codebook_usage_percentage(encoding_indices)
         except:
             usage = torch.zeros(self.n_codes, device=encoding_indices.device)
-        
 
-        # print(usage.shape, torch.zeros(self.n_codes).shape)
+
+        # 代码/形状说明：print(usage.shape, torch.zeros(self.n_codes).shape)
 
         if self.call_cnt == 0:
             self.codebook_usage.data = usage
@@ -402,17 +426,17 @@ class MultiScaleCodebook(nn.Module):
             self.codebook_usage.data = self.usage_sigma * self.codebook_usage.data + (1 - self.usage_sigma) * usage
 
         self.call_cnt += 1
-        # avg_distribution = self.codebook_usage.data.sum() / self.n_codes
+        # 代码/形状说明：avg_distribution = self.codebook_usage.data.sum() / self.n_codes
         avg_usage = (self.codebook_usage.data > (1/self.n_codes)).sum() / self.n_codes
 
-        # print(f"training: {embeddings_st.size()=}, {encoding_indices.size()=}")
+        # 调试输出：print(f"训练中：{embeddings_st.size()=}, {encoding_indices.size()=}")
         # for idx, en_idx in enumerate(ms_encoding_indices):
-        #     print(f"{idx=}, {en_idx.size()=}", flush=True)
-            
+        # 代码/形状说明：print(f"{idx=}, {en_idx.size()=}", flush=True)
+
         return dict(embeddings=embeddings_st, encodings=ms_encoding_indices,
                     commitment_loss=commitment_loss, perplexity=perplexity, avg_usage=avg_usage, batch_usage=usage)
 
     def dictionary_lookup(self, encodings):
+        """根据离散索引反查码本向量。"""
         embeddings = F.embedding(encodings, self.embeddings)
         return embeddings
-

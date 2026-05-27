@@ -1,48 +1,54 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
-"""Custom operators."""
+"""自定义算子和小型网络模块。"""
 
 import torch
 import torch.nn as nn
 
 
 class Swish(nn.Module):
-    """Swish activation function: x * sigmoid(x)."""
+    """Swish 激活函数模块，计算公式为 ``x * sigmoid(x)``。"""
 
     def __init__(self):
+        """初始化 Swish 激活模块。"""
         super(Swish, self).__init__()
 
     def forward(self, x):
+        """对输入 ``x`` 应用节省显存的 Swish 实现。"""
         return SwishEfficient.apply(x)
 
 
 class SwishEfficient(torch.autograd.Function):
-    """Swish activation function: x * sigmoid(x)."""
+    """带自定义反向传播的 Swish 激活函数。"""
 
     @staticmethod
     def forward(ctx, x):
+        """前向计算 ``x * sigmoid(x)``，并保存 ``x`` 供反向传播使用。"""
         result = x * torch.sigmoid(x)
         ctx.save_for_backward(x)
         return result
 
     @staticmethod
     def backward(ctx, grad_output):
+        """根据 Swish 的导数把上游梯度传回输入。"""
         x = ctx.saved_variables[0]
         sigmoid_x = torch.sigmoid(x)
         return grad_output * (sigmoid_x * (1 + x * (1 - sigmoid_x)))
 
 
 class SE(nn.Module):
-    """Squeeze-and-Excitation (SE) block w/ Swish: AvgPool, FC, Swish, FC, Sigmoid."""
+    """Squeeze-and-Excitation (SE) 模块：AvgPool、FC、激活、FC、Sigmoid。"""
 
     def _round_width(self, width, multiplier, min_width=8, divisor=8):
         """
-        Round width of filters based on width multiplier
-        Args:
-            width (int): the channel dimensions of the input.
-            multiplier (float): the multiplication factor.
-            min_width (int): the minimum width after multiplication.
-            divisor (int): the new width should be dividable by divisor.
+                根据宽度倍率把通道数取整到 divisor 的倍数。
+
+                参数：
+                    width (int): 输入通道数。
+                    multiplier (float): 通道数缩放倍率。
+                    min_width (int): 缩放后的最小通道数。
+                    divisor (int): 新通道数需要能被该值整除。
+
         """
         if not multiplier:
             return width
@@ -58,12 +64,13 @@ class SE(nn.Module):
 
     def __init__(self, dim_in, ratio, relu_act=True):
         """
-        Args:
-            dim_in (int): the channel dimensions of the input.
-            ratio (float): the channel reduction ratio for squeeze.
-            relu_act (bool): whether to use ReLU activation instead
-                of Swish (default).
-            divisor (int): the new width should be dividable by divisor.
+                初始化 SE 模块中的池化、两层 1x1x1 卷积和激活函数。
+
+                参数：
+                    dim_in (int): 输入通道数。
+                    ratio (float): squeeze 阶段的通道压缩比例。
+                    relu_act (bool): 是否使用 ReLU；为 False 时使用 Swish。
+
         """
         super(SE, self).__init__()
         self.avg_pool = nn.AdaptiveAvgPool3d((1, 1, 1))
@@ -75,6 +82,7 @@ class SE(nn.Module):
         self.fc2_sig = nn.Sigmoid()
 
     def forward(self, x):
+        """计算 SE 权重，并把它乘回原始输入 ``x``。"""
         x_in = x
         for module in self.children():
             x = module(x)

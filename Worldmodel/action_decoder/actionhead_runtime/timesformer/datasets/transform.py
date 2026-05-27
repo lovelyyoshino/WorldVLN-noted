@@ -8,24 +8,9 @@ import torch
 def random_short_side_scale_jitter(
     images, min_size, max_size, boxes=None, inverse_uniform_sampling=False
 ):
-    """
-    Perform a spatial short scale jittering on the given images and
-    corresponding boxes.
-    Args:
-        images (tensor): images to perform scale jitter. Dimension is
-            `num frames` x `channel` x `height` x `width`.
-        min_size (int): the minimal size to scale the frames.
-        max_size (int): the maximal size to scale the frames.
-        boxes (ndarray): optional. Corresponding boxes to images.
-            Dimension is `num boxes` x 4.
-        inverse_uniform_sampling (bool): if True, sample uniformly in
-            [1 / max_scale, 1 / min_scale] and take a reciprocal to get the
-            scale. If False, take a uniform sample from [min_scale, max_scale].
-    Returns:
-        (tensor): the scaled images with dimension of
-            `num frames` x `channel` x `new height` x `new width`.
-        (ndarray or None): the scaled boxes with dimension of
-            `num boxes` x 4.
+    """对输入帧做短边随机缩放抖动，同时按相同比例更新检测框坐标。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
     """
     if inverse_uniform_sampling:
         size = int(
@@ -63,16 +48,9 @@ def random_short_side_scale_jitter(
 
 
 def crop_boxes(boxes, x_offset, y_offset):
-    """
-    Peform crop on the bounding boxes given the offsets.
-    Args:
-        boxes (ndarray or None): bounding boxes to peform crop. The dimension
-            is `num boxes` x 4.
-        x_offset (int): cropping offset in the x axis.
-        y_offset (int): cropping offset in the y axis.
-    Returns:
-        cropped_boxes (ndarray or None): the cropped boxes with dimension of
-            `num boxes` x 4.
+    """按照裁剪偏移量同步裁剪检测框坐标。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
     """
     cropped_boxes = boxes.copy()
     cropped_boxes[:, [0, 2]] = boxes[:, [0, 2]] - x_offset
@@ -82,19 +60,9 @@ def crop_boxes(boxes, x_offset, y_offset):
 
 
 def random_crop(images, size, boxes=None):
-    """
-    Perform random spatial crop on the given images and corresponding boxes.
-    Args:
-        images (tensor): images to perform random crop. The dimension is
-            `num frames` x `channel` x `height` x `width`.
-        size (int): the size of height and width to crop on the image.
-        boxes (ndarray or None): optional. Corresponding boxes to images.
-            Dimension is `num boxes` x 4.
-    Returns:
-        cropped (tensor): cropped images with dimension of
-            `num frames` x `channel` x `size` x `size`.
-        cropped_boxes (ndarray or None): the cropped boxes with dimension of
-            `num boxes` x 4.
+    """对视频帧执行随机空间裁剪，并同步处理对应的检测框。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
     """
     if images.shape[2] == size and images.shape[3] == size:
         return images, None
@@ -118,19 +86,9 @@ def random_crop(images, size, boxes=None):
 
 
 def horizontal_flip(prob, images, boxes=None):
-    """
-    Perform horizontal flip on the given images and corresponding boxes.
-    Args:
-        prob (float): probility to flip the images.
-        images (tensor): images to perform horizontal flip, the dimension is
-            `num frames` x `channel` x `height` x `width`.
-        boxes (ndarray or None): optional. Corresponding boxes to images.
-            Dimension is `num boxes` x 4.
-    Returns:
-        images (tensor): images with dimension of
-            `num frames` x `channel` x `height` x `width`.
-        flipped_boxes (ndarray or None): the flipped boxes with dimension of
-            `num boxes` x 4.
+    """按给定概率水平翻转视频帧，并同步翻转检测框坐标。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
     """
     if boxes is None:
         flipped_boxes = None
@@ -148,22 +106,9 @@ def horizontal_flip(prob, images, boxes=None):
 
 
 def uniform_crop(images, size, spatial_idx, boxes=None):
-    """
-    Perform uniform spatial sampling on the images and corresponding boxes.
-    Args:
-        images (tensor): images to perform uniform crop. The dimension is
-            `num frames` x `channel` x `height` x `width`.
-        size (int): size of height and weight to crop the images.
-        spatial_idx (int): 0, 1, or 2 for left, center, and right crop if width
-            is larger than height. Or 0, 1, or 2 for top, center, and bottom
-            crop if height is larger than width.
-        boxes (ndarray or None): optional. Corresponding boxes to images.
-            Dimension is `num boxes` x 4.
-    Returns:
-        cropped (tensor): images with dimension of
-            `num frames` x `channel` x `size` x `size`.
-        cropped_boxes (ndarray or None): the cropped boxes with dimension of
-            `num boxes` x 4.
+    """按照左/中/右或上/中/下位置做确定性的均匀裁剪。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
     """
     assert spatial_idx in [0, 1, 2]
     height = images.shape[2]
@@ -194,22 +139,9 @@ def uniform_crop(images, size, spatial_idx, boxes=None):
 
 
 def uniform_crop_2crops(images, size, spatial_idx, boxes=None):
-    """
-    Perform uniform spatial sampling on the images and corresponding boxes.
-    Args:
-        images (tensor): images to perform uniform crop. The dimension is
-            `num frames` x `channel` x `height` x `width`.
-        size (int): size of height and weight to crop the images.
-        spatial_idx (int): 0, 1, or 2 for left, center, and right crop if width
-            is larger than height. Or 0, 1, or 2 for top, center, and bottom
-            crop if height is larger than width.
-        boxes (ndarray or None): optional. Corresponding boxes to images.
-            Dimension is `num boxes` x 4.
-    Returns:
-        cropped (tensor): images with dimension of
-            `num frames` x `channel` x `size` x `size`.
-        cropped_boxes (ndarray or None): the cropped boxes with dimension of
-            `num boxes` x 4.
+    """为测试阶段生成两个确定性空间裁剪视角。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
     """
     assert spatial_idx in [0, 1, 2]
     height = images.shape[2]
@@ -252,16 +184,9 @@ def uniform_crop_2crops(images, size, spatial_idx, boxes=None):
     return cropped, cropped_boxes
 
 def clip_boxes_to_image(boxes, height, width):
-    """
-    Clip an array of boxes to an image with the given height and width.
-    Args:
-        boxes (ndarray): bounding boxes to perform clipping.
-            Dimension is `num boxes` x 4.
-        height (int): given image height.
-        width (int): given image width.
-    Returns:
-        clipped_boxes (ndarray): the clipped boxes with dimension of
-            `num boxes` x 4.
+    """把检测框坐标限制在图像边界内，避免越界坐标进入评估或训练。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
     """
     clipped_boxes = boxes.copy()
     clipped_boxes[:, [0, 2]] = np.minimum(
@@ -274,33 +199,19 @@ def clip_boxes_to_image(boxes, height, width):
 
 
 def blend(images1, images2, alpha):
-    """
-    Blend two images with a given weight alpha.
-    Args:
-        images1 (tensor): the first images to be blended, the dimension is
-            `num frames` x `channel` x `height` x `width`.
-        images2 (tensor): the second images to be blended, the dimension is
-            `num frames` x `channel` x `height` x `width`.
-        alpha (float): the blending weight.
-    Returns:
-        (tensor): blended images, the dimension is
-            `num frames` x `channel` x `height` x `width`.
+    """按 alpha 权重混合两张图像，是亮度、对比度等增强的基础操作。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
     """
     return images1 * alpha + images2 * (1 - alpha)
 
 
 def grayscale(images):
+    """把 RGB 图像转换为灰度图，再复制回三通道形状。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
     """
-    Get the grayscale for the input images. The channels of images should be
-    in order BGR.
-    Args:
-        images (tensor): the input images for getting grayscale. Dimension is
-            `num frames` x `channel` x `height` x `width`.
-    Returns:
-        img_gray (tensor): blended images, the dimension is
-            `num frames` x `channel` x `height` x `width`.
-    """
-    # R -> 0.299, G -> 0.587, B -> 0.114.
+    # 红色通道权重为 0.299，绿色为 0.587，蓝色为 0.114。
     img_gray = torch.tensor(images)
     gray_channel = (
         0.299 * images[:, 2] + 0.587 * images[:, 1] + 0.114 * images[:, 0]
@@ -312,18 +223,9 @@ def grayscale(images):
 
 
 def color_jitter(images, img_brightness=0, img_contrast=0, img_saturation=0):
-    """
-    Perfrom a color jittering on the input images. The channels of images
-    should be in order BGR.
-    Args:
-        images (tensor): images to perform color jitter. Dimension is
-            `num frames` x `channel` x `height` x `width`.
-        img_brightness (float): jitter ratio for brightness.
-        img_contrast (float): jitter ratio for contrast.
-        img_saturation (float): jitter ratio for saturation.
-    Returns:
-        images (tensor): the jittered images, the dimension is
-            `num frames` x `channel` x `height` x `width`.
+    """组合亮度、对比度、饱和度等颜色扰动，用于训练数据增强。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
     """
 
     jitter = []
@@ -347,16 +249,9 @@ def color_jitter(images, img_brightness=0, img_contrast=0, img_saturation=0):
 
 
 def brightness_jitter(var, images):
-    """
-    Perfrom brightness jittering on the input images. The channels of images
-    should be in order BGR.
-    Args:
-        var (float): jitter ratio for brightness.
-        images (tensor): images to perform color jitter. Dimension is
-            `num frames` x `channel` x `height` x `width`.
-    Returns:
-        images (tensor): the jittered images, the dimension is
-            `num frames` x `channel` x `height` x `width`.
+    """对图像亮度做随机扰动。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
     """
     alpha = 1.0 + np.random.uniform(-var, var)
 
@@ -366,16 +261,9 @@ def brightness_jitter(var, images):
 
 
 def contrast_jitter(var, images):
-    """
-    Perfrom contrast jittering on the input images. The channels of images
-    should be in order BGR.
-    Args:
-        var (float): jitter ratio for contrast.
-        images (tensor): images to perform color jitter. Dimension is
-            `num frames` x `channel` x `height` x `width`.
-    Returns:
-        images (tensor): the jittered images, the dimension is
-            `num frames` x `channel` x `height` x `width`.
+    """对图像对比度做随机扰动。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
     """
     alpha = 1.0 + np.random.uniform(-var, var)
 
@@ -386,16 +274,9 @@ def contrast_jitter(var, images):
 
 
 def saturation_jitter(var, images):
-    """
-    Perfrom saturation jittering on the input images. The channels of images
-    should be in order BGR.
-    Args:
-        var (float): jitter ratio for saturation.
-        images (tensor): images to perform color jitter. Dimension is
-            `num frames` x `channel` x `height` x `width`.
-    Returns:
-        images (tensor): the jittered images, the dimension is
-            `num frames` x `channel` x `height` x `width`.
+    """对图像饱和度做随机扰动。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
     """
     alpha = 1.0 + np.random.uniform(-var, var)
     img_gray = grayscale(images)
@@ -405,21 +286,13 @@ def saturation_jitter(var, images):
 
 
 def lighting_jitter(images, alphastd, eigval, eigvec):
-    """
-    Perform AlexNet-style PCA jitter on the given images.
-    Args:
-        images (tensor): images to perform lighting jitter. Dimension is
-            `num frames` x `channel` x `height` x `width`.
-        alphastd (float): jitter ratio for PCA jitter.
-        eigval (list): eigenvalues for PCA jitter.
-        eigvec (list[list]): eigenvectors for PCA jitter.
-    Returns:
-        out_images (tensor): the jittered images, the dimension is
-            `num frames` x `channel` x `height` x `width`.
+    """按照 PCA 特征方向添加 AlexNet 风格的 lighting 噪声。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
     """
     if alphastd == 0:
         return images
-    # generate alpha1, alpha2, alpha3.
+    # 生成 alpha1、alpha2、alpha3。
     alpha = np.random.normal(0, alphastd, size=(1, 3))
     eig_vec = np.array(eigvec)
     eig_val = np.reshape(eigval, (1, 3))
@@ -435,22 +308,14 @@ def lighting_jitter(images, alphastd, eigval, eigvec):
 
 
 def color_normalization(images, mean, stddev):
-    """
-    Perform color nomration on the given images.
-    Args:
-        images (tensor): images to perform color normalization. Dimension is
-            `num frames` x `channel` x `height` x `width`.
-        mean (list): mean values for normalization.
-        stddev (list): standard deviations for normalization.
+    """按通道均值和标准差归一化图像张量。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
 
-    Returns:
-        out_images (tensor): the noramlized images, the dimension is
-            `num frames` x `channel` x `height` x `width`.
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
     """
-    assert len(mean) == images.shape[1], "channel mean not computed properly"
+    assert len(mean) == images.shape[1], "通道均值计算不正确"
     assert (
         len(stddev) == images.shape[1]
-    ), "channel stddev not computed properly"
+    ), "通道标准差计算不正确"
 
     out_images = torch.zeros_like(images)
     for idx in range(len(mean)):

@@ -1,21 +1,20 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
-"""Learning rate policy."""
+"""学习率策略。"""
 
 import math
 
 
 def get_lr_at_epoch(cfg, cur_epoch):
     """
-    Retrieve the learning rate of the current epoch with the option to perform
-    warm up in the beginning of the training stage.
-    Args:
-        cfg (CfgNode): configs. Details can be found in
-            slowfast/config/defaults.py
-        cur_epoch (float): the number of epoch of the current training stage.
+    获取当前 epoch 的学习率，并在训练初期按需执行预热。
+
+    参数：
+        cfg (CfgNode): 配置对象，细节见 `slowfast/config/defaults.py`。
+        cur_epoch (float): 当前训练阶段的 epoch 编号。
     """
     lr = get_lr_func(cfg.SOLVER.LR_POLICY)(cfg, cur_epoch)
-    # Perform warm up.
+    # 执行预热。
     if cur_epoch < cfg.SOLVER.WARMUP_EPOCHS:
         lr_start = cfg.SOLVER.WARMUP_START_LR
         lr_end = get_lr_func(cfg.SOLVER.LR_POLICY)(
@@ -28,14 +27,16 @@ def get_lr_at_epoch(cfg, cur_epoch):
 
 def lr_func_cosine(cfg, cur_epoch):
     """
-    Retrieve the learning rate to specified values at specified epoch with the
-    cosine learning rate schedule. Details can be found in:
-    Ilya Loshchilov, and  Frank Hutter
-    SGDR: Stochastic Gradient Descent With Warm Restarts.
-    Args:
-        cfg (CfgNode): configs. Details can be found in
-            slowfast/config/defaults.py
-        cur_epoch (float): the number of epoch of the current training stage.
+        按余弦学习率调度计算指定 epoch 的学习率。
+
+        具体形式可参考：
+        说明：Ilya Loshchilov, and  Frank Hutter
+        说明：SGDR: Stochastic Gradient Descent With Warm Restarts.
+
+        参数：
+            cfg (CfgNode): 配置对象，细节见 `slowfast/config/defaults.py`。
+            cur_epoch (float): 当前训练阶段的 epoch 编号。
+
     """
     assert cfg.SOLVER.COSINE_END_LR < cfg.SOLVER.BASE_LR
     return (
@@ -48,12 +49,11 @@ def lr_func_cosine(cfg, cur_epoch):
 
 def lr_func_steps_with_relative_lrs(cfg, cur_epoch):
     """
-    Retrieve the learning rate to specified values at specified epoch with the
-    steps with relative learning rate schedule.
-    Args:
-        cfg (CfgNode): configs. Details can be found in
-            slowfast/config/defaults.py
-        cur_epoch (float): the number of epoch of the current training stage.
+    按分段相对学习率策略计算指定 epoch 的学习率。
+
+    参数：
+        cfg (CfgNode): 配置对象，细节见 `slowfast/config/defaults.py`。
+        cur_epoch (float): 当前训练阶段的 epoch 编号。
     """
     ind = get_step_index(cfg, cur_epoch)
     return cfg.SOLVER.LRS[ind] * cfg.SOLVER.BASE_LR
@@ -61,11 +61,11 @@ def lr_func_steps_with_relative_lrs(cfg, cur_epoch):
 
 def get_step_index(cfg, cur_epoch):
     """
-    Retrieves the lr step index for the given epoch.
-    Args:
-        cfg (CfgNode): configs. Details can be found in
-            slowfast/config/defaults.py
-        cur_epoch (float): the number of epoch of the current training stage.
+    获取给定 epoch 对应的学习率 step 索引。
+
+    参数：
+        cfg (CfgNode): 配置对象，细节见 `slowfast/config/defaults.py`。
+        cur_epoch (float): 当前训练阶段的 epoch 编号。
     """
     steps = cfg.SOLVER.STEPS + [cfg.SOLVER.MAX_EPOCH]
     for ind, step in enumerate(steps):  # NoQA
@@ -76,12 +76,13 @@ def get_step_index(cfg, cur_epoch):
 
 def get_lr_func(lr_policy):
     """
-    Given the configs, retrieve the specified lr policy function.
-    Args:
-        lr_policy (string): the learning rate policy to use for the job.
+    根据策略名返回对应的学习率函数。
+
+    参数：
+        lr_policy (string): 当前任务使用的学习率策略名称。
     """
     policy = "lr_func_" + lr_policy
     if policy not in globals():
-        raise NotImplementedError("Unknown LR policy: {}".format(lr_policy))
+        raise NotImplementedError("未知学习率策略：{}".format(lr_policy))
     else:
         return globals()[policy]

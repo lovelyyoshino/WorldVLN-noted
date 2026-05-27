@@ -1,20 +1,31 @@
 """
-Stage-2 latent-to-action batch inference for UAV-Flow-style route folders.
+面向 UAV-Flow 风格 route 目录的 Stage-2 latent-to-action 批量推理脚本。
 
-Inputs per route dir:
-- latents.pt (Tensor shaped (1,64,T_lat,16,16))
-- preprocessed_logs.json (list of length T, each [x,y,z,roll,yaw,pitch]; angles
-  in degrees by default, translation unit controlled by --translation_divisor)
+中文导读：
+这个脚本用于离线验证 Stage-2 动作头，不经过在线 FastAPI 服务。它直接读取每条 route 的
+`latents.pt` 和 GT 初始位姿，用训练好的 adapter+TimesFormer checkpoint 预测每个相邻帧的
+6D delta action，再把 delta 积分成绝对轨迹。
 
-Pass --ckpt explicitly, or set --stage2_root to a directory containing run
-subdirectories with checkpoint_last.pth files.
+阅读主线：
+1. `main()` 加载 checkpoint、VAE、adapter、TimesFormer，并发现 route 列表。
+2. `infer_one_route()` 处理单条 route：latent -> VAE decoder hook -> tokens -> 滑窗动作。
+3. `_decode_tokens_full_T()` 解释为什么这里调用 VAE decode 但真正使用的是 decoder 中间特征。
+4. `integrate_trajectory_se3()` 把相对动作按 SE(3) 连乘成绝对 `[roll,yaw,pitch,x,y,z]`。
 
-Outputs per route:
-- deltas.npy: (T,6) where each step is [dz,dy,dx,tx,ty,tz] (rad + meters), delta[0]=0
-- window_deltas.npy: (N,3,6) per sliding window
-- trajectory.npy / trajectory.json: (T,6) absolute [roll,yaw,pitch,x,y,z] (rad + meters)
-- pred_path.json / pred_actions.json: compatible-style outputs containing actions6 and integrated trajectory
-- metrics.json (optional): RMSE vs preprocessed_logs after unit conversion
+每个 route 目录的输入：
+- latents.pt（Tensor shape 为 (1,64,T_lat,16,16)）
+- preprocessed_logs.json（长度为 T 的列表，每行 [x,y,z,roll,yaw,pitch]；角度默认
+  是 degrees，平移单位由 --translation_divisor 控制）
+
+可以显式传 --ckpt，也可以把 --stage2_root 指到包含多个 run 子目录的目录，
+脚本会在其中寻找 checkpoint_last.pth。
+
+每个 route 的输出：
+- deltas.npy: (T,6)，每步为 [dz,dy,dx,tx,ty,tz]（rad + meters），delta[0]=0
+- window_deltas.npy: (N,3,6)，每个滑窗的 3 个动作预测
+- trajectory.npy / trajectory.json: (T,6) 绝对 [roll,yaw,pitch,x,y,z]（rad + meters）
+- pred_path.json / pred_actions.json: 兼容旧格式的输出，包含 actions6 和积分后的轨迹
+- metrics.json（可选）：做单位转换后与 preprocessed_logs 对齐计算 RMSE
 """
 
 import argparse
@@ -50,6 +61,7 @@ except Exception:  # pragma: no cover
     from types import SimpleNamespace
 
     def _add_infinitystar_to_syspath(inf_root: Optional[str], proj_root: str):
+        """兜底导入工具：把 InfinityStar runtime 路径加入 sys.path。"""
         if inf_root and os.path.isdir(inf_root):
             p = os.path.abspath(inf_root)
             if p not in sys.path:
@@ -82,6 +94,7 @@ except Exception:  # pragma: no cover
         use_feat_proj: int,
         semantic_scales: int,
     ):
+        """兜底 VAE 加载器：按 Stage-2 checkpoint 记录的 VAE 参数构建 video VAE。"""
         _add_infinitystar_to_syspath(infinitystar_root, proj_root=proj_root)
         from infinity.models.videovae.models.load_vae_bsq_wan_absorb_patchify import (  # type: ignore
             video_vae_model,
@@ -109,7 +122,18 @@ except Exception:  # pragma: no cover
 
 
 def build_tsformer() -> VisionTransformer:
-    # Keep consistent with stage2 training.
+    """
+    构建 Stage-2 latent-to-action 使用的 4 帧 TimesFormer 动作头。
+
+    关键原因：
+    Stage-2 训练时每个窗口看 4 帧，因此会预测 3 个相邻帧转移；
+    每个转移是 6 维动作，所以 head 输出维度固定为 `3 * 6 = 18`。
+
+    注意：
+    这里的结构必须和 Stage-2 训练脚本中的 TimesFormer 完全一致，否则 checkpoint
+    即使能 `strict=False` 加载，动作头语义也可能错位。
+    """
+    # 必须和 Stage-2 训练脚本中的 TimesFormer 结构保持一致，否则 checkpoint 无法正确加载。
     from functools import partial
 
     return VisionTransformer(
@@ -131,9 +155,10 @@ def build_tsformer() -> VisionTransformer:
 
 
 def _find_latest_stage2_checkpoint(stage2_root: str) -> str:
+    """当用户没有显式传 --ckpt 时，从 run 目录里找最新的 checkpoint_last.pth。"""
     root = os.path.abspath(stage2_root)
     if not os.path.isdir(root):
-        raise FileNotFoundError(f"stage2_root not found: {root}")
+        raise FileNotFoundError(f"找不到 stage2_root 目录：{root}")
 
     best_p = None
     best_m = -1.0
@@ -153,11 +178,12 @@ def _find_latest_stage2_checkpoint(stage2_root: str) -> str:
             best_p = p
 
     if best_p is None:
-        raise FileNotFoundError(f"no checkpoint_last.pth found under {root}")
+        raise FileNotFoundError(f"在 {root} 下没有找到 checkpoint_last.pth")
     return best_p
 
 
 def _load_latents(path: str) -> torch.Tensor:
+    """读取 route 的 latent；兼容原始 Tensor 和 {"latents": Tensor} 两种保存格式。"""
     try:
         obj = torch.load(path, map_location="cpu", weights_only=True)
     except TypeError:
@@ -167,33 +193,45 @@ def _load_latents(path: str) -> torch.Tensor:
     else:
         z = obj
     if not isinstance(z, torch.Tensor) or z.ndim != 5:
-        raise ValueError(f"latents must be a 5D Tensor, got {type(z)} shape={getattr(z,'shape',None)} at {path}")
+        raise ValueError(f"latents 必须是 5D Tensor，在 {path} 收到的是 {type(z)}，形状={getattr(z,'shape',None)}")
     return z.float().contiguous()
 
 def _safe_torch_load(path: str):
+    """
+    兼容 PyTorch 2.6 `weights_only=True` 默认行为的 checkpoint 加载函数。
+
+    中文说明：
+    新版 PyTorch 会默认把 `torch.load()` 当成“只加载权重 tensor”，这对只含 state_dict
+    的纯权重文件很好，但某些 Stage-2 checkpoint 里还带有 `numpy` 元数据
+    （例如 `label_stats`），此时就需要回退到 `weights_only=False`。
+    """
     try:
         return torch.load(path, map_location="cpu", weights_only=True)
     except TypeError:
         return torch.load(path, map_location="cpu")
     except Exception:
-        # PyTorch >= 2.6 defaults torch.load(..., weights_only=True), which can
-        # reject checkpoints that store numpy metadata (for example label_stats).
+        # PyTorch >= 2.6 默认 torch.load(..., weights_only=True)，
+        # 可能拒绝带 numpy 元数据的 checkpoint（例如 label_stats）。
         return torch.load(path, map_location="cpu", weights_only=False)
 
 
 def _load_preprocessed_traj(path: str) -> np.ndarray:
+    """读取 route 绝对轨迹日志，返回前 6 列 `[x,y,z,roll,yaw,pitch]`。"""
     with open(path, "r") as f:
         arr = json.load(f)
     traj = np.asarray(arr, dtype=np.float32)
     if traj.ndim != 2 or traj.shape[1] < 6:
-        raise ValueError(f"preprocessed traj must be (T,6+) at {path}, got shape={traj.shape}")
+        raise ValueError(f"预处理后的轨迹必须是 (T,6+) 形状，在 {path} 收到的是 {traj.shape}")
     return traj[:, :6]
 
 
 def _find_traj_json(route_dir: str) -> str:
     """
-    Regenerated/resampled routes may use different filenames.
-    Prefer the legacy name when it exists.
+    重新生成或重采样的 route 可能使用不同文件名。
+    如果旧文件名存在，则优先使用旧文件名。
+
+    中文说明：不同预处理脚本可能写 `preprocessed_logs.json` 或 `processed_logs.json`；
+    二者都表示每帧绝对位姿，后续会裁成前 6 维。
     """
     cand = [
         os.path.join(route_dir, "preprocessed_logs.json"),
@@ -202,10 +240,11 @@ def _find_traj_json(route_dir: str) -> str:
     for p in cand:
         if os.path.exists(p):
             return p
-    raise FileNotFoundError(f"missing trajectory json under {route_dir}: tried {cand}")
+    raise FileNotFoundError(f"route 目录缺少轨迹 json：{route_dir}；已尝试 {cand}")
 
 
 def _sample_all_window_starts(T: int, window_size: int, stride: int, device: torch.device) -> torch.Tensor:
+    """生成 4 帧 TimesFormer 窗口的起点；stride=1 时覆盖所有相邻窗口。"""
     max_start = int(T - window_size)
     if max_start < 0:
         return torch.empty((0,), device=device, dtype=torch.long)
@@ -214,31 +253,57 @@ def _sample_all_window_starts(T: int, window_size: int, stride: int, device: tor
 
 def _gather_window_tokens(tokens_tnd: torch.Tensor, starts: torch.Tensor, window_size: int) -> torch.Tensor:
     """
-    tokens_tnd: (T,N,D)
-    starts: (K,)
-    returns patch_tokens: (K*window_size, N, D)
+    按滑窗起点收集 TimesFormer 所需的 patch tokens。
+
+    输入：
+    - `tokens_tnd`：形状 `(T,N,D)`，表示整条 route 的逐帧 patch token；
+    - `starts`：形状 `(K,)`，表示 K 个滑窗的起始帧下标；
+    - `window_size`：窗口长度，Stage-2 默认是 4。
+
+    输出：
+    - `patch_tokens`：形状 `(K*window_size, N, D)`。
+
+    中文说明：
+    TimesFormer 的 `forward_features_from_patch_tokens()` 不直接接收
+    `(K,window_size,N,D)`，而是要求先把 K 个窗口拍平为 `(K*window_size,N,D)`，
+    然后通过参数 `B=K,T=window_size,W=40` 再还原时空结构。
+
     """
     T, N, D = tokens_tnd.shape
     K = int(starts.shape[0])
     flat = tokens_tnd.view(T, N * D)
     t_idx = torch.arange(window_size, device=starts.device, dtype=torch.long).view(1, window_size)
-    idx = starts.view(K, 1) + t_idx  # (K,window_size)
+    idx = starts.view(K, 1) + t_idx  # 代码/形状说明：(K,window_size)
     idx2 = idx.view(K * window_size, 1).expand(K * window_size, N * D)
     g = flat.gather(0, idx2).view(K * window_size, N, D)
     return g.contiguous()
 
 
 def _R_from_rpy(roll: float, yaw: float, pitch: float) -> np.ndarray:
+    """按 ZYX 顺序从 roll/yaw/pitch 构造旋转矩阵。"""
     return np.asarray(euler_to_rotation(z=yaw, y=pitch, x=roll, isRadian=True, seq="zyx"), dtype=np.float32)
 
 
 def _rpy_from_R(R: np.ndarray) -> np.ndarray:
-    zyx = rotation_to_euler(R, seq="zyx")  # [yaw,pitch,roll]
+    """把旋转矩阵转回 `[roll,yaw,pitch]`。"""
+    zyx = rotation_to_euler(R, seq="zyx")  # 代码/形状说明：[yaw,pitch,roll]
     yaw, pitch, roll = float(zyx[0]), float(zyx[1]), float(zyx[2])
     return np.asarray([roll, yaw, pitch], dtype=np.float32)
 
 
 def integrate_trajectory_se3(deltas_zyx: np.ndarray, init_rpy_rad: np.ndarray, init_pos_m: np.ndarray) -> np.ndarray:
+    """
+    将每帧相对动作积分为绝对轨迹。
+
+    `deltas_zyx[i] = [dz,dy,dx,tx,ty,tz]`，其中旋转是上一帧坐标系下的 ZYX Euler 增量，
+    平移 `t_rel` 也在上一帧坐标系下。因此积分时先 `p = p + R @ t_rel`，再 `R = R @ R_rel`。
+
+    初学者公式：
+    - `R_rel = Rz(dz) @ Ry(dy) @ Rx(dx)`，表示从上一帧到当前帧的小旋转；
+    - `p_i = p_{i-1} + R_{i-1} @ [tx,ty,tz]`，先把局部平移转到世界坐标再累加；
+    - `R_i = R_{i-1} @ R_rel`，把相对旋转接到当前绝对姿态后面；
+    - 输出 `traj[i] = [Euler(R_i), p_i]`，即 `[roll,yaw,pitch,x,y,z]`。
+    """
     t = int(deltas_zyx.shape[0])
     traj = np.zeros((t, 6), dtype=np.float32)
 
@@ -261,6 +326,7 @@ def integrate_trajectory_se3(deltas_zyx: np.ndarray, init_rpy_rad: np.ndarray, i
 
 
 def rmse(a: np.ndarray, b: np.ndarray) -> float:
+    """计算均方根误差，用于可选 metrics.json。"""
     return float(np.sqrt(np.mean((a - b) ** 2)))
 
 
@@ -272,27 +338,34 @@ def _decode_tokens_full_T(
     amp_enabled: bool,
 ) -> Tuple[torch.Tensor, int]:
     """
-    Returns:
-      tokens_tnd: (T,N,D) on same device
-      T: int
+    返回：
+      `tokens_tnd`：形状 `(T,N,D)`。，保持在同一个 device 上
+      T
+
+    中文说明：
+    Stage-2 动作头需要 TimesFormer patch token，不需要 RGB 重建结果。
+    所以这里给 VAE decoder 注册 forward hook，捕获最后一个 up_block 的 `(B,96,t,H,W)`
+    中间特征，再交给 `Vae96ToTSformerEmbedAdapter` 变成 `(T,N,D)`。
     """
     if z_ext.ndim != 5 or int(z_ext.shape[0]) != 1:
-        raise ValueError(f"expected z_ext shape (1,64,T_lat,16,16), got {tuple(z_ext.shape)}")
+        raise ValueError(f"期望 z_ext 形状是 (1,64,T_lat,16,16)，收到的是 {tuple(z_ext.shape)}")
 
     tokens_slices: List[torch.Tensor] = []
     T_acc = 0
 
     def hook(_module, _inp, out):
+        """VAE decoder hook：收集每个时间切片的 up_block feature 并转成 tokens。"""
         nonlocal tokens_slices, T_acc
-        hs = out[0] if isinstance(out, (tuple, list)) else out  # (B,96,t_slice,H,W)
+        # VAE 可能按时间切片 decode；hook 每触发一次就收集一个 t_slice，最后按时间拼回完整 T。
+        hs = out[0] if isinstance(out, (tuple, list)) else out  # 代码/形状说明：(B,96,t_slice,H,W)
         if not isinstance(hs, torch.Tensor) or hs.ndim != 5:
-            raise RuntimeError("up_block_3 hook output is not a 5D Tensor")
+            raise RuntimeError("VAE 最后一个 up block 的 hook 输出不是 5D Tensor")
         Bh = int(hs.shape[0])
         if Bh != 1:
-            raise RuntimeError(f"unexpected VAE batch in hook: hs={tuple(hs.shape)}")
+            raise RuntimeError(f"VAE hook 收到非预期 batch 维度：hs={tuple(hs.shape)}")
         t_slice = int(hs.shape[2])
-        tok, _t2, _w2 = adapter(hs)  # (Bh*t_slice,N,D)
-        tok = tok.view(Bh, t_slice, tok.shape[1], tok.shape[2]).contiguous()  # (1,t_slice,N,D)
+        tok, _t2, _w2 = adapter(hs)  # 代码/形状说明：(Bh*t_slice,N,D)
+        tok = tok.view(Bh, t_slice, tok.shape[1], tok.shape[2]).contiguous()  # 代码/形状说明：(1,t_slice,N,D)
         tokens_slices.append(tok[0])
         T_acc += t_slice
 
@@ -327,6 +400,23 @@ def infer_one_route(
     compute_metrics: bool,
     label_stats: Optional[Dict[str, np.ndarray]] = None,
 ):
+    """
+    对一条 route 做离线 Stage-2 推理并写出多种兼容格式。
+
+    输入：
+    - `latents.pt`: 世界模型或预处理得到的 latent 序列；
+    - `preprocessed_logs.json`: 只用第 0 帧作为积分初始位姿，指标计算时才用完整 GT。
+
+    输出：
+    - `pred_actions.json`: 下游评估优先读取的相对动作 `[dz,dy,dx,tx,ty,tz]`；
+    - `pred_path.json`: 已积分的绝对轨迹 `[roll,yaw,pitch,x,y,z]`；
+    - `trajectory_m_deg.*` / `actions6_m_deg.*`: 便于和 GT `[x,y,z,roll,yaw,pitch]` 人工对齐。
+
+    推荐阅读顺序：
+    1. 先看 `z_ext -> tokens_tnd`，理解 latent 为什么还能恢复动作；
+    2. 再看 4 帧滑窗如何得到 `window_deltas`；
+    3. 最后看 `integrate_trajectory_se3()`，理解相对动作如何累计成整条轨迹。
+    """
     lat_path = os.path.join(route_dir, "latents.pt")
     if not os.path.exists(lat_path):
         return False
@@ -336,7 +426,7 @@ def infer_one_route(
         return False
 
     z_ext = _load_latents(lat_path).to(device)
-    traj_abs = _load_preprocessed_traj(traj_path)  # (T,6) = [x,y,z,roll,yaw,pitch] (deg)
+    traj_abs = _load_preprocessed_traj(traj_path)  # 代码/形状说明：(T,6) = [x,y,z,roll,yaw,pitch] (deg)
     T = int(traj_abs.shape[0])
     if T < 4:
         return False
@@ -358,12 +448,15 @@ def infer_one_route(
     W_grid = 40
     with torch.no_grad():
         with torch.cuda.amp.autocast(enabled=bool(amp) and torch.cuda.is_available()):
+            # 每个 4 帧窗口输出 18 维，即 3 个相邻动作增量 * 每个增量 6 维。
             feat = tsformer.forward_features_from_patch_tokens(patch_tokens, B=K, T=window_size, W=W_grid)
             pred = tsformer.head(feat)  # (K,18)
 
     pred_f = pred.detach().float()  # (K,18)
     if isinstance(label_stats, dict) and all(k in label_stats for k in ("mean_angles", "std_angles", "mean_t", "std_t")):
-        # Denormalize to (rad, meters) so downstream evaluation stays consistent.
+        # 反标准化回 (rad, meters)，保证后续评估单位一致。
+        # 角度组公式：x_angle = x_norm_angle * std_angles + mean_angles。
+        # 平移组公式：x_trans = x_norm_trans * std_t + mean_t。
         ma = torch.as_tensor(label_stats["mean_angles"], dtype=torch.float32, device=pred_f.device).view(1, 1, 3)
         sa = torch.as_tensor(label_stats["std_angles"], dtype=torch.float32, device=pred_f.device).view(1, 1, 3)
         mt = torch.as_tensor(label_stats["mean_t"], dtype=torch.float32, device=pred_f.device).view(1, 1, 3)
@@ -375,7 +468,11 @@ def infer_one_route(
     else:
         window_deltas = pred_f.cpu().numpy().reshape(K, 3, 6).astype(np.float32)  # (K,3,6)
 
-    # Aggregate to per-frame deltas (T,6), delta[0]=0
+    # 聚合滑窗预测到逐帧动作：
+    # 一个时间点可能被多个窗口预测到，取平均可以降低窗口边界噪声；第 0 帧没有“上一帧 -> 当前帧”动作。
+    # 公式：delta[t] = sum(所有覆盖 t 的窗口预测) / count[t]；deltas 先全 0，所以 delta[0]=0。
+    # 例子：窗口 [0,1,2,3] 预测的是帧 1/2/3 的动作，窗口 [1,2,3,4] 又会再次预测帧 2/3/4，
+    # 因此帧 2、3 会有多个候选值，需要做平均。
     deltas = np.zeros((T_use, 6), dtype=np.float32)
     acc = np.zeros((T_use, 6), dtype=np.float32)
     cnt = np.zeros((T_use,), dtype=np.int32)
@@ -389,7 +486,8 @@ def infer_one_route(
     mask = cnt > 0
     deltas[mask] = acc[mask] / cnt[mask, None]
 
-    # Init pose from traj_abs[0] = [x,y,z,roll,yaw,pitch]
+    # 初始位姿来自 GT 第 0 帧；之后整条轨迹完全由预测 delta 积分得到。
+    # 代码/形状说明：traj_abs[0] layout = [x,y,z,roll,yaw,pitch]。
     init_xyz = traj_abs[0, 0:3].astype(np.float32)
     if float(translation_divisor) != 1.0:
         init_xyz = init_xyz / float(translation_divisor)
@@ -407,7 +505,7 @@ def infer_one_route(
     with open(os.path.join(out_one, "trajectory.json"), "w") as f:
         json.dump(traj_pred.tolist(), f)
 
-    # Write "batch_infer_*" style jsons (for downstream tooling compatibility).
+    # 写 batch_infer 风格 JSON，方便 eval_endpoints.py 和旧实验脚本复用。
     actions6 = deltas[1:].astype(np.float32)  # (T-1,6)
     pred_actions_json = os.path.join(out_one, "pred_actions.json")
     pred_path_json = os.path.join(out_one, "pred_path.json")
@@ -452,21 +550,21 @@ def infer_one_route(
             indent=2,
         )
 
-    # Additional "physical-order + physical-unit" outputs for easier alignment with GT preprocessed_logs.json:
-    # - GT pose layout: [x,y,z, roll,yaw,pitch] after applying --translation_divisor, in (m,deg)
-    # - Our traj_pred layout: [roll,yaw,pitch,x,y,z] in (rad,m)
+    # 额外输出“物理顺序 + 物理单位”版本，方便和 GT preprocessed_logs.json 对齐：
+    # - GT pose layout: [x,y,z, roll,yaw,pitch]，应用 --translation_divisor 后单位是 (m,deg)
+    # - 当前 traj_pred layout: [roll,yaw,pitch,x,y,z]，单位是 (rad,m)
     traj_xyz_m = traj_pred[:, 3:6].astype(np.float32)
     traj_rpy_deg = (traj_pred[:, 0:3] * (180.0 / np.pi)).astype(np.float32)
-    traj_m_deg = np.concatenate([traj_xyz_m, traj_rpy_deg], axis=1).astype(np.float32)  # (T,6) [x,y,z,roll,yaw,pitch]
+    traj_m_deg = np.concatenate([traj_xyz_m, traj_rpy_deg], axis=1).astype(np.float32)  # 代码/形状说明：(T,6) [x,y,z,roll,yaw,pitch]
     np.save(os.path.join(out_one, "trajectory_m_deg.npy"), traj_m_deg)
     with open(os.path.join(out_one, "trajectory_m_deg.json"), "w", encoding="utf-8") as f:
         json.dump(traj_m_deg.tolist(), f, ensure_ascii=False)
 
-    # actions6 layout conversion:
-    # training/infer deltas layout per step: [dz,dy,dx, tx,ty,tz] (rad,m) where dz=dyaw, dy=dpitch, dx=droll.
-    # Convert to [tx_m,ty_m,tz_m, droll_deg, dyaw_deg, dpitch_deg] to match "xyz then rpy" physical-order.
+    # actions6 布局转换：
+    # 训练/推理每步 delta 布局为 [dz,dy,dx, tx,ty,tz] (rad,m)，其中 dz=dyaw, dy=dpitch, dx=droll。
+    # 这里转成 [tx_m,ty_m,tz_m, droll_deg, dyaw_deg, dpitch_deg]，匹配“xyz 后接 rpy”的物理顺序。
     a = actions6.astype(np.float32)
-    trans_m = a[:, 3:6].astype(np.float32)  # [tx,ty,tz] in meters (still prev-frame coords)
+    trans_m = a[:, 3:6].astype(np.float32)  # [tx,ty,tz] 单位 meters，仍在上一帧坐标系下。
     droll_deg = (a[:, 2] * (180.0 / np.pi)).astype(np.float32)
     dyaw_deg = (a[:, 0] * (180.0 / np.pi)).astype(np.float32)
     dpitch_deg = (a[:, 1] * (180.0 / np.pi)).astype(np.float32)
@@ -481,7 +579,7 @@ def infer_one_route(
                 "route": route,
                 "actions6_layout": ["x_m", "y_m", "z_m", "roll_deg", "yaw_deg", "pitch_deg"],
                 "actions6": actions6_m_deg.tolist(),
-                "note": "translation is still expressed in previous-frame coordinates; only unit/layout converted.",
+                "note": "平移分量仍然位于上一帧坐标系中；这里只做单位和字段顺序转换，没有改参考坐标系。",
             },
             f,
             ensure_ascii=False,
@@ -522,70 +620,95 @@ def infer_one_route(
 
 
 def main():
+    """
+    CLI 入口：加载模型和 route 列表，逐条调用 `infer_one_route()` 写预测结果。
+
+    小白使用建议：
+    - 第一次阅读时，先只跑 `--first_n 1` 看单条 route 输出目录里会生成哪些文件；
+    - 然后对照 `pred_actions.json`、`trajectory.json`、`metrics.json` 回到代码里看每一步来源。
+
+    整个入口可分成三段读：
+    1. checkpoint/模型准备：决定 TSFormer、Adapter、InfinityStar VAE 从哪里加载；
+    2. route 列表准备：决定这次到底处理哪些 route；
+    3. 单条 route 推理：进入 `infer_one_route()`，真正执行 `latents -> tokens -> deltas -> trajectory`。
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--stage2_root",
         type=str,
         default="./checkpoints/stage2_latent2action",
-        help="Stage-2 checkpoint root. Used only when --ckpt is empty.",
+        help="Stage-2 checkpoint 根目录。仅当 --ckpt 为空时才会使用，并在其中自动寻找最新 checkpoint_last.pth。",
     )
     ap.add_argument(
         "--ckpt",
         type=str,
         default="",
         help=(
-            "Explicit Stage-2 checkpoint path. Supported examples: checkpoint_last.pth, "
-            "checkpoint_pre_fulltrain_e*.pth, stage2_latent2action_combined.pt. "
-            "If empty, the script searches --stage2_root for the latest checkpoint_last.pth."
+            "显式指定 Stage-2 checkpoint 文件路径。支持 checkpoint_last.pth、"
+            "checkpoint_pre_fulltrain_e*.pth、stage2_latent2action_combined.pt 等格式。"
+            "如果留空，脚本会在 --stage2_root 下自动查找最新的 checkpoint_last.pth。"
         ),
     )
     ap.add_argument(
         "--data_root",
         type=str,
         default="./data/uavflow_latents",
-        help="UAV-Flow-style route root. Each route directory should contain latents.pt and preprocessed_logs.json.",
+        help="UAV-Flow 风格的 route 根目录。每个 route 子目录至少应包含 latents.pt 和 preprocessed_logs.json。",
     )
     ap.add_argument(
         "--out_dir",
         type=str,
         default="./outputs/stage2_latent2action",
-        help="Inference output root.",
+        help="推理输出根目录；每条 route 会在这里生成一个同名子目录。",
     )
-    ap.add_argument("--device", type=str, default="cuda:0")
-    ap.add_argument("--stride", type=int, default=1)
-    ap.add_argument("--translation_divisor", type=float, default=1.0)
-    ap.add_argument("--angles_in_degrees", action="store_true", default=True)
-    ap.add_argument("--amp", action="store_true", default=True)
-    ap.add_argument("--compute_metrics", action="store_true", default=True)
-    ap.add_argument("--first_n", type=int, default=0, help="Only run inference on the first N items (0 = all)")
+    ap.add_argument("--device", type=str, default="cuda:0", help="推理设备，例如 cuda:0 或 cpu；CUDA 不可用时会自动回退到 cpu。")
+    ap.add_argument("--stride", type=int, default=1, help="4 帧滑窗的步长；1 表示尽量覆盖所有相邻窗口。")
+    ap.add_argument("--translation_divisor", type=float, default=1.0, help="GT 平移量的单位缩放因子；例如原始单位是厘米时可设为 100。")
+    ap.add_argument("--angles_in_degrees", action="store_true", default=True, help="表示 GT 角度是 degrees，脚本会转换为 radians 后积分。")
+    ap.add_argument("--amp", action="store_true", default=True, help="启用 CUDA AMP 混合精度推理；仅在 CUDA 可用时生效。")
+    ap.add_argument("--compute_metrics", action="store_true", default=True, help="推理后计算 metrics.json，用于和 GT 轨迹做快速 RMSE 对齐检查。")
+    ap.add_argument("--first_n", type=int, default=0, help="只对前 N 条 route 做推理；0 表示全部执行。")
     ap.add_argument(
         "--routes",
         type=str,
         default="",
-        help="Optional comma-separated route directory names to infer.",
+        help="可选：只推理指定的 route 目录名，多个名称用英文逗号分隔。",
     )
-    # If empty/0, prefer reading from stage2 checkpoint metadata (recommended).
-    ap.add_argument("--infinitystar_vae_path", type=str, default="", help="Optional override; otherwise read from Stage-2 checkpoint metadata.")
-    ap.add_argument("--infinitystar_vae_type", type=int, default=0, help="Optional override; 0 means read from checkpoint metadata or use 64.")
-    ap.add_argument("--infinitystar_root", type=str, default="")
-    ap.add_argument("--tqdm", action="store_true", default=True, help="Show tqdm progress bar (if available)")
+    # 为空或 0 时，优先从 Stage-2 checkpoint 元数据读取（推荐）。
+    ap.add_argument(
+        "--infinitystar_vae_path",
+        type=str,
+        default="",
+        help="可选覆盖项：手动指定 InfinityStar VAE 权重路径；留空时优先从 Stage-2 checkpoint 元数据读取。",
+    )
+    ap.add_argument(
+        "--infinitystar_vae_type",
+        type=int,
+        default=0,
+        help="可选覆盖项：手动指定 VAE codebook 通道数；0 表示从 checkpoint 元数据读取，读不到时默认 64。",
+    )
+    ap.add_argument("--infinitystar_root", type=str, default="", help="可选：手动指定 InfinityStar runtime 根目录；留空时按环境变量和项目默认路径查找。")
+    ap.add_argument("--tqdm", action="store_true", default=True, help="如果本机安装了 tqdm，则显示推理进度条。")
     args = ap.parse_args()
 
+    # 第 1 段：checkpoint/模型准备。
+    # checkpoint 支持训练期 checkpoint_last.pth，也支持整理后的 stage2_latent2action_combined.pt。
     ckpt_path = str(args.ckpt).strip() or _find_latest_stage2_checkpoint(str(args.stage2_root))
     if not os.path.exists(ckpt_path):
-        raise FileNotFoundError(f"ckpt not found: {ckpt_path}")
+        raise FileNotFoundError(f"找不到 ckpt：{ckpt_path}")
 
     os.makedirs(str(args.out_dir), exist_ok=True)
     device = torch.device(str(args.device) if (torch.cuda.is_available() and str(args.device).startswith("cuda")) else "cpu")
 
     ckpt = _safe_torch_load(ckpt_path)
     if not isinstance(ckpt, dict):
-        raise ValueError("checkpoint must be a dict (combined checkpoint)")
+        raise ValueError("checkpoint 必须是 dict（组合后的 Stage-2 checkpoint）")
 
     tsformer = build_tsformer().to(device).eval()
     adapter = Vae96ToTSformerEmbedAdapter().to(device).eval()
 
-    # Init VAE (InfinityStar)
+    # 初始化 InfinityStar VAE。adapter 的输入来自这个 VAE decoder 的中间层 feature，
+    # 所以 VAE 结构参数必须和 Stage-2 训练 checkpoint 记录的一致。
     inf_root = str(args.infinitystar_root).strip() or None
     _add_infinitystar_to_syspath(inf_root, proj_root=_ARCH_ROOT)
     ckpt_args = ckpt.get("args") if isinstance(ckpt.get("args"), dict) else {}
@@ -596,13 +719,13 @@ def main():
     )
     if not vae_path:
         raise ValueError(
-            "InfinityStar VAE path is required. Pass --infinitystar_vae_path "
-            "or store infinitystar_vae_path in the Stage-2 checkpoint metadata."
+            "必须提供 InfinityStar VAE 路径。请显式传入 --infinitystar_vae_path，"
+            "或把 infinitystar_vae_path 写进 Stage-2 checkpoint 元数据。"
         )
     vae_type = int(args.infinitystar_vae_type) if int(args.infinitystar_vae_type) > 0 else int(
         ckpt.get("infinitystar_vae_type", ckpt_args.get("infinitystar_vae_type", 64))
     )
-    print(f"[config] InfinityStar VAE: path={vae_path} type={vae_type}", flush=True)
+    print(f"[配置] InfinityStar VAE 配置：path={vae_path} type={vae_type}", flush=True)
     vae = load_infinitystar_vae(
         vae_path=str(vae_path),
         vae_type=int(vae_type),
@@ -617,27 +740,27 @@ def main():
         semantic_scales=int(ckpt_args.get("semantic_scales", 11)),
     )
 
-    # Supported formats:
-    # - checkpoint_last.pth: {model_state_dict, adapter_state_dict, vae_state_dict, ...}
-    # - checkpoint_pre_fulltrain_e*.pth: same as above
-    # - stage2_latent2action_combined.pt: {tsformer_state_dict, adapter_state_dict, vae_state_dict, model_state_dict(alias), ...}
+    # 支持的格式：
+    # 代码/形状说明：- checkpoint_last.pth: {model_state_dict, adapter_state_dict, vae_state_dict, ...}
+    # - checkpoint_pre_fulltrain_e*.pth: 同上
+    # 代码/形状说明：- stage2_latent2action_combined.pt: {tsformer_state_dict, adapter_state_dict, vae_state_dict, model_state_dict(alias), ...}
     ts_sd = ckpt.get("model_state_dict") or ckpt.get("tsformer_state_dict")
-    ad_sd = ckpt.get("adapter_state_dict") or ckpt.get("state_dict")  # fallback
+    ad_sd = ckpt.get("adapter_state_dict") or ckpt.get("state_dict")  # 兜底。
     vae_sd = ckpt.get("vae_state_dict", {})
     if not isinstance(ts_sd, dict) or not isinstance(ad_sd, dict):
-        raise ValueError("checkpoint missing model_state_dict/adapter_state_dict")
+        raise ValueError("checkpoint 缺少 model_state_dict 或 adapter_state_dict")
     missing, unexpected = tsformer.load_state_dict(ts_sd, strict=False)
     if missing or unexpected:
-        print(f"[warn] tsformer strict=False missing={missing[:10]} unexpected={unexpected[:10]}", flush=True)
+        print(f"[警告] TSFormer 以 strict=False 加载：missing={missing[:10]} unexpected={unexpected[:10]}", flush=True)
     missing, unexpected = adapter.load_state_dict(ad_sd, strict=False)
     if missing or unexpected:
-        print(f"[warn] adapter strict=False missing={missing[:10]} unexpected={unexpected[:10]}", flush=True)
+        print(f"[警告] Adapter 以 strict=False 加载：missing={missing[:10]} unexpected={unexpected[:10]}", flush=True)
     if isinstance(vae_sd, dict) and len(vae_sd) > 0:
         missing, unexpected = vae.load_state_dict(vae_sd, strict=False)
         if missing or unexpected:
-            print(f"[warn] vae strict=False missing={missing[:10]} unexpected={unexpected[:10]}", flush=True)
+            print(f"[警告] VAE 以 strict=False 加载：missing={missing[:10]} unexpected={unexpected[:10]}", flush=True)
 
-    # Optional: label stats for denormalizing head outputs -> (rad, meters).
+    # 可选 label stats：如果 Stage-2 训练时对动作标签做过标准化，这里必须反标准化回 rad/m。
     label_stats = None
     ls = ckpt.get("label_stats")
     if isinstance(ls, dict) and all(k in ls for k in ("mean_angles", "std_angles", "mean_t", "std_t")):
@@ -649,13 +772,12 @@ def main():
                 "std_t": np.asarray(ls["std_t"], dtype=np.float32).reshape(3),
             }
             src = ckpt.get("label_stats_source") or "checkpoint"
-            print(f"[config] label_stats loaded from {src}", flush=True)
+            print(f"[配置] label_stats 已从 {src} 加载", flush=True)
         except Exception as e:
-            print(f"[warn] failed to parse label_stats from checkpoint: {e}", flush=True)
+            print(f"[警告] 无法从 checkpoint 解析 label_stats：{e}", flush=True)
             label_stats = None
     if label_stats is None:
-        # Backward-compatible fallback: try to locate run_config.json next to the TSformer pretrained checkpoint
-        # recorded in stage2 training args.
+        # 向后兼容的兜底逻辑：尝试在 Stage-2 训练参数记录的 TSFormer 预训练 checkpoint 旁边找 run_config.json。
         try:
             args0 = ckpt.get("args") if isinstance(ckpt.get("args"), dict) else {}
             ts_pre = str(args0.get("tsformer_pretrained", "")).strip()
@@ -671,16 +793,19 @@ def main():
                             "mean_t": np.asarray(ls2["mean_t"], dtype=np.float32).reshape(3),
                             "std_t": np.asarray(ls2["std_t"], dtype=np.float32).reshape(3),
                         }
-                        print(f"[config] label_stats loaded from run_config.json next to tsformer_pretrained: {run_cfg}", flush=True)
+                        print(f"[配置] label_stats 已从 tsformer_pretrained 旁边的 run_config.json 加载：{run_cfg}", flush=True)
         except Exception as e:
-            print(f"[warn] label_stats fallback load failed: {e}", flush=True)
+            print(f"[警告] label_stats 兜底加载失败：{e}", flush=True)
 
+    # 第 2 段：route 列表准备。
+    # data_root 下每个子目录通常对应一条 route，内部至少要有 latents.pt 和 GT pose json。
     routes = [d for d in os.listdir(str(args.data_root)) if os.path.isdir(os.path.join(str(args.data_root), d))]
     routes.sort()
     only = str(args.routes).strip()
     if only:
+        # --routes 用于只跑少量指定 route 做快速冒烟检查；保持用户给定顺序并去重。
         wanted = [x.strip() for x in only.split(",") if x.strip()]
-        # keep order, drop duplicates
+        # 保持顺序并去重。
         seen = set()
         wanted2 = []
         for w in wanted:
@@ -689,7 +814,7 @@ def main():
                 seen.add(w)
         missing = [w for w in wanted2 if w not in set(routes)]
         if missing:
-            raise FileNotFoundError(f"--routes contains missing dirs under data_root: {missing}")
+            raise FileNotFoundError(f"--routes 中包含 data_root 下不存在的目录：{missing}")
         routes = wanted2
     if int(args.first_n) > 0:
         routes = routes[: int(args.first_n)]
@@ -698,7 +823,9 @@ def main():
     skipped = 0
     it = routes
     if bool(args.tqdm) and tqdm is not None:
-        it = tqdm(routes, desc="infer routes", dynamic_ncols=True)
+        it = tqdm(routes, desc="推理 routes", dynamic_ncols=True)
+    # 第 3 段：逐条 route 推理。
+    # 每条 route 最终会在 out_dir/<route>/ 下写出 pred_actions.json、pred_path.json、trajectory*.json 等结果。
     for r in it:
         try:
             did = infer_one_route(
@@ -722,11 +849,10 @@ def main():
                 skipped += 1
         except Exception as e:
             skipped += 1
-            print(f"[warn] skip route={r} err={e}", flush=True)
+            print(f"[警告] 跳过 route={r}，错误={e}", flush=True)
 
     print(json.dumps({"ok": ok, "skipped": skipped, "ckpt": ckpt_path, "out_dir": str(args.out_dir)}, ensure_ascii=False, indent=2), flush=True)
 
 
 if __name__ == "__main__":
     main()
-

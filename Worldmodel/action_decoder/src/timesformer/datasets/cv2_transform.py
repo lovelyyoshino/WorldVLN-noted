@@ -7,14 +7,16 @@ import cv2
 
 def clip_boxes_to_image(boxes, height, width):
     """
-    Clip the boxes with the height and width of the image size.
-    Args:
-        boxes (ndarray): bounding boxes to peform crop. The dimension is
-        `num boxes` x 4.
-        height (int): the height of the image.
-        width (int): the width of the image.
-    Returns:
-        boxes (ndarray): cropped bounding boxes.
+        按图像的 height 和 width 将边界框裁剪到图像范围内。
+
+        参数：
+            boxes (ndarray): 需要裁剪的边界框，维度为 `num boxes` x 4。
+            height (int): 图像高度。
+            width (int): 图像宽度。
+
+        返回：
+            boxes (ndarray): 裁剪后的边界框。
+
     """
     boxes[:, [0, 2]] = np.minimum(
         width - 1.0, np.maximum(0.0, boxes[:, [0, 2]])
@@ -27,20 +29,20 @@ def clip_boxes_to_image(boxes, height, width):
 
 def random_short_side_scale_jitter_list(images, min_size, max_size, boxes=None):
     """
-    Perform a spatial short scale jittering on the given images and
-    corresponding boxes.
-    Args:
-        images (list): list of images to perform scale jitter. Dimension is
-            `height` x `width` x `channel`.
-        min_size (int): the minimal size to scale the frames.
-        max_size (int): the maximal size to scale the frames.
-        boxes (list): optional. Corresponding boxes to images. Dimension is
-            `num boxes` x 4.
-    Returns:
-        (list): the list of scaled images with dimension of
-            `new height` x `new width` x `channel`.
-        (ndarray or None): the scaled boxes with dimension of
-            `num boxes` x 4.
+        对给定图像列表及对应边界框执行短边随机缩放抖动。
+
+        参数：
+            images (list): 需要缩放抖动的图像列表，维度为
+                说明：`height` x `width` x `channel`。
+            min_size (int): 帧短边缩放后的最小尺寸。
+            max_size (int): 帧短边缩放后的最大尺寸。
+            boxes (list): 可选，图像对应的边界框，维度为 `num boxes` x 4。
+
+        返回：
+            (list): 缩放后的图像列表，维度为
+                说明：`new height` x `new width` x `channel`。
+            (ndarray or None): 缩放后的边界框，维度为 `num boxes` x 4。
+
     """
     size = int(round(1.0 / np.random.uniform(1.0 / max_size, 1.0 / min_size)))
 
@@ -75,14 +77,16 @@ def random_short_side_scale_jitter_list(images, min_size, max_size, boxes=None):
 
 def scale(size, image):
     """
-    Scale the short side of the image to size.
-    Args:
-        size (int): size to scale the image.
-        image (array): image to perform short side scale. Dimension is
-            `height` x `width` x `channel`.
-    Returns:
-        (ndarray): the scaled image with dimension of
-            `height` x `width` x `channel`.
+        将图像短边缩放到指定 size，并保持宽高比。
+
+        参数：
+            size (int): 图像短边要缩放到的尺寸。
+            image (array): 要执行短边缩放的图像，维度为
+                说明：`height` x `width` x `channel`。
+
+        返回：
+            (ndarray): 缩放后的图像，维度为 `height` x `width` x `channel`。
+
     """
     height = image.shape[0]
     width = image.shape[1]
@@ -104,15 +108,17 @@ def scale(size, image):
 
 def scale_boxes(size, boxes, height, width):
     """
-    Scale the short side of the box to size.
-    Args:
-        size (int): size to scale the image.
-        boxes (ndarray): bounding boxes to peform scale. The dimension is
-        `num boxes` x 4.
-        height (int): the height of the image.
-        width (int): the width of the image.
-    Returns:
-        boxes (ndarray): scaled bounding boxes.
+        按图像短边缩放比例同步缩放边界框。
+
+        参数：
+            size (int): 图像短边要缩放到的尺寸。
+            boxes (ndarray): 需要缩放的边界框，维度为 `num boxes` x 4。
+            height (int): 原图高度。
+            width (int): 原图宽度。
+
+        返回：
+            boxes (ndarray): 缩放后的边界框。
+
     """
     if (width <= height and width == size) or (
         height <= width and height == size
@@ -132,19 +138,19 @@ def scale_boxes(size, boxes, height, width):
 
 def horizontal_flip_list(prob, images, order="CHW", boxes=None):
     """
-    Horizontally flip the list of image and optional boxes.
-    Args:
-        prob (float): probability to flip.
-        image (list): ilist of images to perform short side scale. Dimension is
-            `height` x `width` x `channel` or `channel` x `height` x `width`.
-        order (str): order of the `height`, `channel` and `width`.
-        boxes (list): optional. Corresponding boxes to images.
-            Dimension is `num boxes` x 4.
-    Returns:
-        (ndarray): the scaled image with dimension of
-            `height` x `width` x `channel`.
-        (list): optional. Corresponding boxes to images. Dimension is
-            `num boxes` x 4.
+        按概率水平翻转图像列表，并同步翻转可选边界框。
+
+        参数：
+            prob (float): 执行翻转的概率。
+            image (list): 待处理图像列表，维度为
+                说明：`height` x `width` x `channel` or `channel` x `height` x `width`.
+            order (str): `height`、`channel` 和 `width` 的排列顺序。
+            boxes (list): 可选，图像对应的边界框，维度为 `num boxes` x 4。
+
+        返回：
+            (ndarray): 翻转后的图像，维度为 `height` x `width` x `channel`。
+            (list): 可选，图像对应的边界框，维度为 `num boxes` x 4。
+
     """
     _, width, _ = images[0].shape
     if np.random.uniform() < prob:
@@ -164,20 +170,21 @@ def horizontal_flip_list(prob, images, order="CHW", boxes=None):
 
 def spatial_shift_crop_list(size, images, spatial_shift_pos, boxes=None):
     """
-    Perform left, center, or right crop of the given list of images.
-    Args:
-        size (int): size to crop.
-        image (list): ilist of images to perform short side scale. Dimension is
-            `height` x `width` x `channel` or `channel` x `height` x `width`.
-        spatial_shift_pos (int): option includes 0 (left), 1 (middle), and
-            2 (right) crop.
-        boxes (list): optional. Corresponding boxes to images.
-            Dimension is `num boxes` x 4.
-    Returns:
-        cropped (ndarray): the cropped list of images with dimension of
-            `height` x `width` x `channel`.
-        boxes (list): optional. Corresponding boxes to images. Dimension is
-            `num boxes` x 4.
+        对给定图像列表执行左/中/右（或上/中/下）位置裁剪。
+
+        参数：
+            size (int): 裁剪尺寸。
+            image (list): 待裁剪图像列表，维度为
+                说明：`height` x `width` x `channel` or `channel` x `height` x `width`.
+            spatial_shift_pos (int): 裁剪位置，0 表示左/上，1 表示中间，
+                2 表示右/下。
+            boxes (list): 可选，图像对应的边界框，维度为 `num boxes` x 4。
+
+        返回：
+            cropped (ndarray): 裁剪后的图像列表，维度为
+                说明：`height` x `width` x `channel`。
+            boxes (list): 可选，图像对应的边界框，维度为 `num boxes` x 4。
+
     """
 
     assert spatial_shift_pos in [0, 1, 2]
@@ -202,8 +209,8 @@ def spatial_shift_crop_list(size, images, spatial_shift_pos, boxes=None):
         image[y_offset : y_offset + size, x_offset : x_offset + size, :]
         for image in images
     ]
-    assert cropped[0].shape[0] == size, "Image height not cropped properly"
-    assert cropped[0].shape[1] == size, "Image width not cropped properly"
+    assert cropped[0].shape[0] == size, "图像高度裁剪不正确"
+    assert cropped[0].shape[1] == size, "图像宽度裁剪不正确"
 
     if boxes is not None:
         for i in range(len(boxes)):
@@ -214,24 +221,30 @@ def spatial_shift_crop_list(size, images, spatial_shift_pos, boxes=None):
 
 def CHW2HWC(image):
     """
-    Transpose the dimension from `channel` x `height` x `width` to
-        `height` x `width` x `channel`.
-    Args:
-        image (array): image to transpose.
-    Returns
-        (array): transposed image.
+        将维度从 `channel` x `height` x `width` 转置为
+            说明：`height` x `width` x `channel`.
+
+        参数：
+            image (array): 需要转置的图像。
+
+        返回：
+            (array): 转置后的图像。
+
     """
     return image.transpose([1, 2, 0])
 
 
 def HWC2CHW(image):
     """
-    Transpose the dimension from `height` x `width` x `channel` to
-        `channel` x `height` x `width`.
-    Args:
-        image (array): image to transpose.
-    Returns
-        (array): transposed image.
+        将维度从 `height` x `width` x `channel` 转置为
+            说明：`channel` x `height` x `width`.
+
+        参数：
+            image (array): 需要转置的图像。
+
+        返回：
+            (array): 转置后的图像。
+
     """
     return image.transpose([2, 0, 1])
 
@@ -240,14 +253,17 @@ def color_jitter_list(
     images, img_brightness=0, img_contrast=0, img_saturation=0
 ):
     """
-    Perform color jitter on the list of images.
-    Args:
-        images (list): list of images to perform color jitter.
-        img_brightness (float): jitter ratio for brightness.
-        img_contrast (float): jitter ratio for contrast.
-        img_saturation (float): jitter ratio for saturation.
-    Returns:
-        images (list): the jittered list of images.
+        对图像列表执行颜色抖动。
+
+        参数：
+            images (list): 需要颜色抖动的图像列表。
+            img_brightness (float): 亮度抖动比例。
+            img_contrast (float): 对比度抖动比例。
+            img_saturation (float): 饱和度抖动比例。
+
+        返回：
+            images (list): 抖动后的图像列表。
+
     """
     jitter = []
     if img_brightness != 0:
@@ -271,18 +287,21 @@ def color_jitter_list(
 
 def lighting_list(imgs, alphastd, eigval, eigvec, alpha=None):
     """
-    Perform AlexNet-style PCA jitter on the given list of images.
-    Args:
-        images (list): list of images to perform lighting jitter.
-        alphastd (float): jitter ratio for PCA jitter.
-        eigval (list): eigenvalues for PCA jitter.
-        eigvec (list[list]): eigenvectors for PCA jitter.
-    Returns:
-        out_images (list): the list of jittered images.
+        对给定图像列表执行 AlexNet 风格的 PCA lighting 抖动。
+
+        参数：
+            images (list): 需要执行 lighting 抖动的图像列表。
+            alphastd (float): PCA 抖动比例。
+            eigval (list): PCA 抖动使用的特征值。
+            eigvec (list[list]): PCA 抖动使用的特征向量。
+
+        返回：
+            out_images (list): 抖动后的图像列表。
+
     """
     if alphastd == 0:
         return imgs
-    # generate alpha1, alpha2, alpha3
+    # 生成 alpha1、alpha2、alpha3。
     alpha = np.random.normal(0, alphastd, size=(1, 3))
     eig_vec = np.array(eigvec)
     eig_val = np.reshape(eigval, (1, 3))
@@ -300,15 +319,17 @@ def lighting_list(imgs, alphastd, eigval, eigvec, alpha=None):
 
 def color_normalization(image, mean, stddev):
     """
-    Perform color normalization on the image with the given mean and stddev.
-    Args:
-        image (array): image to perform color normalization.
-        mean (float): mean value to subtract.
-        stddev (float): stddev to devide.
+        使用给定 mean 和 stddev 对图像做颜色归一化。
+
+        参数：
+            image (array): 需要归一化的图像。
+            mean (float): 要减去的均值。
+            stddev (float): 要除以的标准差。
+
     """
-    # Input image should in format of CHW
-    assert len(mean) == image.shape[0], "channel mean not computed properly"
-    assert len(stddev) == image.shape[0], "channel stddev not computed properly"
+    # 输入图像应为 CHW 格式。
+    assert len(mean) == image.shape[0], "通道均值计算不正确"
+    assert len(stddev) == image.shape[0], "通道标准差计算不正确"
     for idx in range(image.shape[0]):
         image[idx] = image[idx] - mean[idx]
         image[idx] = image[idx] / stddev[idx]
@@ -317,13 +338,16 @@ def color_normalization(image, mean, stddev):
 
 def pad_image(image, pad_size, order="CHW"):
     """
-    Pad the given image with the size of pad_size.
-    Args:
-        image (array): image to pad.
-        pad_size (int): size to pad.
-        order (str): order of the `height`, `channel` and `width`.
-    Returns:
-        img (array): padded image.
+        按 pad_size 给定的宽度填充图像四周。
+
+        参数：
+            image (array): 需要填充的图像。
+            pad_size (int): 填充宽度。
+            order (str): `height`、`channel` 和 `width` 的排列顺序。
+
+        返回：
+            img (array): 填充后的图像。
+
     """
     if order == "CHW":
         img = np.pad(
@@ -342,33 +366,39 @@ def pad_image(image, pad_size, order="CHW"):
 
 def horizontal_flip(prob, image, order="CHW"):
     """
-    Horizontally flip the image.
-    Args:
-        prob (float): probability to flip.
-        image (array): image to pad.
-        order (str): order of the `height`, `channel` and `width`.
-    Returns:
-        img (array): flipped image.
+        按概率水平翻转单张图像。
+
+        参数：
+            prob (float): 执行翻转的概率。
+            image (array): 需要翻转的图像。
+            order (str): `height`、`channel` 和 `width` 的排列顺序。
+
+        返回：
+            img (array): 翻转后的图像。
+
     """
-    assert order in ["CHW", "HWC"], "order {} is not supported".format(order)
+    assert order in ["CHW", "HWC"], "不支持 order {}".format(order)
     if np.random.uniform() < prob:
         if order == "CHW":
             image = image[:, :, ::-1]
         elif order == "HWC":
             image = image[:, ::-1, :]
         else:
-            raise NotImplementedError("Unknown order {}".format(order))
+            raise NotImplementedError("未知 order {}".format(order))
     return image
 
 
 def flip_boxes(boxes, im_width):
     """
-    Horizontally flip the boxes.
-    Args:
-        boxes (array): box to flip.
-        im_width (int): width of the image.
-    Returns:
-        boxes_flipped (array): flipped box.
+        按图像宽度水平翻转边界框。
+
+        参数：
+            boxes (array): 需要翻转的边界框。
+            im_width (int): 图像宽度。
+
+        返回：
+            boxes_flipped (array): 翻转后的边界框。
+
     """
 
     boxes_flipped = boxes.copy()
@@ -379,11 +409,13 @@ def flip_boxes(boxes, im_width):
 
 def crop_boxes(boxes, x_offset, y_offset):
     """
-    Crop the boxes given the offsets.
-    Args:
-        boxes (array): boxes to crop.
-        x_offset (int): offset on x.
-        y_offset (int): offset on y.
+        根据 x/y 偏移量裁剪边界框坐标。
+
+        参数：
+            boxes (array): 需要裁剪的边界框。
+            x_offset (int): x 方向偏移。
+            y_offset (int): y 方向偏移。
+
     """
     boxes[:, [0, 2]] = boxes[:, [0, 2]] - x_offset
     boxes[:, [1, 3]] = boxes[:, [1, 3]] - y_offset
@@ -392,28 +424,29 @@ def crop_boxes(boxes, x_offset, y_offset):
 
 def random_crop_list(images, size, pad_size=0, order="CHW", boxes=None):
     """
-    Perform random crop on a list of images.
-    Args:
-        images (list): list of images to perform random crop.
-        size (int): size to crop.
-        pad_size (int): padding size.
-        order (str): order of the `height`, `channel` and `width`.
-        boxes (list): optional. Corresponding boxes to images.
-            Dimension is `num boxes` x 4.
-    Returns:
-        cropped (ndarray): the cropped list of images with dimension of
-            `height` x `width` x `channel`.
-        boxes (list): optional. Corresponding boxes to images. Dimension is
-            `num boxes` x 4.
+        对图像列表执行随机裁剪。
+
+        参数：
+            images (list): 需要随机裁剪的图像列表。
+            size (int): 裁剪尺寸。
+            pad_size (int): 填充尺寸。
+            order (str): `height`、`channel` 和 `width` 的排列顺序。
+            boxes (list): 可选，图像对应的边界框，维度为 `num boxes` x 4。
+
+        返回：
+            cropped (ndarray): 裁剪后的图像列表，维度为
+                说明：`height` x `width` x `channel`.
+            boxes (list): 可选，图像对应的边界框，维度为 `num boxes` x 4。
+
     """
-    # explicitly dealing processing per image order to avoid flipping images.
+    # 按图像维度顺序显式处理，避免意外翻转图像。
     if pad_size > 0:
         images = [
             pad_image(pad_size=pad_size, image=image, order=order)
             for image in images
         ]
 
-    # image format should be CHW.
+    # 图像格式应为 CHW。
     if order == "CHW":
         if images[0].shape[1] == size and images[0].shape[2] == size:
             return images, boxes
@@ -429,8 +462,8 @@ def random_crop_list(images, size, pad_size=0, order="CHW", boxes=None):
             image[:, y_offset : y_offset + size, x_offset : x_offset + size]
             for image in images
         ]
-        assert cropped[0].shape[1] == size, "Image not cropped properly"
-        assert cropped[0].shape[2] == size, "Image not cropped properly"
+        assert cropped[0].shape[1] == size, "图像裁剪不正确"
+        assert cropped[0].shape[2] == size, "图像裁剪不正确"
     elif order == "HWC":
         if images[0].shape[0] == size and images[0].shape[1] == size:
             return images, boxes
@@ -446,8 +479,8 @@ def random_crop_list(images, size, pad_size=0, order="CHW", boxes=None):
             image[y_offset : y_offset + size, x_offset : x_offset + size, :]
             for image in images
         ]
-        assert cropped[0].shape[0] == size, "Image not cropped properly"
-        assert cropped[0].shape[1] == size, "Image not cropped properly"
+        assert cropped[0].shape[0] == size, "图像裁剪不正确"
+        assert cropped[0].shape[1] == size, "图像裁剪不正确"
 
     if boxes is not None:
         boxes = [crop_boxes(proposal, x_offset, y_offset) for proposal in boxes]
@@ -456,33 +489,38 @@ def random_crop_list(images, size, pad_size=0, order="CHW", boxes=None):
 
 def center_crop(size, image):
     """
-    Perform center crop on input images.
-    Args:
-        size (int): size of the cropped height and width.
-        image (array): the image to perform center crop.
+        对输入图像执行中心裁剪。
+
+        参数：
+            size (int): 裁剪后的高度和宽度。
+            image (array): 需要中心裁剪的图像。
+
     """
     height = image.shape[0]
     width = image.shape[1]
     y_offset = int(math.ceil((height - size) / 2))
     x_offset = int(math.ceil((width - size) / 2))
     cropped = image[y_offset : y_offset + size, x_offset : x_offset + size, :]
-    assert cropped.shape[0] == size, "Image height not cropped properly"
-    assert cropped.shape[1] == size, "Image width not cropped properly"
+    assert cropped.shape[0] == size, "图像高度裁剪不正确"
+    assert cropped.shape[1] == size, "图像宽度裁剪不正确"
     return cropped
 
 
-# ResNet style scale jittering: randomly select the scale from
-# [1/max_size, 1/min_size]
+# ResNet 风格的缩放抖动：从 [1/max_size, 1/min_size] 中随机选择缩放比例。
 def random_scale_jitter(image, min_size, max_size):
     """
-    Perform ResNet style random scale jittering: randomly select the scale from
-        [1/max_size, 1/min_size].
-    Args:
-        image (array): image to perform random scale.
-        min_size (int): min size to scale.
-        max_size (int) max size to scale.
-    Returns:
-        image (array): scaled image.
+        执行 ResNet 风格的随机缩放抖动。
+
+        缩放比例会从 [1/max_size, 1/min_size] 中随机选择。
+
+        参数：
+            image (array): 需要随机缩放的图像。
+            min_size (int): 缩放后的最小尺寸。
+            max_size (int) 缩放后的最大尺寸。
+
+        返回：
+            image (array): 缩放后的图像。
+
     """
     img_scale = int(
         round(1.0 / np.random.uniform(1.0 / max_size, 1.0 / min_size))
@@ -493,15 +531,18 @@ def random_scale_jitter(image, min_size, max_size):
 
 def random_scale_jitter_list(images, min_size, max_size):
     """
-    Perform ResNet style random scale jittering on a list of image: randomly
-        select the scale from [1/max_size, 1/min_size]. Note that all the image
-        will share the same scale.
-    Args:
-        images (list): list of images to perform random scale.
-        min_size (int): min size to scale.
-        max_size (int) max size to scale.
-    Returns:
-        images (list): list of scaled image.
+        对图像列表执行 ResNet 风格的随机缩放抖动。
+
+        缩放比例会从 [1/max_size, 1/min_size] 中随机选择；所有图像共享同一个比例。
+
+        参数：
+            images (list): 需要随机缩放的图像列表。
+            min_size (int): 缩放后的最小尺寸。
+            max_size (int) 缩放后的最大尺寸。
+
+        返回：
+            images (list): 缩放后的图像列表。
+
     """
     img_scale = int(
         round(1.0 / np.random.uniform(1.0 / max_size, 1.0 / min_size))
@@ -511,14 +552,18 @@ def random_scale_jitter_list(images, min_size, max_size):
 
 def random_sized_crop(image, size, area_frac=0.08):
     """
-    Perform random sized cropping on the given image. Random crop with size
-        8% - 100% image area and aspect ratio in [3/4, 4/3].
-    Args:
-        image (array): image to crop.
-        size (int): size to crop.
-        area_frac (float): area of fraction.
-    Returns:
-        (array): cropped image.
+        对给定图像执行随机面积裁剪。
+
+        随机裁剪面积为原图的 8% - 100%，长宽比在 [3/4, 4/3] 范围内。
+
+        参数：
+            image (array): 需要裁剪的图像。
+            size (int): 裁剪后缩放到的尺寸。
+            area_frac (float): 最小面积比例。
+
+        返回：
+            (array): 裁剪后的图像。
+
     """
     for _ in range(0, 10):
         height = image.shape[0]
@@ -544,7 +589,7 @@ def random_sized_crop(image, size, area_frac=0.08):
             cropped = image[y_offset : y_offset + h, x_offset : x_offset + w, :]
             assert (
                 cropped.shape[0] == h and cropped.shape[1] == w
-            ), "Wrong crop size"
+            ), "裁剪尺寸不正确"
             cropped = cv2.resize(
                 cropped, (size, size), interpolation=cv2.INTER_LINEAR
             )
@@ -554,18 +599,21 @@ def random_sized_crop(image, size, area_frac=0.08):
 
 def lighting(img, alphastd, eigval, eigvec):
     """
-    Perform AlexNet-style PCA jitter on the given image.
-    Args:
-        image (array): list of images to perform lighting jitter.
-        alphastd (float): jitter ratio for PCA jitter.
-        eigval (array): eigenvalues for PCA jitter.
-        eigvec (list): eigenvectors for PCA jitter.
-    Returns:
-        img (tensor): the jittered image.
+        对给定图像执行 AlexNet 风格的 PCA lighting 抖动。
+
+        参数：
+            image (array): 需要执行 lighting 抖动的图像。
+            alphastd (float): PCA 抖动比例。
+            eigval (array): PCA 抖动使用的特征值。
+            eigvec (list): PCA 抖动使用的特征向量。
+
+        返回：
+            img (tensor): 抖动后的图像。
+
     """
     if alphastd == 0:
         return img
-    # generate alpha1, alpha2, alpha3.
+    # 生成 alpha1、alpha2、alpha3。
     alpha = np.random.normal(0, alphastd, size=(1, 3))
     eig_vec = np.array(eigvec)
     eig_val = np.reshape(eigval, (1, 3))
@@ -580,14 +628,18 @@ def lighting(img, alphastd, eigval, eigvec):
 
 def random_sized_crop_list(images, size, crop_area_fraction=0.08):
     """
-    Perform random sized cropping on the given list of images. Random crop with
-        size 8% - 100% image area and aspect ratio in [3/4, 4/3].
-    Args:
-        images (list): image to crop.
-        size (int): size to crop.
-        area_frac (float): area of fraction.
-    Returns:
-        (list): list of cropped image.
+        对给定图像列表执行随机面积裁剪。
+
+        随机裁剪面积为原图的 8% - 100%，长宽比在 [3/4, 4/3] 范围内。
+
+        参数：
+            images (list): 需要裁剪的图像列表。
+            size (int): 裁剪后缩放到的尺寸。
+            area_frac (float): 最小面积比例。
+
+        返回：
+            (list): 裁剪后的图像列表。
+
     """
     for _ in range(0, 10):
         height = images[0].shape[0]
@@ -618,7 +670,7 @@ def random_sized_crop_list(images, size, crop_area_fraction=0.08):
                 ]
                 assert (
                     cropped.shape[0] == h and cropped.shape[1] == w
-                ), "Wrong crop size"
+                ), "裁剪尺寸不正确"
                 cropped = cv2.resize(
                     cropped, (size, size), interpolation=cv2.INTER_LINEAR
                 )
@@ -629,19 +681,23 @@ def random_sized_crop_list(images, size, crop_area_fraction=0.08):
 
 
 def blend(image1, image2, alpha):
+    """按 alpha 权重混合两张图像，常用于颜色增强。"""
     return image1 * alpha + image2 * (1 - alpha)
 
 
 def grayscale(image):
     """
-    Convert the image to gray scale.
-    Args:
-        image (tensor): image to convert to gray scale. Dimension is
-            `channel` x `height` x `width`.
-    Returns:
-        img_gray (tensor): image in gray scale.
+        将图像转换为灰度图。
+
+        参数：
+            image (tensor): 需要转换为灰度的图像，维度为
+                说明：`channel` x `height` x `width`.
+
+        返回：
+            img_gray (tensor): 灰度图像。
+
     """
-    # R -> 0.299, G -> 0.587, B -> 0.114.
+    # 红色通道权重为 0.299，绿色为 0.587，蓝色为 0.114。
     img_gray = np.copy(image)
     gray_channel = 0.299 * image[2] + 0.587 * image[1] + 0.114 * image[0]
     img_gray[0] = gray_channel
@@ -652,12 +708,15 @@ def grayscale(image):
 
 def saturation(var, image):
     """
-    Perform color saturation on the given image.
-    Args:
-        var (float): variance.
-        image (array): image to perform color saturation.
-    Returns:
-        (array): image that performed color saturation.
+        对给定图像执行饱和度增强。
+
+        参数：
+            var (float): 随机扰动范围。
+            image (array): 需要调整饱和度的图像。
+
+        返回：
+            (array): 调整饱和度后的图像。
+
     """
     img_gray = grayscale(image)
     alpha = 1.0 + np.random.uniform(-var, var)
@@ -666,12 +725,15 @@ def saturation(var, image):
 
 def brightness(var, image):
     """
-    Perform color brightness on the given image.
-    Args:
-        var (float): variance.
-        image (array): image to perform color brightness.
-    Returns:
-        (array): image that performed color brightness.
+        对给定图像执行亮度增强。
+
+        参数：
+            var (float): 随机扰动范围。
+            image (array): 需要调整亮度的图像。
+
+        返回：
+            (array): 调整亮度后的图像。
+
     """
     img_bright = np.zeros(image.shape).astype(image.dtype)
     alpha = 1.0 + np.random.uniform(-var, var)
@@ -680,12 +742,15 @@ def brightness(var, image):
 
 def contrast(var, image):
     """
-    Perform color contrast on the given image.
-    Args:
-        var (float): variance.
-        image (array): image to perform color contrast.
-    Returns:
-        (array): image that performed color contrast.
+        对给定图像执行对比度增强。
+
+        参数：
+            var (float): 随机扰动范围。
+            image (array): 需要调整对比度的图像。
+
+        返回：
+            (array): 调整对比度后的图像。
+
     """
     img_gray = grayscale(image)
     img_gray.fill(np.mean(img_gray[0]))
@@ -695,12 +760,15 @@ def contrast(var, image):
 
 def saturation_list(var, images):
     """
-    Perform color saturation on the list of given images.
-    Args:
-        var (float): variance.
-        images (list): list of images to perform color saturation.
-    Returns:
-        (list): list of images that performed color saturation.
+        对给定图像列表执行饱和度增强。
+
+        参数：
+            var (float): 随机扰动范围。
+            images (list): 需要调整饱和度的图像列表。
+
+        返回：
+            (list): 调整饱和度后的图像列表。
+
     """
     alpha = 1.0 + np.random.uniform(-var, var)
 
@@ -713,12 +781,15 @@ def saturation_list(var, images):
 
 def brightness_list(var, images):
     """
-    Perform color brightness on the given list of images.
-    Args:
-        var (float): variance.
-        images (list): list of images to perform color brightness.
-    Returns:
-        (array): list of images that performed color brightness.
+        对给定图像列表执行亮度增强。
+
+        参数：
+            var (float): 随机扰动范围。
+            images (list): 需要调整亮度的图像列表。
+
+        返回：
+            (array): 调整亮度后的图像列表。
+
     """
     alpha = 1.0 + np.random.uniform(-var, var)
 
@@ -731,12 +802,15 @@ def brightness_list(var, images):
 
 def contrast_list(var, images):
     """
-    Perform color contrast on the given list of images.
-    Args:
-        var (float): variance.
-        images (list): list of images to perform color contrast.
-    Returns:
-        (array): image that performed color contrast.
+        对给定图像列表执行对比度增强。
+
+        参数：
+            var (float): 随机扰动范围。
+            images (list): 需要调整对比度的图像列表。
+
+        返回：
+            (array): 调整对比度后的图像列表。
+
     """
     alpha = 1.0 + np.random.uniform(-var, var)
 
@@ -750,14 +824,17 @@ def contrast_list(var, images):
 
 def color_jitter(image, img_brightness=0, img_contrast=0, img_saturation=0):
     """
-    Perform color jitter on the given image.
-    Args:
-        image (array): image to perform color jitter.
-        img_brightness (float): jitter ratio for brightness.
-        img_contrast (float): jitter ratio for contrast.
-        img_saturation (float): jitter ratio for saturation.
-    Returns:
-        image (array): the jittered image.
+        对给定图像执行颜色抖动。
+
+        参数：
+            image (array): 需要颜色抖动的图像。
+            img_brightness (float): 亮度抖动比例。
+            img_contrast (float): 对比度抖动比例。
+            img_saturation (float): 饱和度抖动比例。
+
+        返回：
+            image (array): 抖动后的图像。
+
     """
     jitter = []
     if img_brightness != 0:
@@ -781,14 +858,17 @@ def color_jitter(image, img_brightness=0, img_contrast=0, img_saturation=0):
 
 def revert_scaled_boxes(size, boxes, img_height, img_width):
     """
-    Revert scaled input boxes to match the original image size.
-    Args:
-        size (int): size of the cropped image.
-        boxes (array): shape (num_boxes, 4).
-        img_height (int): height of original image.
-        img_width (int): width of original image.
-    Returns:
-        reverted_boxes (array): boxes scaled back to the original image size.
+        将缩放后的输入框还原到原始图像尺寸。
+
+        参数：
+            size (int): 裁剪图像的尺寸。
+            boxes (array): shape 为 (num_boxes, 4)。
+            img_height (int): 原始图像高度。
+            img_width (int): 原始图像宽度。
+
+        返回：
+            reverted_boxes (array): 缩放回原始图像尺寸的边界框。
+
     """
     scaled_aspect = np.min([img_height, img_width])
     scale_ratio = scaled_aspect / size

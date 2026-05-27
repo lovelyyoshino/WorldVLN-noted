@@ -1,6 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
-"""Non-local helper"""
+"""Non-local 模块辅助代码。"""
 
 import torch
 import torch.nn as nn
@@ -8,12 +8,10 @@ import torch.nn as nn
 
 class Nonlocal(nn.Module):
     """
-    Builds Non-local Neural Networks as a generic family of building
-    blocks for capturing long-range dependencies. Non-local Network
-    computes the response at a position as a weighted sum of the
-    features at all positions. This building block can be plugged into
-    many computer vision architectures.
-    More details in the paper: https://arxiv.org/pdf/1711.07971.pdf
+    构建 Non-local Neural Network 模块，用来捕获长距离依赖。
+    它会把某个位置的输出表示成所有位置特征的加权和，因此可以让远距离
+    时空位置互相交换信息。这个模块可以插入很多计算机视觉网络中。
+    论文链接：https://arxiv.org/pdf/1711.07971.pdf
     """
 
     def __init__(
@@ -29,23 +27,17 @@ class Nonlocal(nn.Module):
         norm_module=nn.BatchNorm3d,
     ):
         """
-        Args:
-            dim (int): number of dimension for the input.
-            dim_inner (int): number of dimension inside of the Non-local block.
-            pool_size (list): the kernel size of spatial temporal pooling,
-                temporal pool kernel size, spatial pool kernel size, spatial
-                pool kernel size in order. By default pool_size is None,
-                then there would be no pooling used.
-            instantiation (string): supports two different instantiation method:
-                "dot_product": normalizing correlation matrix with L2.
-                "softmax": normalizing correlation matrix with Softmax.
-            zero_init_final_conv (bool): If true, zero initializing the final
-                convolution of the Non-local block.
-            zero_init_final_norm (bool):
-                If true, zero initializing the final batch norm of the Non-local
-                block.
-            norm_module (nn.Module): nn.Module for the normalization layer. The
-                default is nn.BatchNorm3d.
+                参数：
+                    dim (int): 输入特征的通道数。
+                    dim_inner (int): Non-local 模块内部使用的通道数。
+                    pool_size (list): 时空池化核大小，顺序为 temporal、height、width；
+                        默认为 None，表示不使用池化。
+                    instantiation (string): 相似度矩阵的归一化方式：
+                        "dot_product" 表示用位置数量做缩放，"softmax" 表示用 Softmax。
+                    zero_init_final_conv (bool): 为 True 时，将最后的卷积初始化为零。
+                    zero_init_final_norm (bool): 为 True 时，将最后的 BatchNorm 初始化为零。
+                    norm_module (nn.Module): 归一化层类型，默认是 nn.BatchNorm3d。
+
         """
         super(Nonlocal, self).__init__()
         self.dim = dim
@@ -66,7 +58,10 @@ class Nonlocal(nn.Module):
     def _construct_nonlocal(
         self, zero_init_final_conv, zero_init_final_norm, norm_module
     ):
-        # Three convolution heads: theta, phi, and g.
+        """
+        构建 theta、phi、g 三个投影分支，以及输出投影和可选池化层。
+        """
+        # 三个 1x1x1 卷积分支：theta、phi 和 g。
         self.conv_theta = nn.Conv3d(
             self.dim, self.dim_inner, kernel_size=1, stride=1, padding=0
         )
@@ -77,23 +72,23 @@ class Nonlocal(nn.Module):
             self.dim, self.dim_inner, kernel_size=1, stride=1, padding=0
         )
 
-        # Final convolution output.
+        # 最后的输出卷积，用于把内部通道数变回输入通道数。
         self.conv_out = nn.Conv3d(
             self.dim_inner, self.dim, kernel_size=1, stride=1, padding=0
         )
-        # Zero initializing the final convolution output.
+        # 记录是否对最终卷积做零初始化。
         self.conv_out.zero_init = zero_init_final_conv
 
-        # TODO: change the name to `norm`
+        # 待办：未来可把字段名改成 `norm`，这里先保持旧命名兼容检查点。
         self.bn = norm_module(
             num_features=self.dim,
             eps=self.norm_eps,
             momentum=self.norm_momentum,
         )
-        # Zero initializing the final bn.
+        # 记录是否对最终 bn 做零初始化。
         self.bn.transform_final_bn = zero_init_final_norm
 
-        # Optional to add the spatial-temporal pooling.
+        # 可选的时空池化，用来降低后续注意力计算量。
         if self.use_pool:
             self.pool = nn.MaxPool3d(
                 kernel_size=self.pool_size,
@@ -102,12 +97,15 @@ class Nonlocal(nn.Module):
             )
 
     def forward(self, x):
+        """
+        对输入特征执行 Non-local 注意力，并与原输入做残差相加。
+        """
         x_identity = x
         N, C, T, H, W = x.size()
 
         theta = self.conv_theta(x)
 
-        # Perform temporal-spatial pooling to reduce the computation.
+        # 对时空维度做池化以减少计算量。
         if self.use_pool:
             x = self.pool(x)
 
@@ -118,14 +116,13 @@ class Nonlocal(nn.Module):
         phi = phi.view(N, self.dim_inner, -1)
         g = g.view(N, self.dim_inner, -1)
 
-        # (N, C, TxHxW) * (N, C, TxHxW) => (N, TxHxW, TxHxW).
+        # 形状/映射说明：(N, C, TxHxW) * (N, C, TxHxW) => (N, TxHxW, TxHxW)。
         theta_phi = torch.einsum("nct,ncp->ntp", (theta, phi))
-        # For original Non-local paper, there are two main ways to normalize
-        # the affinity tensor:
-        #   1) Softmax normalization (norm on exp).
-        #   2) dot_product normalization.
+        # 原始 Non-local 论文中，affinity tensor 主要有两种归一化方式：
+        #   1) Softmax 归一化。
+        #   2) dot_product 归一化。
         if self.instantiation == "softmax":
-            # Normalizing the affinity tensor theta_phi before softmax.
+            # 在 softmax 前按通道数缩放 theta_phi。
             theta_phi = theta_phi * (self.dim_inner ** -0.5)
             theta_phi = nn.functional.softmax(theta_phi, dim=2)
         elif self.instantiation == "dot_product":
@@ -133,13 +130,13 @@ class Nonlocal(nn.Module):
             theta_phi = theta_phi / spatial_temporal_dim
         else:
             raise NotImplementedError(
-                "Unknown norm type {}".format(self.instantiation)
+                "未知归一化类型 {}".format(self.instantiation)
             )
 
-        # (N, TxHxW, TxHxW) * (N, C, TxHxW) => (N, C, TxHxW).
+        # 形状/映射说明：(N, TxHxW, TxHxW) * (N, C, TxHxW) => (N, C, TxHxW)。
         theta_phi_g = torch.einsum("ntg,ncg->nct", (theta_phi, g))
 
-        # (N, C, TxHxW) => (N, C, T, H, W).
+        # 形状/映射说明：(N, C, TxHxW) => (N, C, T, H, W)。
         theta_phi_g = theta_phi_g.view(N, self.dim_inner, T, H, W)
 
         p = self.conv_out(theta_phi_g)

@@ -23,20 +23,18 @@ logger = logging.get_logger(__name__)
 
 
 def check_nan_losses(loss):
-    """
-    Determine whether the loss is NaN (not a number).
-    Args:
-        loss (loss): loss to check whether is NaN.
+    """检查 loss 是否为 NaN，及时中断异常训练。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
     if math.isnan(loss):
-        raise RuntimeError("ERROR: Got NaN losses {}".format(datetime.now()))
+        raise RuntimeError("错误：检测到 NaN loss {}".format(datetime.now()))
 
 
 def params_count(model, ignore_bn=False):
-    """
-    Compute the number of parameters.
-    Args:
-        model (model): model to count the number of parameters.
+    """统计模型参数量。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
     if not ignore_bn:
         return np.sum([p.numel() for p in model.parameters()]).item()
@@ -50,8 +48,9 @@ def params_count(model, ignore_bn=False):
 
 
 def gpu_mem_usage():
-    """
-    Compute the GPU memory usage for the current device (GB).
+    """读取当前 GPU 显存占用。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
     if torch.cuda.is_available():
         mem_usage_bytes = torch.cuda.max_memory_allocated()
@@ -61,11 +60,9 @@ def gpu_mem_usage():
 
 
 def cpu_mem_usage():
-    """
-    Compute the system memory (RAM) usage for the current device (GB).
-    Returns:
-        usage (float): used memory (GB).
-        total (float): total memory (GB).
+    """读取当前进程或系统的 CPU 内存占用。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
     vram = psutil.virtual_memory()
     usage = (vram.total - vram.available) / 1024 ** 3
@@ -75,17 +72,9 @@ def cpu_mem_usage():
 
 
 def _get_model_analysis_input(cfg, use_train_input):
-    """
-    Return a dummy input for model analysis with batch size 1. The input is
-        used for analyzing the model (counting flops and activations etc.).
-    Args:
-        cfg (CfgNode): configs. Details can be found in
-            lib/config/defaults.py
-        use_train_input (bool): if True, return the input for training. Otherwise,
-            return the input for testing.
+    """构造模型分析用的虚拟输入张量。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
 
-    Returns:
-        inputs: the input for model analysis.
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
     rgb_dimension = 3
     if use_train_input:
@@ -112,7 +101,7 @@ def _get_model_analysis_input(cfg, use_train_input):
     else:
        model_inputs = input_tensors.cuda(non_blocking=True).unsqueeze(0)
 
-    # If detection is enabled, count flops for one proposal.
+    # 检测模式下按一个 proposal 统计 FLOPs。
     if cfg.DETECTION.ENABLE:
         bbox = torch.tensor([[0, 0, 1.0, 0, 1.0]])
         if cfg.NUM_GPUS:
@@ -124,31 +113,21 @@ def _get_model_analysis_input(cfg, use_train_input):
 
 
 def get_model_stats(model, cfg, mode, use_train_input):
-    """
-    Compute statistics for the current model given the config.
-    Args:
-        model (model): model to perform analysis.
-        cfg (CfgNode): configs. Details can be found in
-            lib/config/defaults.py
-        mode (str): Options include `flop` or `activation`. Compute either flop
-            (gflops) or activation count (mega).
-        use_train_input (bool): if True, compute statistics for training. Otherwise,
-            compute statistics for testing.
+    """计算模型 FLOPs、激活量等统计信息。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
 
-    Returns:
-        float: the total number of count of the given model.
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
     assert mode in [
         "flop",
         "activation",
-    ], "'{}' not supported for model analysis".format(mode)
+    ], "'{}' 不支持用于 model 分析".format(mode)
     if mode == "flop":
         model_stats_fun = flop_count
     elif mode == "activation":
         model_stats_fun = activation_count
 
-    # Set model to evaluation mode for analysis.
-    # Evaluation mode can avoid getting stuck with sync batchnorm.
+    # 模型分析前切换到 eval 模式。
+    # eval 模式可以避免 SyncBatchNorm 卡住。
     model_mode = model.training
     model.eval()
     inputs = _get_model_analysis_input(cfg, use_train_input)
@@ -159,26 +138,20 @@ def get_model_stats(model, cfg, mode, use_train_input):
 
 
 def log_model_info(model, cfg, use_train_input=True):
+    """记录模型结构、参数量、显存和计算量信息。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
-    Log info, includes number of parameters, gpu usage, gflops and activation count.
-        The model info is computed when the model is in validation mode.
-    Args:
-        model (model): model to log the info.
-        cfg (CfgNode): configs. Details can be found in
-            lib/config/defaults.py
-        use_train_input (bool): if True, log info for training. Otherwise,
-            log info for testing.
-    """
-    logger.info("Model:\n{}".format(model))
-    logger.info("Params: {:,}".format(params_count(model)))
-    logger.info("Mem: {:,} MB".format(gpu_mem_usage()))
+    logger.info("模型：\n{}".format(model))
+    logger.info("参数量：{:,}".format(params_count(model)))
+    logger.info("GPU 显存：{:,} MB".format(gpu_mem_usage()))
     logger.info(
-        "Flops: {:,} G".format(
+        "FLOPs：{:,} G".format(
             get_model_stats(model, cfg, "flop", use_train_input)
         )
     )
     logger.info(
-        "Activations: {:,} M".format(
+        "激活量：{:,} M".format(
             get_model_stats(model, cfg, "activation", use_train_input)
         )
     )
@@ -187,13 +160,9 @@ def log_model_info(model, cfg, use_train_input=True):
 
 
 def is_eval_epoch(cfg, cur_epoch, multigrid_schedule):
-    """
-    Determine if the model should be evaluated at the current epoch.
-    Args:
-        cfg (CfgNode): configs. Details can be found in
-            lib/config/defaults.py
-        cur_epoch (int): current epoch.
-        multigrid_schedule (List): schedule for multigrid training.
+    """判断当前 epoch 是否需要运行验证。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
     if cur_epoch + 1 == cfg.SOLVER.MAX_EPOCH:
         return True
@@ -211,13 +180,9 @@ def is_eval_epoch(cfg, cur_epoch, multigrid_schedule):
 
 
 def plot_input(tensor, bboxes=(), texts=(), path="./tmp_vis.png"):
-    """
-    Plot the input tensor with the optional bounding box and save it to disk.
-    Args:
-        tensor (tensor): a tensor with shape of `NxCxHxW`.
-        bboxes (tuple): bounding boxes with format of [[x, y, h, w]].
-        texts (tuple): a tuple of string to plot.
-        path (str): path to the image to save to.
+    """把输入视频帧和可选检测框保存成可视化图片。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
     tensor = tensor.float()
     tensor = tensor - tensor.min()
@@ -226,7 +191,7 @@ def plot_input(tensor, bboxes=(), texts=(), path="./tmp_vis.png"):
     for i in range(tensor.shape[0]):
         ax[i].axis("off")
         ax[i].imshow(tensor[i].permute(1, 2, 0))
-        # ax[1][0].axis('off')
+        # 中文说明：ax[1][0].axis('off')
         if bboxes is not None and len(bboxes) > i:
             for box in bboxes[i]:
                 x1, y1, x2, y2 = box
@@ -241,10 +206,9 @@ def plot_input(tensor, bboxes=(), texts=(), path="./tmp_vis.png"):
 
 
 def frozen_bn_stats(model):
-    """
-    Set all the bn layers to eval mode.
-    Args:
-        model (model): model to set bn layers to eval mode.
+    """把 BatchNorm 层切到 eval 模式，冻结统计量。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
     for m in model.modules():
         if isinstance(m, nn.BatchNorm3d):
@@ -252,12 +216,9 @@ def frozen_bn_stats(model):
 
 
 def aggregate_sub_bn_stats(module):
-    """
-    Recursively find all SubBN modules and aggregate sub-BN stats.
-    Args:
-        module (nn.Module)
-    Returns:
-        count (int): number of SubBN module found.
+    """递归聚合 Sub-BN 的统计量。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
     count = 0
     for child in module.children():
@@ -270,16 +231,9 @@ def aggregate_sub_bn_stats(module):
 
 
 def launch_job(cfg, init_method, func, daemon=False):
-    """
-    Run 'func' on one or more GPUs, specified in cfg
-    Args:
-        cfg (CfgNode): configs. Details can be found in
-            lib/config/defaults.py
-        init_method (str): initialization method to launch the job with multiple
-            devices.
-        func (function): job to run on GPU(s)
-        daemon (bool): The spawned processes’ daemon flag. If set to True,
-            daemonic processes will be created
+    """按配置启动单卡或多卡训练/评估任务。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
     if cfg.NUM_GPUS > 1:
         torch.multiprocessing.spawn(
@@ -301,29 +255,15 @@ def launch_job(cfg, init_method, func, daemon=False):
 
 
 def get_class_names(path, parent_path=None, subset_path=None):
-    """
-    Read json file with entries {classname: index} and return
-    an array of class names in order.
-    If parent_path is provided, load and map all children to their ids.
-    Args:
-        path (str): path to class ids json file.
-            File must be in the format {"class1": id1, "class2": id2, ...}
-        parent_path (Optional[str]): path to parent-child json file.
-            File must be in the format {"parent1": ["child1", "child2", ...], ...}
-        subset_path (Optional[str]): path to text file containing a subset
-            of class names, separated by newline characters.
-    Returns:
-        class_names (list of strs): list of class names.
-        class_parents (dict): a dictionary where key is the name of the parent class
-            and value is a list of ids of the children classes.
-        subset_ids (list of ints): list of ids of the classes provided in the
-            subset file.
+    """读取类别名文件，并可返回父子类别映射。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
     try:
         with PathManager.open(path, "r") as f:
             class2idx = json.load(f)
     except Exception as err:
-        print("Fail to load file from {} with error {}".format(path, err))
+        print("从 {} 加载文件失败，错误为 {}".format(path, err))
         return
 
     max_key = max(class2idx.values())
@@ -339,7 +279,7 @@ def get_class_names(path, parent_path=None, subset_path=None):
                 d_parent = json.load(f)
         except EnvironmentError as err:
             print(
-                "Fail to load file from {} with error {}".format(
+                "从 {} 加载文件失败，错误为 {}".format(
                     parent_path, err
                 )
             )
@@ -363,7 +303,7 @@ def get_class_names(path, parent_path=None, subset_path=None):
                 ]
         except EnvironmentError as err:
             print(
-                "Fail to load file from {} with error {}".format(
+                "从 {} 加载文件失败，错误为 {}".format(
                     subset_path, err
                 )
             )

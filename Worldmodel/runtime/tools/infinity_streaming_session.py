@@ -2,14 +2,34 @@
 # SPDX-License-Identifier: MIT
 
 """
-Streaming/session wrapper for the InfinityStar KV-cache workflow.
+InfinityStar KV-cache 工作流的 streaming/session 封装。
 
-Goal: match the lingbot-va semantics of `Compute KV -> Infer chunk -> Correction`.
+把底层 InfinityStar 世界模型封装成“在线闭环 streaming session”
 
-Key conventions:
-- Use 't0' as the text-prefix cache key and write it as GT (is_pred=False) so it won't be removed by clear_pred_cache().
-- Use 'gt_obs' as the observation-frame cache key and write it as GT (is_pred=False).
-- KV-cache entries written during inference are treated as Pred (is_pred=True) and are cleared in one shot during correction.
+  reset(prompt)
+    -> 写文本条件 t0
+
+  compute_kv_cache_gt(real_obs)
+    -> 把真实第一视角观测编码进 gt_obs cache
+
+  infer_chunk()
+    -> 基于 t0 + gt_obs 预测下一段 latent/video
+
+  correction_clear_pred()
+    -> 清掉预测 cache，只保留真实文本/观测 cache
+
+目标：对齐 lingbot-va 的“计算 KV cache -> 推理当前 chunk -> 用真实观测校正”的闭环语义。
+
+关键约定：
+- 用 't0' 作为文本前缀 cache key，并按 GT 写入（is_pred=False），这样 clear_pred_cache() 不会删它。
+- 用 'gt_obs' 作为观测帧 cache key，并按 GT 写入（is_pred=False）。
+- 推理过程中写入的 KV-cache 条目都视作 Pred（is_pred=True），在 correction 阶段一次性清理。
+
+中文导读：
+- 这个文件解释 WorldVLN 在线闭环为什么不会“闭眼滚完整条路线”。文本前缀和真实观测
+  写入 GT cache，预测时新增的 cache 标成 Pred。
+- 每一轮 segment 推理结束后，`correction_clear_pred()` 会清理 Pred cache；下一轮再把真实
+  新观测写回 `gt_obs`。因此模型的预测只服务当前动作，不会被永久当作历史事实。
 """
 
 from __future__ import annotations
@@ -28,6 +48,8 @@ from tools.run_infinity import encode_prompt
 
 @dataclass
 class StreamingSchedule:
+    """一次 chunk 推理对应的动态分辨率计划、目标尺寸和 scale 元信息。"""
+
     scale_schedule: List[Tuple[int, int, int]]
     context_info: Dict[int, Dict[str, Any]]
     tgt_h: int
@@ -37,7 +59,7 @@ class StreamingSchedule:
 
 
 def _count_cache_entries(infinity_model) -> Tuple[int, int, int]:
-    """Return (total_entries, pred_entries, gt_entries) summed over blocks."""
+    """统计所有 block 的 cache 条目数，返回 (total_entries, pred_entries, gt_entries)。"""
     total = pred = gt = 0
     for blk in infinity_model.unregistered_blocks:
         meta = getattr(blk.attn, "cached_is_pred", {})
@@ -48,6 +70,19 @@ def _count_cache_entries(infinity_model) -> Tuple[int, int, int]:
 
 
 class InfinityStreamingSession:
+    """
+    封装 InfinityStar 文本 cache、真实观测 cache、chunk 推理和预测 cache 清理。
+
+    可以把它理解成服务端闭环推理的“四步机”：
+    1. `reset()`：写入文本条件 `t0`；
+    2. `compute_kv_cache_gt()`：写入真实观测 `gt_obs`；
+    3. `infer_chunk()`：基于 `t0 + gt_obs` 预测下一段 latent，并把新增 cache 标成 Pred；
+    4. `correction_clear_pred()`：清掉本轮预测 cache，避免把“想象的未来”留到下一轮。
+
+    这样设计的核心目的是：
+    允许模型短程预演世界变化，但下一轮必须重新依赖真实观测，不能让预测无限自我滚动。
+    """
+
     def __init__(
         self,
         *,
@@ -60,6 +95,7 @@ class InfinityStreamingSession:
         gt_obs_cache_key: str = "gt_obs",
         gt_obs_rope_real_sid: int = 850,
     ):
+        """保存模型组件并初始化动态分辨率编解码函数。"""
         self.args = args
         self.infinity = infinity_model
         self.vae = vae
@@ -75,15 +111,30 @@ class InfinityStreamingSession:
         )
 
         self._text_cond_tuple = None
-        self.bs = 1  # batch size for caching (1 for no-CFG, 2 for CFG)
+        self.bs = 1  # cache 写入使用的 batch size：no-CFG 为 1，CFG 为 2。
 
     def build_schedule_for_num_frames(self, num_frames: int) -> StreamingSchedule:
-        """Build scale_schedule / context_info for the current chunk (aligned with the official inference script)."""
+        """
+        为当前 chunk 构建 `scale_schedule / context_info`，并和官方推理脚本对齐。
+
+        核心公式：
+        `pt = (num_frames - 1)//temporal_compress_rate + 1`
+
+        直觉解释：
+        video VAE 不会为每个 RGB 帧都保留一个独立 latent 时间步，而是按时间压缩率分组。
+        默认 `temporal_compress_rate=4` 时：
+        - 1 帧对应 1 个 latent 时间步；
+        - 17 帧对应 5 个 latent 时间步；
+        - 81 帧对应 21 个 latent 时间步。
+
+        这个 `pt` 会进一步决定动态分辨率表该选哪一条 `scale_schedule`。
+
+        """
         args = self.args
         dynamic_resolution_h_w, h_div_w_templates = get_dynamic_resolution_meta(args.dynamic_scale_schedule, args.video_frames)
         h_div_w_template_ = h_div_w_templates[np.argmin(np.abs(h_div_w_templates - self.h_div_w_template))]
 
-        # Video token timeline is temporally compressed: pt = (num_frames-1)//temporal_compress_rate + 1
+        # 视频 token 时间轴会被时间压缩：pt = (frames-1)//4 + 1（默认 temporal_compress_rate=4）。
         pt = (num_frames - 1) // args.temporal_compress_rate + 1
         scale_schedule = dynamic_resolution_h_w[h_div_w_template_][args.pn]["pt2scale_schedule"][pt]
 
@@ -104,16 +155,22 @@ class InfinityStreamingSession:
 
     @torch.no_grad()
     def reset(self, prompt: str, negative_prompt: str = "", cfg_scale: float = 1.0):
-        """Clear all KV caches, then write the text-prefix cache ('t0') as GT."""
+        """
+        清空所有 KV cache，然后把文本前缀 cache（'t0'）按 GT 写入。
+
+        中文导读：
+        每条新 session 先把语言指令编码进 cache。`t0` 被标记为 GT，后续清理预测 cache
+        时不会删掉它，所以同一条轨迹可以持续复用同一份语言条件。
+        """
         args = self.args
         model_dtype = next(iter(self.infinity.parameters())).dtype
         self.bs = 2 if float(cfg_scale) != 1.0 else 1
 
-        # 1) reset all blocks' caches
+        # 1) 重置所有 block 的 cache。
         for blk in self.infinity.unregistered_blocks:
             blk.attn.kv_caching(True, reset=True)
 
-        # 2) encode prompt (cond/uncond if CFG is used)
+        # 2) 编码 prompt；如果使用 CFG，同时准备 cond/uncond。
         text_cond_tuple = encode_prompt(args.text_encoder_ckpt, self.text_tokenizer, self.text_encoder, prompt, enable_positive_prompt=False, low_vram_mode=False)
         if negative_prompt:
             neg_tuple = encode_prompt(args.text_encoder_ckpt, self.text_tokenizer, self.text_encoder, negative_prompt, enable_positive_prompt=False, low_vram_mode=False)
@@ -121,20 +178,20 @@ class InfinityStreamingSession:
             neg_tuple = None
         self._text_cond_tuple = (text_cond_tuple, neg_tuple)
 
-        # 3) write text cache as GT (important: prevent being cleared by clear_pred_cache)
+        # 3) 按 GT 写入 text cache，避免被 clear_pred_cache 清掉。
         self.infinity.set_cache_write_is_pred(False)
 
-        # We re-use model helper to build prefix tokens, then forward once with scale_ind='t0'
-        # This mirrors `ar_infer_infinity_*` "text tokens forward" block.
+        # 复用模型 helper 构造 prefix tokens，然后用 scale_ind='t0' 前向传播一次。
+        # 这对应 `ar_infer_infinity_*` 里的 "text tokens forward" 代码块。
         kv_compact, lens, cu_seqlens_k, max_seqlen_k = text_cond_tuple
         text_maxlen_this_iter = max_seqlen_k
         prefix_tokens, _ = self.infinity.prepare_text_conditions(
             label_B_or_BLT=text_cond_tuple,
             cfg_list=[float(cfg_scale)],
             B=1,
-            # IMPORTANT: keep consistent with future inference (skip_text_forward=True).
-            # If negative_prompt is provided and cfg_scale != 1, unconditional branch
-            # should use negative prompt tokens instead of cfg_uncond.
+            # 注意：这里要和后续 skip_text_forward=True 的推理保持一致。
+            # 如果提供 negative_prompt 且 cfg_scale != 1，无条件分支应使用
+            # negative prompt tokens，而不是 cfg_uncond。
             negative_label_B_or_BLT=neg_tuple,
             vae_scale_schedule=None,
             text_token_only=False,
@@ -168,22 +225,53 @@ class InfinityStreamingSession:
     @torch.no_grad()
     def compute_kv_cache_gt(self, obs_video_bcthw: torch.Tensor):
         """
-        Step 1 / Step 4: encode observed frames into latent tokens and write them to the cache
-        (key=gt_obs_cache_key, is_pred=False).
+        Step 1 / Step 4：把已观测帧编码成 latent tokens，并写入 GT cache。
+
+        输入形状：
+        `obs_video_bcthw = [B,3,T,H,W]`
+
+        写入规则：
+        - cache key 使用 `gt_obs_cache_key`，默认就是 `gt_obs`；
+        - `is_pred=False`，表示这是可信的真实观测，不会被 `clear_pred_cache()` 删除。
+
+        中文导读：
+        这里写入的是“真实已经看到的第一视角观测”，不是上一步预测出来的 latent。
+        闭环纠偏正是靠这个函数把真实视频前缀重新锚定到 Transformer KV cache 中。
+        你可以把它理解成：每次客户端回传了真实新帧，服务端都要重新说一遍
+        “下面这些视觉 token 才是历史事实”。
+
+        为什么 GT cache 也必须带 RoPE：
+        Transformer 的 KV cache 里不只存“这个 token 的内容是什么”，还隐含“这个 token 在视频
+        时间/空间网格里的位置”。Infinity 的视觉注意力使用 RoPE 表示位置；如果真实观测写入
+        cache 时不带对应的 RoPE，后续生成阶段虽然能读到 `gt_obs` 的 K/V 内容，却不知道这些
+        token 属于第几帧、哪个空间 patch、哪个 scale。结果就是预测 token attend 真实观测时
+        位置坐标对不上，轻则时空关系变乱，重则和模型训练时的注意力分布不一致。
+
+        这个函数的主要作用：
+        把“客户端刚刚确认过的真实历史”编码成视觉 latent，并用正确 RoPE 写入 `gt_obs` KV cache。
+        后续 `infer_chunk()` 预测未来 chunk 时，会把 `t0` 文本 cache 和 `gt_obs` 真实观测 cache
+        一起作为上下文；预测结束后只清理 Pred cache，不清理这里写入的 GT cache。
+
         """
-        assert obs_video_bcthw.ndim == 5 and obs_video_bcthw.shape[1] == 3, "expect [B,3,T,H,W]"
+        assert obs_video_bcthw.ndim == 5 and obs_video_bcthw.shape[1] == 3, "obs_video_bcthw 期望形状为 [B,3,T,H,W]"
         device = next(iter(self.infinity.parameters())).device
         dtype = next(iter(self.infinity.parameters())).dtype
 
         obs_video_bcthw = obs_video_bcthw.to(device=device, dtype=torch.float32)
-        # VAE expects float in [-1,1]
+        # VAE 需要输入 float，范围 [-1,1]。
         features, _, _ = self.vae.encode_for_raw_features(obs_video_bcthw, scale_schedule=None, slice=True)  # [B,d,t,h,w]
 
+        # VAE 输出的 latent 时间长度同样满足 t_latent = (T_obs-1)//4 + 1（默认压缩率 4）。
         pt, ph, pw = features.shape[-3:]
         scale_schedule = [(pt, ph, pw)]
         mini_scale_pack_info = {0: {"frame_ss": 0, "frame_ee": pt}}
 
-        # Pick a valid RoPE scale index within precomputed range.
+        # 在预计算范围内选择一个合法的 RoPE scale index。
+        # 这里的 RoPE 不是为了“重新编码内容”，而是给真实观测 token 标注时空位置：
+        # - pt/ph/pw 告诉模型这批 token 覆盖多少 latent 帧和空间 patch；
+        # - real_sid 选择预计算好的视觉 RoPE 频率表；
+        # - mini_scale_pack_info 告诉 RoPE helper 当前 cache 片段对应的帧范围。
+        # 没有这一步，`gt_obs` cache 只剩内容向量，后续自回归生成时无法正确对齐真实历史的位置。
         max_scales = int(self.infinity.rope2d_freqs_grid["freqs_scales"].shape[1])
         real_sid = min(self.gt_obs_rope_real_sid, max_scales - 1)
 
@@ -195,12 +283,12 @@ class InfinityStreamingSession:
             device,
             self.args,
             mini_scale_pack_info,
-            0,  # first_full_spatial_size_scale_index
+            0,  # 第一个完整空间尺寸 scale 的索引。
         )
 
-        # write GT cache
+        # 写入 GT cache。
         self.infinity.set_cache_write_is_pred(False)
-        # repeat to match bs (CFG uses bs=2)
+        # repeat 到和 bs 一致；CFG 使用 bs=2。
         last_stage = self.infinity.embeds_codes2input(features.to(dtype=dtype), repeat=self.bs)
         block_chunks = self.infinity.block_chunks if getattr(self.infinity, "num_block_chunks", 1) > 1 else self.infinity.blocks
         with torch.amp.autocast("cuda", dtype=dtype):
@@ -236,33 +324,39 @@ class InfinityStreamingSession:
         gt_ls_Bl=None,
     ):
         """
-        Step 2: infer a future chunk based on the current cache, and mark any cache entries written during inference
-        as Pred (is_pred=True).
+        Step 2：基于当前 cache 推理未来 chunk，并把新增 cache 标成 Pred。
 
-        Note: this uses the official `autoregressive_infer`, with:
-        - kv_cache_reset=False: keep historical caches (including GT 't0' / 'gt_obs')
-        - skip_text_forward=True: avoid re-writing text cache
-        - extra_ref_text_scale_inds=['gt_obs']: allow all visual scales to attend to the observation cache
+        这里使用官方 `autoregressive_infer()`，但刻意固定了三点：
+        - `kv_cache_reset=False`：保留历史 cache（包括 GT `t0` / `gt_obs`）；
+        - `skip_text_forward=True`：不要重复写文本 prefix；
+        - `extra_ref_text_scale_inds=['gt_obs']`：允许视觉生成阶段继续 attend 真实观测 cache。
+
+        中文导读：
+        这是“预测下一段 latent 世界状态变化”的地方。它不会清空历史，而是在
+        `t0 + gt_obs` 这份上下文上继续自回归，生成本轮新的 latent。
+        但这些新增 cache 全部会被标成 Pred，意味着它们只是“当前一轮的临时想象结果”，
+        等 segment 结束后就会被清掉。
+
         """
-        assert self._text_cond_tuple is not None, "call reset() first"
+        assert self._text_cond_tuple is not None, "请先调用 reset() 写入文本条件 cache"
         text_cond_tuple, neg_tuple = self._text_cond_tuple
         if negative_prompt and neg_tuple is None:
             neg_tuple = encode_prompt(self.args.text_encoder_ckpt, self.text_tokenizer, self.text_encoder, negative_prompt, enable_positive_prompt=False, low_vram_mode=False)
 
         sched = self.build_schedule_for_num_frames(num_frames)
 
-        # Ensure lists length
+        # 确保列表长度和 schedule 一致。
         if not isinstance(cfg_list, list):
             cfg_list = [cfg_list] * len(sched.scale_schedule)
         if not isinstance(tau_list, list):
             tau_list = [tau_list] * len(sched.scale_schedule)
 
-        # pred writes
+        # 后续写入都标为 pred。
         self.infinity.set_cache_write_is_pred(True)
 
-        # Only reference gt_obs cache when it has been written.
-        # This avoids KeyError on step-0 direct-like inference where we intentionally
-        # do not write gt_obs cache to prevent double-conditioning artifacts.
+        # 只有 gt_obs cache 已写入时才引用它。
+        # 在 step-0 direct-like 推理里，我们有意不写 gt_obs cache，以避免重复条件注入伪影；
+        # 这里可以避开对应的 KeyError。
         has_gt_obs_cache = False
         for blk in self.infinity.unregistered_blocks:
             cached_k = getattr(blk.attn, "cached_k", {})
@@ -298,9 +392,19 @@ class InfinityStreamingSession:
             )
 
     def correction_clear_pred(self):
-        """Step 4: clear Pred KV cache in one shot (GT caches are kept)."""
+        """
+        Step 4：一次性清理 Pred KV cache，保留 GT cache。
+
+        中文导读：
+        这一步是闭环推理的安全阀：模型可以短程想象下一段世界变化，但想象产生的 cache
+        不会长期污染历史。下一轮决策必须重新依赖 `gt_obs` 中的真实观测。
+
+        如果跳过这一步，会发生什么：
+        模型会把自己上一轮预测出来的视觉上下文继续当作真实历史使用，误差会在多轮后持续累积，
+        最终变成“模型在和自己对话”，而不是和真实环境闭环。
+        """
         self.infinity.clear_pred_cache()
 
     def cache_stats(self) -> Tuple[int, int, int]:
+        """返回当前 KV cache 的 `(total, pred, gt)` 条目数量。"""
         return _count_cache_entries(self.infinity)
-

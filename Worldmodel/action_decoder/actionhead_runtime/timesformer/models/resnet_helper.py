@@ -1,6 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
-"""Video models."""
+"""视频模型中的 ResNet 基础模块。"""
 
 import torch
 import torch.nn as nn
@@ -12,14 +12,14 @@ from torch import einsum
 from einops import rearrange, reduce, repeat
 import torch.nn.functional as F
 from torch.nn.modules.module import Module
-# from torch.nn.modules.linear import _LinearWithBias
+# 保留的上游调试/兼容代码：from torch.nn.modules.linear import _LinearWithBias
 from torch.nn.modules.activation import MultiheadAttention
 
 import numpy as np
 
 def get_trans_func(name):
     """
-    Retrieves the transformation module by name.
+    按名称取得残差块内部使用的变换模块类。
     """
     trans_funcs = {
         "bottleneck_transform": BottleneckTransform,
@@ -36,7 +36,7 @@ def get_trans_func(name):
 
 class BasicTransform(nn.Module):
     """
-    Basic transformation: Tx3x3, 1x3x3, where T is the size of temporal kernel.
+    基础残差变换：Tx3x3 后接 1x3x3，其中 T 是 temporal kernel 大小。
     """
 
     def __init__(
@@ -55,24 +55,19 @@ class BasicTransform(nn.Module):
         block_idx=0,
     ):
         """
-        Args:
-            dim_in (int): the channel dimensions of the input.
-            dim_out (int): the channel dimension of the output.
-            temp_kernel_size (int): the temporal kernel sizes of the first
-                convolution in the basic block.
-            stride (int): the stride of the bottleneck.
-            dim_inner (None): the inner dimension would not be used in
-                BasicTransform.
-            num_groups (int): number of groups for the convolution. Number of
-                group is always 1 for BasicTransform.
-            stride_1x1 (None): stride_1x1 will not be used in BasicTransform.
-            inplace_relu (bool): if True, calculate the relu on the original
-                input without allocating new memory.
-            eps (float): epsilon for batch norm.
-            bn_mmt (float): momentum for batch norm. Noted that BN momentum in
-                PyTorch = 1 - BN momentum in Caffe2.
-            norm_module (nn.Module): nn.Module for the normalization layer. The
-                default is nn.BatchNorm3d.
+                参数：
+                    dim_in (int): 输入通道数。
+                    dim_out (int): 输出通道数。
+                    temp_kernel_size (int): basic block 中第一个卷积的 temporal kernel 大小。
+                    stride (int): 空间维度上的步幅。
+                    dim_inner (None): BasicTransform 不使用内部通道数。
+                    num_groups (int): 卷积分组数；BasicTransform 中始终为 1。
+                    stride_1x1 (None): BasicTransform 不使用 stride_1x1。
+                    inplace_relu (bool): 为 True 时在原张量上计算 ReLU，减少额外内存。
+                    eps (float): batch norm 的 epsilon。
+                    bn_mmt (float): batch norm 动量；PyTorch 中的含义是 Caffe2 的 1 - momentum。
+                    norm_module (nn.Module): 归一化层类型，默认是 nn.BatchNorm3d。
+
         """
         super(BasicTransform, self).__init__()
         self.temp_kernel_size = temp_kernel_size
@@ -82,7 +77,10 @@ class BasicTransform(nn.Module):
         self._construct(dim_in, dim_out, stride, norm_module)
 
     def _construct(self, dim_in, dim_out, stride, norm_module):
-        # Tx3x3, BN, ReLU.
+        """
+        构建 BasicTransform 的两个卷积分支。
+        """
+        # 中文说明：Tx3x3, BN, ReLU。
         self.a = nn.Conv3d(
             dim_in,
             dim_out,
@@ -95,7 +93,7 @@ class BasicTransform(nn.Module):
             num_features=dim_out, eps=self._eps, momentum=self._bn_mmt
         )
         self.a_relu = nn.ReLU(inplace=self._inplace_relu)
-        # 1x3x3, BN.
+        # 1x3x3, BN。
         self.b = nn.Conv3d(
             dim_out,
             dim_out,
@@ -111,6 +109,9 @@ class BasicTransform(nn.Module):
         self.b_bn.transform_final_bn = True
 
     def forward(self, x):
+        """
+        依次执行两个卷积子层并返回残差分支输出。
+        """
         x = self.a(x)
         x = self.a_bn(x)
         x = self.a_relu(x)
@@ -122,9 +123,9 @@ class BasicTransform(nn.Module):
 
 class X3DTransform(nn.Module):
     """
-    X3D transformation: 1x1x1, Tx3x3 (channelwise, num_groups=dim_in), 1x1x1,
-        augmented with (optional) SE (squeeze-excitation) on the 3x3x3 output.
-        T is the temporal kernel size (defaulting to 3)
+    X3D 残差变换：1x1x1、Tx3x3（可 channelwise）、1x1x1。
+    中间的 Tx3x3 输出可以接可选的 SE（squeeze-excitation）注意力，
+    T 是 temporal kernel 大小，默认通常为 3。
     """
 
     def __init__(
@@ -146,30 +147,22 @@ class X3DTransform(nn.Module):
         block_idx=0,
     ):
         """
-        Args:
-            dim_in (int): the channel dimensions of the input.
-            dim_out (int): the channel dimension of the output.
-            temp_kernel_size (int): the temporal kernel sizes of the middle
-                convolution in the bottleneck.
-            stride (int): the stride of the bottleneck.
-            dim_inner (int): the inner dimension of the block.
-            num_groups (int): number of groups for the convolution. num_groups=1
-                is for standard ResNet like networks, and num_groups>1 is for
-                ResNeXt like networks.
-            stride_1x1 (bool): if True, apply stride to 1x1 conv, otherwise
-                apply stride to the 3x3 conv.
-            inplace_relu (bool): if True, calculate the relu on the original
-                input without allocating new memory.
-            eps (float): epsilon for batch norm.
-            bn_mmt (float): momentum for batch norm. Noted that BN momentum in
-                PyTorch = 1 - BN momentum in Caffe2.
-            dilation (int): size of dilation.
-            norm_module (nn.Module): nn.Module for the normalization layer. The
-                default is nn.BatchNorm3d.
-            se_ratio (float): if > 0, apply SE to the Tx3x3 conv, with the SE
-                channel dimensionality being se_ratio times the Tx3x3 conv dim.
-            swish_inner (bool): if True, apply swish to the Tx3x3 conv, otherwise
-                apply ReLU to the Tx3x3 conv.
+                参数：
+                    dim_in (int): 输入通道数。
+                    dim_out (int): 输出通道数。
+                    temp_kernel_size (int): bottleneck 中间卷积的 temporal kernel 大小。
+                    stride (int): 空间维度上的步幅。
+                    dim_inner (int): block 内部通道数。
+                    num_groups (int): 卷积分组数；1 表示标准 ResNet，>1 常用于 ResNeXt。
+                    stride_1x1 (bool): 为 True 时 stride 放在 1x1 conv，否则放在 3x3 conv。
+                    inplace_relu (bool): 为 True 时在原张量上计算 ReLU，减少额外内存。
+                    eps (float): batch norm 的 epsilon。
+                    bn_mmt (float): batch norm 动量；PyTorch 中的含义是 Caffe2 的 1 - momentum。
+                    dilation (int): 空洞卷积 dilation 大小。
+                    norm_module (nn.Module): 归一化层类型，默认是 nn.BatchNorm3d。
+                    se_ratio (float): >0 时对 Tx3x3 conv 输出应用 SE，SE 通道数为该比例。
+                    swish_inner (bool): 为 True 时中间层用 Swish，否则用 ReLU。
+
         """
         super(X3DTransform, self).__init__()
         self.temp_kernel_size = temp_kernel_size
@@ -200,9 +193,12 @@ class X3DTransform(nn.Module):
         dilation,
         norm_module,
     ):
+        """
+        构建 X3DTransform 的 1x1x1、Tx3x3、1x1x1 三段结构。
+        """
         (str1x1, str3x3) = (stride, 1) if self._stride_1x1 else (1, stride)
 
-        # 1x1x1, BN, ReLU.
+        # 中文说明：1x1x1, BN, ReLU。
         self.a = nn.Conv3d(
             dim_in,
             dim_inner,
@@ -216,7 +212,7 @@ class X3DTransform(nn.Module):
         )
         self.a_relu = nn.ReLU(inplace=self._inplace_relu)
 
-        # Tx3x3, BN, ReLU.
+        # 中文说明：Tx3x3, BN, ReLU。
         self.b = nn.Conv3d(
             dim_inner,
             dim_inner,
@@ -231,7 +227,7 @@ class X3DTransform(nn.Module):
             num_features=dim_inner, eps=self._eps, momentum=self._bn_mmt
         )
 
-        # Apply SE attention or not
+        # 按 block 位置决定是否应用 SE attention。
         use_se = True if (self._block_idx + 1) % 2 else False
         if self._se_ratio > 0.0 and use_se:
             self.se = SE(dim_inner, self._se_ratio)
@@ -241,7 +237,7 @@ class X3DTransform(nn.Module):
         else:
             self.b_relu = nn.ReLU(inplace=self._inplace_relu)
 
-        # 1x1x1, BN.
+        # 1x1x1, BN。
         self.c = nn.Conv3d(
             dim_inner,
             dim_out,
@@ -256,14 +252,17 @@ class X3DTransform(nn.Module):
         self.c_bn.transform_final_bn = True
 
     def forward(self, x):
+        """
+        按子模块顺序执行 X3DTransform。
+        """
         for block in self.children():
             x = block(x)
         return x
 
 class BottleneckTransform(nn.Module):
     """
-    Bottleneck transformation: Tx1x1, 1x3x3, 1x1x1, where T is the size of
-        temporal kernel.
+    Bottleneck 残差变换：Tx1x1、1x3x3、1x1x1。
+    其中 T 是 temporal kernel 大小。
     """
 
     def __init__(
@@ -283,26 +282,20 @@ class BottleneckTransform(nn.Module):
         block_idx=0,
     ):
         """
-        Args:
-            dim_in (int): the channel dimensions of the input.
-            dim_out (int): the channel dimension of the output.
-            temp_kernel_size (int): the temporal kernel sizes of the first
-                convolution in the bottleneck.
-            stride (int): the stride of the bottleneck.
-            dim_inner (int): the inner dimension of the block.
-            num_groups (int): number of groups for the convolution. num_groups=1
-                is for standard ResNet like networks, and num_groups>1 is for
-                ResNeXt like networks.
-            stride_1x1 (bool): if True, apply stride to 1x1 conv, otherwise
-                apply stride to the 3x3 conv.
-            inplace_relu (bool): if True, calculate the relu on the original
-                input without allocating new memory.
-            eps (float): epsilon for batch norm.
-            bn_mmt (float): momentum for batch norm. Noted that BN momentum in
-                PyTorch = 1 - BN momentum in Caffe2.
-            dilation (int): size of dilation.
-            norm_module (nn.Module): nn.Module for the normalization layer. The
-                default is nn.BatchNorm3d.
+                参数：
+                    dim_in (int): 输入通道数。
+                    dim_out (int): 输出通道数。
+                    temp_kernel_size (int): bottleneck 第一个卷积的 temporal kernel 大小。
+                    stride (int): 空间维度上的步幅。
+                    dim_inner (int): block 内部通道数。
+                    num_groups (int): 卷积分组数；1 表示标准 ResNet，>1 常用于 ResNeXt。
+                    stride_1x1 (bool): 为 True 时 stride 放在 1x1 conv，否则放在 3x3 conv。
+                    inplace_relu (bool): 为 True 时在原张量上计算 ReLU，减少额外内存。
+                    eps (float): batch norm 的 epsilon。
+                    bn_mmt (float): batch norm 动量；PyTorch 中的含义是 Caffe2 的 1 - momentum。
+                    dilation (int): 空洞卷积 dilation 大小。
+                    norm_module (nn.Module): 归一化层类型，默认是 nn.BatchNorm3d。
+
         """
         super(BottleneckTransform, self).__init__()
         self.temp_kernel_size = temp_kernel_size
@@ -330,11 +323,14 @@ class BottleneckTransform(nn.Module):
         dilation,
         norm_module,
     ):
+        """
+        构建 BottleneckTransform 的三个卷积阶段。
+        """
         (str1x1, str3x3) = (stride, 1) if self._stride_1x1 else (1, stride)
 
-        #print(str1x1, str3x3)
+        # 保留的上游调试/兼容代码：print(str1x1, str3x3)
 
-        # Tx1x1, BN, ReLU.
+        # 中文说明：Tx1x1, BN, ReLU。
         self.a = nn.Conv3d(
             dim_in,
             dim_inner,
@@ -348,7 +344,7 @@ class BottleneckTransform(nn.Module):
         )
         self.a_relu = nn.ReLU(inplace=self._inplace_relu)
 
-        # 1x3x3, BN, ReLU.
+        # 中文说明：1x3x3, BN, ReLU。
         self.b = nn.Conv3d(
             dim_inner,
             dim_inner,
@@ -364,7 +360,7 @@ class BottleneckTransform(nn.Module):
         )
         self.b_relu = nn.ReLU(inplace=self._inplace_relu)
 
-        # 1x1x1, BN.
+        # 1x1x1, BN。
         self.c = nn.Conv3d(
             dim_inner,
             dim_out,
@@ -379,18 +375,21 @@ class BottleneckTransform(nn.Module):
         self.c_bn.transform_final_bn = True
 
     def forward(self, x):
-        # Explicitly forward every layer.
-        # Branch2a.
+        """
+        逐层执行 bottleneck 残差分支。
+        """
+        # 显式执行每一层。
+        # 中文说明：Branch2a。
         x = self.a(x)
         x = self.a_bn(x)
         x = self.a_relu(x)
 
-        # Branch2b.
+        # 中文说明：Branch2b。
         x = self.b(x)
         x = self.b_bn(x)
         x = self.b_relu(x)
 
-        # Branch2c
+        # 中文说明：Branch2c。
         x = self.c(x)
         x = self.c_bn(x)
         return x
@@ -398,7 +397,7 @@ class BottleneckTransform(nn.Module):
 
 class ResBlock(nn.Module):
     """
-    Residual block.
+    ResNet 残差块。
     """
 
     def __init__(
@@ -420,34 +419,26 @@ class ResBlock(nn.Module):
         drop_connect_rate=0.0,
     ):
         """
-        ResBlock class constructs redisual blocks. More details can be found in:
-            Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
-            "Deep residual learning for image recognition."
-            https://arxiv.org/abs/1512.03385
-        Args:
-            dim_in (int): the channel dimensions of the input.
-            dim_out (int): the channel dimension of the output.
-            temp_kernel_size (int): the temporal kernel sizes of the middle
-                convolution in the bottleneck.
-            stride (int): the stride of the bottleneck.
-            trans_func (string): transform function to be used to construct the
-                bottleneck.
-            dim_inner (int): the inner dimension of the block.
-            num_groups (int): number of groups for the convolution. num_groups=1
-                is for standard ResNet like networks, and num_groups>1 is for
-                ResNeXt like networks.
-            stride_1x1 (bool): if True, apply stride to 1x1 conv, otherwise
-                apply stride to the 3x3 conv.
-            inplace_relu (bool): calculate the relu on the original input
-                without allocating new memory.
-            eps (float): epsilon for batch norm.
-            bn_mmt (float): momentum for batch norm. Noted that BN momentum in
-                PyTorch = 1 - BN momentum in Caffe2.
-            dilation (int): size of dilation.
-            norm_module (nn.Module): nn.Module for the normalization layer. The
-                default is nn.BatchNorm3d.
-            drop_connect_rate (float): basic rate at which blocks are dropped,
-                linearly increases from input to output blocks.
+                构建一个残差块。更多背景见：
+                    说明：Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
+                    说明："Deep residual learning for image recognition."
+                    引用/来源：https://arxiv.org/abs/1512.03385
+                参数：
+                    dim_in (int): 输入通道数。
+                    dim_out (int): 输出通道数。
+                    temp_kernel_size (int): bottleneck 中间卷积的 temporal kernel 大小。
+                    stride (int): 空间维度上的步幅。
+                    trans_func (string): 用来构建残差分支的变换函数。
+                    dim_inner (int): block 内部通道数。
+                    num_groups (int): 卷积分组数；1 表示标准 ResNet，>1 常用于 ResNeXt。
+                    stride_1x1 (bool): 为 True 时 stride 放在 1x1 conv，否则放在 3x3 conv。
+                    inplace_relu (bool): 为 True 时在原张量上计算 ReLU，减少额外内存。
+                    eps (float): batch norm 的 epsilon。
+                    bn_mmt (float): batch norm 动量；PyTorch 中的含义是 Caffe2 的 1 - momentum。
+                    dilation (int): 空洞卷积 dilation 大小。
+                    norm_module (nn.Module): 归一化层类型，默认是 nn.BatchNorm3d。
+                    drop_connect_rate (float): block 被随机丢弃的基础比例，通常随深度增加。
+
         """
         super(ResBlock, self).__init__()
         self._inplace_relu = inplace_relu
@@ -484,7 +475,10 @@ class ResBlock(nn.Module):
         norm_module,
         block_idx,
     ):
-        # Use skip connection with projection if dim or res change.
+        """
+        构建残差块的 shortcut 分支和主变换分支。
+        """
+        # 如果通道数或空间分辨率改变，就用投影 shortcut。
         if (dim_in != dim_out) or (stride != 1):
             self.branch1 = nn.Conv3d(
                 dim_in,
@@ -514,7 +508,7 @@ class ResBlock(nn.Module):
         self.relu = nn.ReLU(self._inplace_relu)
 
     def _drop_connect(self, x, drop_ratio):
-        """Apply dropconnect to x"""
+        """对输入 x 应用 dropconnect。"""
         keep_ratio = 1.0 - drop_ratio
         mask = torch.empty(
             [x.shape[0], 1, 1, 1, 1], dtype=x.dtype, device=x.device
@@ -525,6 +519,9 @@ class ResBlock(nn.Module):
         return x
 
     def forward(self, x):
+        """
+        执行残差分支、可选 dropconnect、shortcut 相加和 ReLU。
+        """
         f_x = self.branch2(x)
         if self.training and self._drop_connect_rate > 0.0:
             f_x = self._drop_connect(f_x, self._drop_connect_rate)
@@ -538,13 +535,14 @@ class ResBlock(nn.Module):
 
 class ResStage(nn.Module):
     """
-    Stage of 3D ResNet. It expects to have one or more tensors as input for
-        single pathway (C2D, I3D, Slow), and multi-pathway (SlowFast) cases.
-        More details can be found here:
+        3D ResNet 的一个 stage。
+        它既支持单 pathway 输入（C2D、I3D、Slow），也支持多 pathway 输入（SlowFast）。
+        更多背景见：
 
-        Christoph Feichtenhofer, Haoqi Fan, Jitendra Malik, and Kaiming He.
-        "SlowFast networks for video recognition."
-        https://arxiv.org/pdf/1812.03982.pdf
+            说明：Christoph Feichtenhofer, Haoqi Fan, Jitendra Malik, and Kaiming He.
+            说明："SlowFast networks for video recognition."
+            引用/来源：https://arxiv.org/pdf/1812.03982.pdf
+
     """
 
     def __init__(
@@ -569,49 +567,28 @@ class ResStage(nn.Module):
         drop_connect_rate=0.0,
     ):
         """
-        The `__init__` method of any subclass should also contain these arguments.
-        ResStage builds p streams, where p can be greater or equal to one.
-        Args:
-            dim_in (list): list of p the channel dimensions of the input.
-                Different channel dimensions control the input dimension of
-                different pathways.
-            dim_out (list): list of p the channel dimensions of the output.
-                Different channel dimensions control the input dimension of
-                different pathways.
-            temp_kernel_sizes (list): list of the p temporal kernel sizes of the
-                convolution in the bottleneck. Different temp_kernel_sizes
-                control different pathway.
-            stride (list): list of the p strides of the bottleneck. Different
-                stride control different pathway.
-            num_blocks (list): list of p numbers of blocks for each of the
-                pathway.
-            dim_inner (list): list of the p inner channel dimensions of the
-                input. Different channel dimensions control the input dimension
-                of different pathways.
-            num_groups (list): list of number of p groups for the convolution.
-                num_groups=1 is for standard ResNet like networks, and
-                num_groups>1 is for ResNeXt like networks.
-            num_block_temp_kernel (list): extent the temp_kernel_sizes to
-                num_block_temp_kernel blocks, then fill temporal kernel size
-                of 1 for the rest of the layers.
-            nonlocal_inds (list): If the tuple is empty, no nonlocal layer will
-                be added. If the tuple is not empty, add nonlocal layers after
-                the index-th block.
-            dilation (list): size of dilation for each pathway.
-            nonlocal_group (list): list of number of p nonlocal groups. Each
-                number controls how to fold temporal dimension to batch
-                dimension before applying nonlocal transformation.
-                https://github.com/facebookresearch/video-nonlocal-net.
-            instantiation (string): different instantiation for nonlocal layer.
-                Supports two different instantiation method:
-                    "dot_product": normalizing correlation matrix with L2.
-                    "softmax": normalizing correlation matrix with Softmax.
-            trans_func_name (string): name of the the transformation function apply
-                on the network.
-            norm_module (nn.Module): nn.Module for the normalization layer. The
-                default is nn.BatchNorm3d.
-            drop_connect_rate (float): basic rate at which blocks are dropped,
-                linearly increases from input to output blocks.
+                初始化 ResStage。
+                ResStage 会构建 p 条 pathway，其中 p >= 1。
+                参数：
+                    dim_in (list): p 条 pathway 的输入通道数列表。
+                    dim_out (list): p 条 pathway 的输出通道数列表。
+                    temp_kernel_sizes (list): p 条 pathway 中 bottleneck 的 temporal kernel 列表。
+                    stride (list): p 条 pathway 的空间步幅列表。
+                    num_blocks (list): 每条 pathway 中 block 数量列表。
+                    dim_inner (list): 每条 pathway 的内部通道数列表。
+                    num_groups (list): 每条 pathway 的卷积分组数；1 表示标准 ResNet，>1 常用于 ResNeXt。
+                    num_block_temp_kernel (list): 前多少个 block 使用 temp_kernel_sizes，
+                        剩余 block 的 temporal kernel 填 1。
+                    nonlocal_inds (list): 为空时不加 Non-local；非空时在指定 block 后添加。
+                    dilation (list): 每条 pathway 的空洞卷积 dilation 大小。
+                    nonlocal_group (list): 每条 pathway 的 Non-local 分组数；用于在执行
+                        Non-local 前把 temporal 维折叠到 batch 维。
+                        引用/来源：https://github.com/facebookresearch/video-nonlocal-net.
+                    instantiation (string): Non-local 层的归一化方式，支持 "dot_product" 和 "softmax"。
+                    trans_func_name (string): stage 中使用的变换函数名称。
+                    norm_module (nn.Module): 归一化层类型，默认是 nn.BatchNorm3d。
+                    drop_connect_rate (float): block 被随机丢弃的基础比例，通常随深度增加。
+
         """
         super(ResStage, self).__init__()
         assert all(
@@ -678,11 +655,14 @@ class ResStage(nn.Module):
         dilation,
         norm_module,
     ):
+        """
+        为每条 pathway 逐个创建 ResBlock，并按配置插入 Non-local 模块。
+        """
         for pathway in range(self.num_pathways):
             for i in range(self.num_blocks[pathway]):
-                # Retrieve the transformation function.
+                # 取得残差分支使用的变换函数。
                 trans_func = get_trans_func(trans_func_name)
-                # Construct the block.
+                # 构建当前残差块。
                 res_block = ResBlock(
                     dim_in[pathway] if i == 0 else dim_out[pathway],
                     dim_out[pathway],
@@ -712,6 +692,9 @@ class ResStage(nn.Module):
                     )
 
     def forward(self, inputs):
+        """
+        对每条 pathway 顺序执行 stage 内的 ResBlock 和可选 Non-local 模块。
+        """
         output = []
         for pathway in range(self.num_pathways):
             x = inputs[pathway]
@@ -724,7 +707,7 @@ class ResStage(nn.Module):
                     )
                     b, c, t, h, w = x.shape
                     if self.nonlocal_group[pathway] > 1:
-                        # Fold temporal dimension into batch dimension.
+                        # 将 temporal 维折叠到 batch 维，便于分组执行 Non-local。
                         x = x.permute(0, 2, 1, 3, 4)
                         x = x.reshape(
                             b * self.nonlocal_group[pathway],
@@ -736,7 +719,7 @@ class ResStage(nn.Module):
                         x = x.permute(0, 2, 1, 3, 4)
                     x = nln(x)
                     if self.nonlocal_group[pathway] > 1:
-                        # Fold back to temporal dimension.
+                        # 将折叠后的 batch 维恢复回 temporal 维。
                         x = x.permute(0, 2, 1, 3, 4)
                         x = x.reshape(b, t, c, h, w)
                         x = x.permute(0, 2, 1, 3, 4)

@@ -13,15 +13,15 @@
 # limitations under the License.
 ##############################################################################
 #
-# Based on:
+# 中文说明：Based on:
 # --------------------------------------------------------
-# ActivityNet
+# 中文说明：ActivityNet
 # Copyright (c) 2015 ActivityNet
 # Licensed under The MIT License
 # [see https://github.com/activitynet/ActivityNet/blob/master/LICENSE for details]
 # --------------------------------------------------------
 
-"""Helper functions for AVA evaluation."""
+"""AVA 行为检测评估辅助函数。"""
 
 from __future__ import (
     absolute_import,
@@ -47,25 +47,17 @@ logger = logging.getLogger(__name__)
 
 
 def make_image_key(video_id, timestamp):
-    """Returns a unique identifier for a video id & timestamp."""
+    """把 video_id 与时间戳拼成 AVA 评估使用的唯一图像键。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
+    """
     return "%s,%04d" % (video_id, int(timestamp))
 
 
 def read_csv(csv_file, class_whitelist=None, load_score=False):
-    """Loads boxes and class labels from a CSV file in the AVA format.
-    CSV file format described at https://research.google.com/ava/download.html.
-    Args:
-      csv_file: A file object.
-      class_whitelist: If provided, boxes corresponding to (integer) class labels
-        not in this set are skipped.
-    Returns:
-      boxes: A dictionary mapping each unique image key (string) to a list of
-        boxes, given as coordinates [y1, x1, y2, x2].
-      labels: A dictionary mapping each unique image key (string) to a list of
-        integer class lables, matching the corresponding box in `boxes`.
-      scores: A dictionary mapping each unique image key (string) to a list of
-        score values lables, matching the corresponding label in `labels`. If
-        scores are not provided in the csv, then they will default to 1.0.
+    """读取 AVA 格式 CSV，解析检测框、类别和分数。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
     """
     boxes = defaultdict(list)
     labels = defaultdict(list)
@@ -73,7 +65,7 @@ def read_csv(csv_file, class_whitelist=None, load_score=False):
     with PathManager.open(csv_file, "r") as f:
         reader = csv.reader(f)
         for row in reader:
-            assert len(row) in [7, 8], "Wrong number of columns: " + row
+            assert len(row) in [7, 8], "列数错误：" + row
             image_key = make_image_key(row[0], row[1])
             x1, y1, x2, y2 = [float(n) for n in row[2:6]]
             action_id = int(row[6])
@@ -89,25 +81,25 @@ def read_csv(csv_file, class_whitelist=None, load_score=False):
 
 
 def read_exclusions(exclusions_file):
-    """Reads a CSV file of excluded timestamps.
-    Args:
-      exclusions_file: A file object containing a csv of video-id,timestamp.
-    Returns:
-      A set of strings containing excluded image keys, e.g. "aaaaaaaaaaa,0904",
-      or an empty set if exclusions file is None.
+    """读取 AVA 排除列表，得到不参与评估的时间戳集合。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
     """
     excluded = set()
     if exclusions_file:
         with PathManager.open(exclusions_file, "r") as f:
             reader = csv.reader(f)
             for row in reader:
-                assert len(row) == 2, "Expected only 2 columns, got: " + row
+                assert len(row) == 2, "期望只有 2 列，实际为：" + row
                 excluded.add(make_image_key(row[0], row[1]))
     return excluded
 
 
 def read_labelmap(labelmap_file):
-    """Read label map and class ids."""
+    """读取 AVA label map，得到类别 id 与类别名称。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
+    """
 
     labelmap = []
     class_ids = set()
@@ -125,7 +117,10 @@ def read_labelmap(labelmap_file):
 
 
 def evaluate_ava_from_files(labelmap, groundtruth, detections, exclusions):
-    """Run AVA evaluation given annotation/prediction files."""
+    """从标注文件和预测文件加载数据并运行 AVA 评估。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
+    """
 
     categories, class_whitelist = read_labelmap(labelmap)
     excluded_keys = read_exclusions(exclusions)
@@ -145,7 +140,10 @@ def evaluate_ava(
     video_idx_to_name=None,
     name="latest",
 ):
-    """Run AVA evaluation given numpy arrays."""
+    """直接使用 numpy 数组运行 AVA 检测评估。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
+    """
 
     eval_start = time.time()
 
@@ -157,24 +155,25 @@ def evaluate_ava(
         video_idx_to_name=video_idx_to_name,
     )
 
-    logger.info("Evaluating with %d unique GT frames." % len(groundtruth[0]))
-    logger.info(
-        "Evaluating with %d unique detection frames" % len(detections[0])
-    )
+    logger.info("正在评估 %d 个唯一 GT 帧。" % len(groundtruth[0]))
+    logger.info("正在评估 %d 个唯一检测结果帧" % len(detections[0]))
 
     write_results(detections, "detections_%s.csv" % name)
     write_results(groundtruth, "groundtruth_%s.csv" % name)
 
     results = run_evaluation(categories, groundtruth, detections, excluded_keys)
 
-    logger.info("AVA eval done in %f seconds." % (time.time() - eval_start))
+    logger.info("AVA 评估完成，耗时 %f 秒。" % (time.time() - eval_start))
     return results["PascalBoxes_Precision/mAP@0.5IOU"]
 
 
 def run_evaluation(
     categories, groundtruth, detections, excluded_keys, verbose=True
 ):
-    """AVA evaluation main logic."""
+    """AVA 评估主流程，负责组织真实标注、预测结果和评估器。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
+    """
 
     pascal_evaluator = object_detection_evaluation.PascalDetectionEvaluator(
         categories
@@ -189,8 +188,8 @@ def run_evaluation(
         if image_key in excluded_keys:
             logging.info(
                 (
-                    "Found excluded timestamp in ground truth: %s. "
-                    "It will be ignored."
+                    "在真实标注中发现被排除的时间戳：%s。"
+                    "该项将被忽略。"
                 ),
                 image_key,
             )
@@ -218,8 +217,8 @@ def run_evaluation(
         if image_key in excluded_keys:
             logging.info(
                 (
-                    "Found excluded timestamp in detections: %s. "
-                    "It will be ignored."
+                    "在检测结果中发现被排除的时间戳：%s。"
+                    "该项将被忽略。"
                 ),
                 image_key,
             )
@@ -256,9 +255,9 @@ def get_ava_eval_data(
     verbose=False,
     video_idx_to_name=None,
 ):
-    """
-    Convert our data format into the data format used in official AVA
-    evaluation.
+    """把项目内部检测输出转换为官方 AVA 评估器需要的数据结构。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
     """
 
     out_scores = defaultdict(list)
@@ -273,7 +272,7 @@ def get_ava_eval_data(
 
         key = video + "," + "%04d" % (sec)
         batch_box = boxes[i].tolist()
-        # The first is batch idx.
+        # 第一列是 batch 索引。
         batch_box = [batch_box[j] for j in [0, 2, 1, 4, 3]]
 
         one_scores = scores[i].tolist()
@@ -288,7 +287,10 @@ def get_ava_eval_data(
 
 
 def write_results(detections, filename):
-    """Write prediction results into official formats."""
+    """把预测结果写成官方 AVA 提交/评估格式。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
+    """
     start = time.time()
 
     boxes, labels, scores = detections
@@ -300,5 +302,5 @@ def write_results(detections, filename):
                     % (key, box[1], box[0], box[3], box[2], label, score)
                 )
 
-    logger.info("AVA results wrote to %s" % filename)
-    logger.info("\ttook %d seconds." % (time.time() - start))
+    logger.info("AVA 结果已写入 %s" % filename)
+    logger.info("\t耗时 %d 秒。" % (time.time() - start))

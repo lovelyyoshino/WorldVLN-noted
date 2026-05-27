@@ -2,27 +2,34 @@
 # -*- coding: utf-8 -*-
 
 """
-Windows-friendly client script used by action-aware GRPO workflows.
+Action-aware GRPO 工作流使用的 Windows 友好客户端脚本。
 
-Protocol:
-- One trajectory corresponds to one `session_id` (typically the route folder name).
-- Upload frames incrementally: first 1 warmup frame, then `step` frames per call until `num_frames` is reached.
+中文导读：
+这个文件是 Windows 侧 rollout/调试客户端，协议与 `infer/client.py` 一致：
+同一个 `session_id` 先发 1 帧预热图像，再按 `step` 上传真实新帧。当前
+`tsformer_latent` Stage-2 服务端返回 16 个逐帧动作；旧 4 个宏动作输出
+仍保留兼容处理。
 
-Server output:
-- Delta actions are in cm/deg, ordered as [dx, dy, dz, droll, dyaw, dpitch].
-- action_head_mode=tsformer_latent: emits 4 macro actions per segment.
-- action_head_mode=actionhead_ref_vit: emits `step` per-frame actions per segment (step=16 -> 16 actions).
+协议：
+- 一条轨迹对应一个 `session_id`，通常使用 route 文件夹名。
+- 逐步上传帧：先上传 1 帧预热图像，之后每次上传 `step` 帧，直到达到 `num_frames`。
 
-Client outputs (two JSON files per segment, filename includes session_id):
-1) actions json:
-   - actions_server_order: Nx6 in server order (N depends on action_head_mode)
-   - actions_client_order: Nx6 in an alternate order used by some downstream tooling
-   - action_frames: per-action frame identifiers (dataset: path; unrealcv: saved filename)
-   - cumsum_*: cumulative sums of actions (within the file)
-2) poses json (absolute coordinates):
-   - segment 0: points include start + N endpoints (1+N points)
-   - later segments: points include N endpoints only
-   - pose order is [x, y, z, roll, yaw, pitch] in cm/deg
+服务端输出：
+- 动作增量使用 cm/deg，顺序为 [dx, dy, dz, droll, dyaw, dpitch]。
+- action_head_mode=tsformer_latent：当前 Stage-2 服务端每个 segment 返回 `step` 个逐帧动作；
+  旧 P2P checkpoint 可能返回 4 个宏动作，本客户端兼容两种输出。
+- action_head_mode=actionhead_ref_vit：每个 segment 返回 `step` 个逐帧动作（step=16 -> 16 actions）。
+
+客户端输出：每个 segment 写两个 JSON 文件，文件名包含 session_id。
+步骤说明：1) actions json：
+   - actions_server_order：服务端顺序的 Nx6，N 取决于 action_head_mode。
+   - actions_client_order：部分下游工具使用的另一种 Nx6 顺序。
+   - action_frames：每个动作对应的帧标识；dataset 模式为路径，unrealcv 模式为保存的文件名。
+   - cumsum_*：本文件内动作的累计和。
+2) poses json（绝对坐标）：
+   - segment 0：points 包含起点和 N 个终点，共 1+N 个点。
+   - 后续 segment：points 只包含 N 个终点。
+   - pose 顺序为 [x, y, z, roll, yaw, pitch]，单位 cm/deg。
 """
 
 from __future__ import annotations
@@ -42,15 +49,18 @@ from PIL import Image
 
 
 def _read_json(path: str):
+    """读取 UTF-8 JSON；task、meta、summary 等文件都通过这个入口读取。"""
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
 def _time_id() -> str:
+    """生成本次 rollout/客户端运行的时间戳 ID。"""
     return time.strftime("%Y-%m-%d_%H-%M-%S")
 
 
 def _sorted_frame_paths(images_dir: str) -> List[str]:
+    """按文件名排序读取离线 route 的真实观测帧。"""
     exts = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
     names = [n for n in os.listdir(images_dir) if n.lower().endswith(exts)]
     names.sort()
@@ -58,30 +68,34 @@ def _sorted_frame_paths(images_dir: str) -> List[str]:
 
 
 def _take_with_pad(paths: List[str], n: int, pad_short_real: bool) -> List[str]:
-    """Pad by repeating last frame path (official scripts behavior)."""
+    """通过重复最后一帧路径来 pad，行为与官方脚本一致。"""
     if len(paths) >= int(n):
         return paths[: int(n)]
     if not paths:
-        raise ValueError("no real frames found")
+        raise ValueError("未找到真实帧")
     if not bool(pad_short_real):
-        raise ValueError(f"need >={n} frames, got {len(paths)} (use --pad_short_real 1 to pad)")
+        raise ValueError(f"需要至少 {n} 帧，实际只有 {len(paths)} 帧（可用 --pad_short_real 1 重复最后一帧补齐）")
     return paths + [paths[-1]] * (int(n) - int(len(paths)))
 
 
 def _image_to_data_url_jpeg(path: str, quality: int = 90) -> str:
+    """把磁盘图片编码成 JPEG data URL。"""
     return _image_to_data_url(path, codec="jpeg", quality=int(quality))
 
 
 def _pil_to_data_url_jpeg(img: Image.Image, quality: int = 90) -> str:
+    """把 PIL 图像编码成 JPEG data URL。"""
     return _pil_to_data_url(img, codec="jpeg", quality=int(quality))
 
 
 def _image_to_data_url(path: str, *, codec: str, quality: int = 90) -> str:
+    """读取图片并编码为服务端 JSON 请求中的 base64 data URL。"""
     img = Image.open(path).convert("RGB")
     return _pil_to_data_url(img, codec=str(codec), quality=int(quality))
 
 
 def _pil_to_data_url(img: Image.Image, *, codec: str, quality: int = 90) -> str:
+    """将 PIL RGB 图像按 JPEG/PNG 编码成 `data:image/...;base64,...`。"""
     img = img.convert("RGB")
     bio = BytesIO()
     c = str(codec).lower().strip()
@@ -92,16 +106,18 @@ def _pil_to_data_url(img: Image.Image, *, codec: str, quality: int = 90) -> str:
         img.save(bio, format="PNG")
         mime = "image/png"
     else:
-        raise ValueError(f"unsupported image codec: {codec}")
+        raise ValueError(f"不支持的 image_codec: {codec}")
     b64 = base64.b64encode(bio.getvalue()).decode("utf-8")
     return f"data:{mime};base64,{b64}"
 
 
 def _ensure_dir(path: str) -> None:
+    """创建目录；目录已存在时不报错。"""
     os.makedirs(path, exist_ok=True)
 
 
 def _save_pil_jpeg(img: Image.Image, path: str, *, quality: int = 95) -> None:
+    """保存仿真采集帧，方便回放每个动作对应的观测。"""
     parent = os.path.dirname(path)
     if parent:
         _ensure_dir(parent)
@@ -110,17 +126,17 @@ def _save_pil_jpeg(img: Image.Image, path: str, *, quality: int = 95) -> None:
 
 def _safe_np_image_to_pil_rgb(img_any: Any) -> Image.Image:
     """
-    UnrealCV get_image(...) often returns np.ndarray(H,W,3) (many implementations use BGR).
-    Convert to a PIL RGB image as robustly as possible.
+    UnrealCV get_image(...) 经常返回 np.ndarray(H,W,3)，很多实现使用 BGR。
+    这里尽量稳健地转换成 PIL RGB 图像。
     """
     if isinstance(img_any, Image.Image):
         return img_any.convert("RGB")
     try:
         import numpy as np  # type: ignore
     except Exception as e:
-        raise RuntimeError("numpy is required to convert UnrealCV images") from e
+        raise RuntimeError("转换 UnrealCV 图像需要安装 numpy") from e
     if not isinstance(img_any, np.ndarray):
-        raise TypeError(f"Unsupported image type: {type(img_any)}")
+        raise TypeError(f"不支持的图像类型: {type(img_any)}")
     arr = img_any
     if arr.ndim == 3 and int(arr.shape[2]) == 3:
         try:
@@ -132,21 +148,22 @@ def _safe_np_image_to_pil_rgb(img_any: Any) -> Image.Image:
         return Image.fromarray(arr.astype("uint8"), mode="RGB")
     if arr.ndim == 2:
         return Image.fromarray(arr.astype("uint8"), mode="L").convert("RGB")
-    raise ValueError(f"Unsupported ndarray image shape: {getattr(arr, 'shape', None)}")
+    raise ValueError(f"不支持的 ndarray 图像形状: {getattr(arr, 'shape', None)}")
 
 
 def _reorder_server_to_client(a6: List[float]) -> List[float]:
     """
-    server order: [dx,dy,dz,droll,dyaw,dpitch]
-    client order: [dx,dy,dz,droll,dpitch,dyaw]
+    服务端顺序：[dx,dy,dz,droll,dyaw,dpitch]
+    客户端顺序：[dx,dy,dz,droll,dpitch,dyaw]
     """
     if len(a6) != 6:
-        raise ValueError(f"action must be 6D, got {len(a6)}")
+        raise ValueError(f"action 必须是 6D，实际长度为 {len(a6)}")
     dx, dy, dz, droll, dyaw, dpitch = [float(x) for x in a6]
     return [dx, dy, dz, droll, dpitch, dyaw]
 
 
 def _cumsum_actions(actions: List[List[float]]) -> List[List[float]]:
+    """逐维累加动作序列，写入日志用于检查累计位移/角度。"""
     out: List[List[float]] = []
     cur = [0.0] * 6
     for a in actions:
@@ -157,14 +174,14 @@ def _cumsum_actions(actions: List[List[float]]) -> List[List[float]]:
 
 def _apply_action_to_pose(pose_xyz_rpy: List[float], action_dxdy_dz_droll_dyaw_dpitch: List[float]) -> List[float]:
     """
-    pose: [x,y,z,roll,yaw,pitch] in cm/deg
-    action: [dx,dy,dz,droll,dyaw,dpitch] in cm/deg
-    simple world-frame integration: pose_next = pose + delta
+    pose: [x,y,z,roll,yaw,pitch]，单位 cm/deg。
+    action: [dx,dy,dz,droll,dyaw,dpitch]，单位 cm/deg。
+    简单世界坐标系积分：pose_next = pose + delta。
     """
     if len(pose_xyz_rpy) != 6:
-        raise ValueError(f"pose must be 6D, got {len(pose_xyz_rpy)}")
+        raise ValueError(f"pose 必须是 6D，实际长度为 {len(pose_xyz_rpy)}")
     if len(action_dxdy_dz_droll_dyaw_dpitch) != 6:
-        raise ValueError(f"action must be 6D, got {len(action_dxdy_dz_droll_dyaw_dpitch)}")
+        raise ValueError(f"action 必须是 6D，实际长度为 {len(action_dxdy_dz_droll_dyaw_dpitch)}")
     return [float(pose_xyz_rpy[i]) + float(action_dxdy_dz_droll_dyaw_dpitch[i]) for i in range(6)]
 
 
@@ -177,17 +194,24 @@ def _apply_action_to_pose_with_frame(
     integrate_roll_pitch: bool = True,
 ) -> List[float]:
     """
-    pose: [x,y,z,roll,yaw,pitch] in cm/deg
-    action: [dx,dy,dz,droll,dyaw,dpitch] in cm/deg
+        pose: [x,y,z,roll,yaw,pitch]，单位 cm/deg。
+        action: [dx,dy,dz,droll,dyaw,dpitch]，单位 cm/deg。
 
-    - action_frame="world": direct add (world-frame deltas)
-    - action_frame="body": treat (dx,dy) as body-frame (forward/right) and rotate by yaw; body_apply_order selects
-      whether to turn first then translate, translate first then turn, or use midpoint integration.
+        - action_frame="world"：直接相加，即世界坐标系增量。
+        - action_frame="body"：把 (dx,dy) 当作机体系（前进/右移），再按 yaw 旋到世界系；
+          body_apply_order 决定先转向再平移、先平移再转向，还是用中点积分。
 
-    Note: dz is added along Z(up) directly; this is typically acceptable when pitch/roll are small or ignored.
+        机体系动作转世界系的核心公式：
+        核心积分公式：`x += dx*cos(theta) - dy*sin(theta)`，
+        公式/形状说明：`y += dx*sin(theta) + dy*cos(theta)`。
+        `yaw_first` 先用 `yaw+dyaw` 当 theta；`trans_first` 用旧 yaw 当 theta；
+        `midpoint` 用 `yaw + 0.5*dyaw` 当 theta，近似一边转向一边平移。
+
+        注意：dz 直接沿 Z(up) 相加；当 pitch/roll 很小或被忽略时，这通常可接受。
+
     """
     if len(pose_xyz_rpy) != 6 or len(action_dxdy_dz_droll_dyaw_dpitch) != 6:
-        raise ValueError("pose/action must be 6D")
+        raise ValueError("pose/action 都必须是 6D")
     x, y, z, roll, yaw, pitch = [float(v) for v in pose_xyz_rpy]
     dx, dy, dz, droll, dyaw, dpitch = [float(v) for v in action_dxdy_dz_droll_dyaw_dpitch]
 
@@ -197,7 +221,9 @@ def _apply_action_to_pose_with_frame(
         y += dy
         z += dz
     elif fr == "body":
-        # Use yaw to rotate body (forward/right) into world (x/y).
+        # 使用 yaw 将机体系（前进/右移）方向旋到世界系（x/y）。
+        # theta 的选择：yaw_first 用转向后的 yaw；trans_first 用转向前的 yaw；
+        # midpoint 用 yaw+0.5*dyaw，表示在本小段内边转边走。
         import math
 
         order = str(body_apply_order).strip().lower()
@@ -211,16 +237,17 @@ def _apply_action_to_pose_with_frame(
             theta = math.radians(float(yaw) + 0.5 * float(dyaw))
             yaw = float(yaw) + float(dyaw)
         else:
-            raise ValueError(f"bad body_apply_order={body_apply_order}, expected yaw_first|trans_first|midpoint")
+            raise ValueError(f"非法 body_apply_order={body_apply_order}，期望 yaw_first|trans_first|midpoint")
         cos_t = math.cos(theta)
         sin_t = math.sin(theta)
+        # 二维旋转公式：body 中 dx 是前进、dy 是右移；乘上旋转矩阵后变成 world 的 x/y 增量。
         x += dx * cos_t - dy * sin_t
         y += dx * sin_t + dy * cos_t
         z += dz
     else:
-        raise ValueError(f"bad action_frame={action_frame}, expected world|body")
+        raise ValueError(f"非法 action_frame={action_frame}，期望 world|body")
 
-    # Angles
+    # 角度积分。
     if fr == "world":
         yaw += dyaw
     if bool(integrate_roll_pitch):
@@ -230,10 +257,11 @@ def _apply_action_to_pose_with_frame(
 
 
 def _http_post_json(url: str, payload: Dict, *, timeout_s: int = 120) -> Dict:
+    """向 WorldVLN 推理服务发送 JSON 请求并返回响应 dict。"""
     try:
         import requests  # type: ignore
     except Exception as e:
-        raise RuntimeError("requests is required for client HTTP calls") from e
+        raise RuntimeError("客户端 HTTP 调用需要安装 requests") from e
 
     r = requests.post(url, json=payload, timeout=int(timeout_s))
     if r.status_code != 200:
@@ -243,6 +271,8 @@ def _http_post_json(url: str, payload: Dict, *, timeout_s: int = 120) -> Dict:
 
 @dataclass
 class Route:
+    """离线 dataset 模式下的一条 route 描述。"""
+
     route_dir: str
     route_id: str
     images_dir: str
@@ -252,6 +282,8 @@ class Route:
 
 @dataclass
 class UnrealcvServiceSession:
+    """service 模式维护的当前 UnrealCV 任务状态。"""
+
     session_id: str
     prompt: str
     current_pose: List[float]
@@ -264,6 +296,7 @@ _SERVICE_LOCK = threading.Lock()
 
 
 def _discover_routes(dataset_root: str) -> List[Route]:
+    """扫描 dataset_root，发现包含 images/ 与 meta.json 的 route。"""
     routes: List[Route] = []
     for name in sorted(os.listdir(dataset_root)):
         rd = os.path.join(dataset_root, name)
@@ -287,12 +320,14 @@ def _discover_routes(dataset_root: str) -> List[Route]:
 
 
 def _load_prompt(meta_path: str) -> str:
+    """从 meta.json 中按兼容字段读取导航指令。"""
     meta = _read_json(meta_path)
     prompt = (meta.get("instruction") or meta.get("instruction_unified") or meta.get("prompt") or "").strip()
     return str(prompt)
 
 
 def _load_start_pose_cm_deg(raw_logs_path: Optional[str]) -> List[float]:
+    """读取 route 起始位姿；没有 raw_logs.json 时返回全零 pose。"""
     if not raw_logs_path or not os.path.exists(raw_logs_path):
         return [0.0] * 6
     arr = _read_json(raw_logs_path)
@@ -301,46 +336,47 @@ def _load_start_pose_cm_deg(raw_logs_path: Optional[str]) -> List[float]:
     p0 = arr[0]
     if not (isinstance(p0, (list, tuple)) and len(p0) == 6):
         return [0.0] * 6
-    return [float(x) for x in p0]  # [x,y,z,roll,yaw,pitch] in cm/deg
+    return [float(x) for x in p0]  # [x,y,z,roll,yaw,pitch]，单位 cm/deg。
 
 
 def _load_num_frames_step_from_config(config_json: str) -> Tuple[int, int]:
+    """从服务端风格 config.json 中读取 num_frames 和 step。"""
     cfg = _read_json(config_json)
     if not isinstance(cfg, dict):
-        raise ValueError(f"bad config json: {config_json}")
+        raise ValueError(f"config json 格式错误（期望 dict）: {config_json}")
     inf = cfg.get("infinity", cfg)
     num_frames = int(inf.get("num_frames", 81))
     step = int(inf.get("step", 16))
     if num_frames <= 0 or step <= 0:
-        raise ValueError(f"bad num_frames/step in config: num_frames={num_frames} step={step}")
+        raise ValueError(f"config 中 num_frames/step 非法: num_frames={num_frames} step={step}")
     return num_frames, step
 
 
 def _load_instruction_and_initial_pose_from_task_json(task_json_path: str) -> Tuple[str, List[float]]:
     """
-    Read a UAV-Flow-Eval task json (e.g. test_jsons/*.json) and extract:
-    - instruction (or instruction_unified)
-    - initial_pos: [x,y,z,roll,yaw,pitch] in cm/deg
+    读取 UAV-Flow-Eval task json（例如 test_jsons/*.json），提取：
+    - instruction（或 instruction_unified）
+    - initial_pos: [x,y,z,roll,yaw,pitch]，单位 cm/deg。
     """
     d = _read_json(task_json_path)
     if not isinstance(d, dict):
-        raise ValueError(f"bad task json (expect dict): {task_json_path}")
+        raise ValueError(f"task json 格式错误（期望 dict）: {task_json_path}")
     instr = (d.get("instruction") or d.get("instruction_unified") or "").strip()
     if not instr:
-        raise ValueError(f"empty instruction in task json: {task_json_path}")
+        raise ValueError(f"task json 中 instruction 为空: {task_json_path}")
     initial_pos = d.get("initial_pos", None)
     if not (isinstance(initial_pos, list) and len(initial_pos) >= 6):
-        raise ValueError(f"bad initial_pos in task json: {task_json_path}")
+        raise ValueError(f"task json 中 initial_pos 非法: {task_json_path}")
     init6 = [float(x) for x in initial_pos[:6]]
     return instr, init6
 
 
 def _build_obj_info_from_task_json(task_json_path: str) -> Optional[Dict[str, Any]]:
     """
-    Align with batch_run_act_all.py:
-    - only place an object when both obj_id and use_obj exist
-    - prefer target_pos[:3]/target_pos[3:] as obj_pos/obj_rot when available
-    - otherwise fall back to obj_pos/obj_rot
+    与 batch_run_act_all.py 对齐：
+    - 只有 obj_id 和 use_obj 都存在时才放置目标物。
+    - 如果有 target_pos，优先用 target_pos[:3]/target_pos[3:] 作为 obj_pos/obj_rot。
+    - 否则回退到 obj_pos/obj_rot。
     """
     d = _read_json(task_json_path)
     if not isinstance(d, dict):
@@ -367,9 +403,9 @@ def _build_obj_info_from_task_json(task_json_path: str) -> Optional[Dict[str, An
 
 def _init_marker_objects_if_needed(env: Any) -> None:
     """
-    Create/initialize marker objects in the scene (once), aligned with batch_run_act_all.py init behavior.
+    在场景中创建/初始化 marker objects（只做一次），对齐 batch_run_act_all.py 的初始化行为。
     """
-    # Avoid repeated init across tasks in same process.
+    # 避免同一进程内跨任务重复初始化。
     if bool(getattr(env.unwrapped, "_xjc_marker_inited", False)):
         return
     try:
@@ -385,13 +421,13 @@ def _init_marker_objects_if_needed(env: Any) -> None:
         time.sleep(1.0)
         env.unwrapped._xjc_marker_inited = True
     except Exception:
-        # Objects may already exist or class names may differ; do not block the main control flow.
+        # 对象可能已存在，或 class name 有差异；不要阻塞主控制流。
         env.unwrapped._xjc_marker_inited = True
 
 
 def _create_obj_if_needed_unrealcv(env: Any, obj_info: Optional[Dict[str, Any]]) -> None:
     """
-    Place the task object; logic aligned with batch_run_act_all.py create_obj_if_needed.
+    放置任务目标物；逻辑与 batch_run_act_all.py 的 create_obj_if_needed 对齐。
     """
     if obj_info is None:
         return
@@ -418,19 +454,19 @@ def _create_obj_if_needed_unrealcv(env: Any, obj_info: Optional[Dict[str, Any]])
         if int(use_obj) in (1, 2):
             time.sleep(1.0)
     except Exception:
-        # Do not interrupt the main control flow; avoid failing due to scene-asset differences.
+        # 不打断主控制流，避免因为场景 asset 差异导致失败。
         pass
 
 
 def _setup_unrealcv_camera_follow(env: Any, *, cam_id: int = 0) -> None:
     """
-    Bind the camera to the UAV position to approximate a first-person view.
-    Mirrors batch_run_act_all.py set_cam logic.
+    将相机绑定到 UAV 位置，近似第一人称视角。
+    逻辑对应 batch_run_act_all.py 的 set_cam。
     """
     x, y, z = env.unwrapped.unrealcv.get_obj_location(env.unwrapped.player_list[0])
-    roll, yaw, pitch = env.unwrapped.unrealcv.get_obj_rotation(env.unwrapped.player_list[0])  # [roll, yaw, pitch]
+    roll, yaw, pitch = env.unwrapped.unrealcv.get_obj_rotation(env.unwrapped.player_list[0])  # 代码/形状说明：[roll, yaw, pitch]
     cam_loc = [x, y, z]
-    cam_rot = [roll, pitch, yaw]  # UnrealCV set_cam rotation order
+    cam_rot = [roll, pitch, yaw]  # UnrealCV set_cam 的旋转顺序。
     env.unwrapped.unrealcv.set_cam(int(cam_id), cam_loc, cam_rot)
 
 
@@ -441,11 +477,11 @@ def _apply_pose_unrealcv(
     yaw_offset_deg: float = -180.0,
 ) -> None:
     """
-    Apply [x,y,z,roll,yaw,pitch] to the simulator (cm/deg).
-    For the drone, gym_unrealcv set_obj_rotation may not take effect reliably, so we use set_rotation(yaw).
+    将 [x,y,z,roll,yaw,pitch] 应用到模拟器，单位 cm/deg。
+    对 drone 而言，gym_unrealcv 的 set_obj_rotation 不一定稳定生效，因此这里使用 set_rotation(yaw)。
     """
     if len(pose_xyz_rpy) < 6:
-        raise ValueError(f"pose must be 6D, got {len(pose_xyz_rpy)}")
+        raise ValueError(f"pose 必须是 6D，实际长度为 {len(pose_xyz_rpy)}")
     x, y, z, _roll, yaw, _pitch = [float(v) for v in pose_xyz_rpy[:6]]
     env.unwrapped.unrealcv.set_obj_location(env.unwrapped.player_list[0], [x, y, z])
     env.unwrapped.unrealcv.set_rotation(env.unwrapped.player_list[0], float(yaw) + float(yaw_offset_deg))
@@ -453,12 +489,14 @@ def _apply_pose_unrealcv(
 
 
 def _capture_unrealcv_lit_pil(env: Any, *, cam_id: int = 0) -> Image.Image:
+    """抓取 UnrealCV lit 视图并统一转成 PIL RGB。"""
     _setup_unrealcv_camera_follow(env, cam_id=int(cam_id))
     img = env.unwrapped.unrealcv.get_image(int(cam_id), "lit")
     return _safe_np_image_to_pil_rgb(img)
 
 
 def _angle_diff_deg(a: float, b: float) -> float:
+    """计算两个角度之间的最短环形差值。"""
     d = (float(a) - float(b) + 180.0) % 360.0 - 180.0
     return abs(d)
 
@@ -473,7 +511,7 @@ def _wait_pose_settle(
     pos_tol_cm: float = 1.0,
     yaw_tol_deg: float = 1.0,
 ) -> None:
-    """Wait for set_obj_location/set_rotation to take effect, reducing the chance of capturing a stale first frame."""
+    """等待 set_obj_location/set_rotation 生效，降低抓到陈旧首帧的概率。"""
     tx, ty, tz = [float(v) for v in target_pose_xyz_rpy[:3]]
     tyaw_set = float(target_pose_xyz_rpy[4]) + float(yaw_offset_deg)
     for _ in range(int(max_tries)):
@@ -497,12 +535,13 @@ def _make_unrealcv_env(
     resolution_wh: Tuple[int, int],
     ue_port: int,
 ) -> Any:
+    """创建并初始化 gym_unrealcv 环境，供本地 rollout 或 service 模式使用。"""
     try:
         import gym  # type: ignore
         import gym_unrealcv  # noqa: F401  # type: ignore
         from gym_unrealcv.envs.wrappers import configUE, time_dilation  # type: ignore
     except Exception as e:
-        raise SystemExit(f"mode=service/unrealcv requires gym & gym_unrealcv imports, but failed: {e}") from e
+        raise SystemExit(f"mode=service/unrealcv 需要导入 gym 和 gym_unrealcv，但导入失败: {e}") from e
 
     env = gym.make(str(env_id))
     if int(time_dilation_value) > 0:
@@ -531,6 +570,7 @@ def _make_unrealcv_env(
 
 
 def _reset_unrealcv_env(env: Any) -> None:
+    """重置仿真环境，并恢复 viewport/物理设置。"""
     try:
         env.reset()
     except Exception:
@@ -543,6 +583,12 @@ def _reset_unrealcv_env(env: Any) -> None:
 
 
 def _resolve_service_task_fields(payload: Dict[str, Any], task_json_root: str) -> Tuple[str, List[float], Optional[Dict[str, Any]], str, str]:
+    """
+    解析 service /reset 请求中的任务字段。
+
+    请求可以直接带 prompt/initial_pose，也可以只给 task_id/task_json_path，由本地 task_json_root
+    解析出指令、初始位姿和目标物体信息。
+    """
     task_id = str(payload.get("task_id", "") or "").strip()
     task_json_path = str(payload.get("task_json_path", "") or "").strip()
     loaded_prompt = ""
@@ -562,7 +608,7 @@ def _resolve_service_task_fields(payload: Dict[str, Any], task_json_root: str) -
 
     prompt = str(payload.get("prompt") or payload.get("instruction") or loaded_prompt or "").strip()
     if not prompt:
-        raise ValueError("prompt or instruction is required")
+        raise ValueError("必须提供 prompt 或 instruction")
 
     initial_pose = payload.get("initial_pose", None)
     if isinstance(initial_pose, list) and len(initial_pose) >= 6:
@@ -570,7 +616,7 @@ def _resolve_service_task_fields(payload: Dict[str, Any], task_json_root: str) -
     elif loaded_pose is not None:
         init6 = [float(x) for x in loaded_pose[:6]]
     else:
-        raise ValueError("initial_pose is required when task json is unavailable")
+        raise ValueError("无法读取 task json 时必须提供 initial_pose")
 
     obj_info = payload.get("obj_info", None)
     if isinstance(obj_info, dict):
@@ -582,11 +628,13 @@ def _resolve_service_task_fields(payload: Dict[str, Any], task_json_root: str) -
 
 
 def _capture_env_data_url(env: Any, *, image_codec: str, jpeg_quality: int) -> str:
+    """采集当前仿真画面并编码成 data URL，返回给远端 rollout 进程。"""
     img = _capture_unrealcv_lit_pil(env, cam_id=0)
     return _pil_to_data_url(img, codec=str(image_codec), quality=int(jpeg_quality))
 
 
 def _json_response(handler: BaseHTTPRequestHandler, status_code: int, obj: Dict[str, Any]) -> None:
+    """给内置 HTTP 服务写 JSON 响应。"""
     raw = json.dumps(obj, ensure_ascii=False).encode("utf-8")
     handler.send_response(int(status_code))
     handler.send_header("Content-Type", "application/json; charset=utf-8")
@@ -604,9 +652,10 @@ def _service_reset(
     image_codec: str,
     jpeg_quality: int,
 ) -> Tuple[UnrealcvServiceSession, Dict[str, Any]]:
+    """处理 service /reset：重置任务、放置目标物、采集初始帧并返回 session。"""
     session_id = str(payload.get("session_id", "") or "").strip()
     if not session_id:
-        raise ValueError("session_id is required")
+        raise ValueError("必须提供 session_id")
     prompt, init_pose, obj_info, task_id, task_json_name = _resolve_service_task_fields(payload, task_json_root)
 
     _reset_unrealcv_env(env)
@@ -647,21 +696,22 @@ def _service_step_actions(
     image_codec: str,
     jpeg_quality: int,
 ) -> Dict[str, Any]:
+    """处理 service /step_actions：执行一批 6D 动作并返回新观测帧。"""
     session_id = str(payload.get("session_id", "") or "").strip()
     if not session_id:
-        raise ValueError("session_id is required")
+        raise ValueError("必须提供 session_id")
     if session_id != str(session.session_id):
-        raise ValueError(f"active session mismatch: expected {session.session_id}, got {session_id}")
+        raise ValueError(f"活动 session 不匹配: 期望 {session.session_id}，实际 {session_id}")
     actions = payload.get("actions", None)
     if not isinstance(actions, list) or len(actions) <= 0:
-        raise ValueError("actions must be a non-empty list")
+        raise ValueError("actions 必须是非空 list")
 
     images_base64: List[str] = []
     frame_indices: List[int] = []
     world_poses: List[List[float]] = []
     for action in actions:
         if not (isinstance(action, list) and len(action) == 6):
-            raise ValueError("each action must be a 6D list")
+            raise ValueError("每个 action 都必须是 6D list")
         next_pose = _apply_action_to_pose_with_frame(
             session.current_pose,
             [float(x) for x in action[:6]],
@@ -700,15 +750,20 @@ def _make_service_handler(
     image_codec: str,
     jpeg_quality: int,
 ):
+    """构造绑定当前 UnrealCV env 的 HTTP handler 类。"""
     class _ServiceHandler(BaseHTTPRequestHandler):
+        """内置 HTTP 服务：提供 /health、/reset、/step_actions 给远端 GRPO rollout 调用。"""
+
         server_version = "UAVFlowUnrealCVService/0.1"
 
         def log_message(self, format: str, *args) -> None:  # noqa: A003
+            """关闭默认 HTTP 访问日志，避免 rollout 日志被刷屏。"""
             return
 
         def do_GET(self) -> None:  # noqa: N802
+            """处理 /health 请求，返回当前 service 与 session 状态。"""
             if self.path.rstrip("/") != "/health":
-                _json_response(self, 404, {"error": f"unknown path: {self.path}"})
+                _json_response(self, 404, {"error": f"未知路径: {self.path}"})
                 return
             with _SERVICE_LOCK:
                 session = state.get("session")
@@ -723,11 +778,12 @@ def _make_service_handler(
                 )
 
         def do_POST(self) -> None:  # noqa: N802
+            """处理 /reset 和 /step_actions 请求。"""
             try:
                 content_len = int(self.headers.get("Content-Length", "0") or "0")
                 payload = json.loads(self.rfile.read(content_len).decode("utf-8") or "{}")
                 if not isinstance(payload, dict):
-                    raise ValueError("payload must be a json object")
+                    raise ValueError("payload 必须是 JSON 对象")
                 with _SERVICE_LOCK:
                     if self.path.rstrip("/") == "/reset":
                         session, resp = _service_reset(
@@ -744,7 +800,7 @@ def _make_service_handler(
                     if self.path.rstrip("/") == "/step_actions":
                         session = state.get("session")
                         if session is None:
-                            raise ValueError("no active session; call /reset first")
+                            raise ValueError("没有活动 session；请先调用 /reset")
                         resp = _service_step_actions(
                             payload=payload,
                             env=env,
@@ -757,7 +813,7 @@ def _make_service_handler(
                         )
                         _json_response(self, 200, resp)
                         return
-                _json_response(self, 404, {"error": f"unknown path: {self.path}"})
+                _json_response(self, 404, {"error": f"未知路径: {self.path}"})
             except Exception as e:
                 _json_response(self, 500, {"error": str(e)})
 
@@ -776,6 +832,7 @@ def run_env_service(
     image_codec: str,
     jpeg_quality: int,
 ) -> None:
+    """启动模拟器侧 HTTP 服务，让远端 GRPO 进程通过网络控制本地 UnrealCV。"""
     state: Dict[str, Optional[UnrealcvServiceSession]] = {"session": None}
     handler = _make_service_handler(
         env=env,
@@ -788,7 +845,7 @@ def run_env_service(
         jpeg_quality=int(jpeg_quality),
     )
     server = ThreadingHTTPServer((str(host), int(port)), handler)
-    print(f"[env_service] listening on http://{host}:{port}")
+    print(f"[env_service] 正在监听 http://{host}:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -802,11 +859,12 @@ def run_env_service(
 
 
 def _split_action_to_substeps(action6: List[float], substeps: int) -> List[List[float]]:
+    """把旧 4 macro action 均分成多个子步，以兼容 16 帧执行节奏。"""
     if len(action6) != 6:
-        raise ValueError(f"action must be 6D, got {len(action6)}")
+        raise ValueError(f"action 必须是 6D，实际长度为 {len(action6)}")
     k = int(substeps)
     if k <= 0:
-        raise ValueError(f"substeps must be >0, got {substeps}")
+        raise ValueError(f"substeps 必须 >0，实际为 {substeps}")
     a = [float(x) for x in action6]
     return [[a[i] / float(k) for i in range(6)] for _ in range(k)]
 
@@ -836,16 +894,16 @@ def run_one_task_unrealcv(
     save_images: bool = True,
 ) -> None:
     """
-    Online mode (gym_unrealcv):
-    - Read instruction + initial_pos from task_json
-    - Capture 256x256 lit RGB (resolution set by ConfigUEWrapper)
-    - Upload frames incrementally: 1, step, step, ... (prefix_mode=false; history is stored server-side by session_id)
-    - tsformer_latent: after receiving 4 macro actions, split each into 4 sub-actions to execute step(=16) steps;
-      capture and save one frame after each executed step
-    - actionhead_ref_vit: directly receive step(=16) per-frame actions; execute one-by-one and save frames
+    在线模式（gym_unrealcv）：
+    - 从 task_json 读取 instruction 和 initial_pos。
+    - 抓取 256x256 lit RGB；分辨率由 ConfigUEWrapper 设置。
+    - 按增量上传帧：1, step, step, ...（prefix_mode=false；历史帧由服务端按 session_id 保存）。
+    - tsformer_latent：当前 Stage-2 服务端返回 step(=16) 个逐帧动作；旧 4-action 宏动作
+      输出仍被接受，并会把每个宏动作拆成 4 个子动作。
+    - actionhead_ref_vit：直接接收 step(=16) 个逐帧动作，逐个执行并保存帧。
 
-    Note: on n==1 the server may only warm up and emit no actions. This client advances the server timeline by
-    capturing/uploading `step` frames in place to make seg0 available.
+    注意：n==1 时服务端可能只做预热，不发射动作。客户端会原地采集/上传 `step`
+    帧来推进服务端时间线，使 seg0 可以生成。
     """
     instruction, init_pose = _load_instruction_and_initial_pose_from_task_json(task_json_path)
     obj_info = _build_obj_info_from_task_json(task_json_path)
@@ -857,7 +915,7 @@ def run_one_task_unrealcv(
     images_dir = os.path.join(out_dir, "images")
     _ensure_dir(images_dir)
 
-    # Reset env state per task
+    # 每个任务开始前重置 env 状态。
     try:
         env.reset()
     except Exception:
@@ -872,7 +930,7 @@ def run_one_task_unrealcv(
     _create_obj_if_needed_unrealcv(env, obj_info)
     _apply_pose_unrealcv(env, pose_xyz_rpy=init_pose, yaw_offset_deg=float(yaw_offset_deg))
     _wait_pose_settle(env, target_pose_xyz_rpy=init_pose, yaw_offset_deg=float(yaw_offset_deg))
-    # Give the camera extra time to refresh to reduce stale-view risk for the first frame.
+    # 给相机额外刷新时间，降低首帧抓到陈旧视图的风险。
     time.sleep(1.0)
 
     summary = {
@@ -907,6 +965,7 @@ def run_one_task_unrealcv(
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
     def _post_frames(frames: List[Image.Image], *, include_instruction: bool) -> Dict:
+        """向 WorldVLN 服务端发送本轮新增真实帧；首轮附带 instruction 并重置 session。"""
         payload: Dict[str, Any] = {
             "session_id": session_id,
             "images_base64": [_pil_to_data_url(im, codec=str(image_codec), quality=int(jpeg_quality)) for im in frames],
@@ -923,10 +982,10 @@ def run_one_task_unrealcv(
             payload["reset_session"] = True
         return _http_post_json(server_base_url.rstrip("/") + "/v1/predict_delta_actions", payload, timeout_s=int(timeout_s))
 
-    # Frame 1: initial
+    # 第 1 帧：初始观测。
     frame_idx = 1
     actions_executed = 0
-    cur_pose = init_pose[:]  # [x,y,z,roll,yaw,pitch]
+    cur_pose = init_pose[:]  # 代码/形状说明：[x,y,z,roll,yaw,pitch]
     im0 = _capture_unrealcv_lit_pil(env, cam_id=0)
     if bool(save_images):
         _save_pil_jpeg(im0, os.path.join(images_dir, f"frame_{frame_idx:04d}.jpg"), quality=95)
@@ -941,6 +1000,7 @@ def run_one_task_unrealcv(
         pose_before: List[float],
         action_image_names: Optional[List[str]] = None,
     ) -> None:
+        """把每个 segment 的动作、累计动作和积分位姿写成 GRPO 可回放日志。"""
         actions_client = [_reorder_server_to_client(a) for a in actions_server]
         cumsum_server = _cumsum_actions(actions_server)
         cumsum_client = _cumsum_actions(actions_client)
@@ -967,7 +1027,7 @@ def run_one_task_unrealcv(
         with open(os.path.join(out_dir, f"{base_name}_seg{seg:02d}_actions.json"), "w", encoding="utf-8") as f:
             json.dump(actions_json, f, ensure_ascii=False, indent=2)
 
-        # Pose points after each action (macro or per-frame)
+        # 每个动作后的 pose 点；动作可能是 macro，也可能是逐帧动作。
         p = pose_before[:]
         pts: List[List[float]] = []
         if int(seg) == 0:
@@ -993,17 +1053,18 @@ def run_one_task_unrealcv(
         with open(os.path.join(out_dir, f"{base_name}_seg{seg:02d}_poses.json"), "w", encoding="utf-8") as f:
             json.dump(poses_json, f, ensure_ascii=False, indent=2)
 
-    # Determine expected action count for execution
+    # 确定执行时预期的动作数量。
+    # 当前 `tsformer_latent` Stage-2 返回逐帧动作；旧 P2P 风格路径返回 4 个宏动作。
     mode_l = str(action_head_mode).strip().lower()
     is_per_frame_mode = mode_l in ("actionhead_ref_vit", "actionhead_ref", "actionhead_vit", "ref_vit", "actionhead")
     expected_actions = int(step) if bool(is_per_frame_mode) else 4
 
     call_i = 0
-    last_upload_n = 1  # first upload: 1 frame
+    last_upload_n = 1  # 首次上传：1 帧。
     max_actions_i = int(max_actions)
-    # Stop conditions:
-    # - max_actions>0: stop after executing that many actions (strict protocol: 48 actions => 1+48 frames)
-    # - else: fall back to num_frames bound
+    # 停止条件：
+    # - max_actions>0：执行到指定动作数后停止（严格协议：48 个动作 => 1+48 帧）。
+    # - 否则：回退到 num_frames 边界。
     while True:
         if max_actions_i > 0 and int(actions_executed) >= int(max_actions_i):
             break
@@ -1028,13 +1089,13 @@ def run_one_task_unrealcv(
         if done:
             break
 
-        # Collect next 'step' frames (incremental upload)
+        # 收集下一批 `step` 帧，用于增量上传。
         new_frames: List[Image.Image] = []
         if pending_actions is None:
-            # Hold position to fill frames until server is ready to emit a segment.
+            # 保持位置不动并补帧，直到服务端准备好发射某个 segment。
             for _ in range(int(step)):
                 if max_actions_i > 0:
-                    # In strict action-count mode, do NOT advance frames without executing actions.
+                    # 严格动作计数模式下，没有执行动作就不要推进帧。
                     break
                 if frame_idx >= int(num_frames):
                     break
@@ -1048,7 +1109,7 @@ def run_one_task_unrealcv(
             produced = 0
             action_image_names: List[str] = []
             if bool(is_per_frame_mode):
-                # Execute per-frame actions directly: (typically 16 actions -> 16 frames)
+                # 逐帧动作直接执行；通常 16 个动作 -> 16 帧。
                 for a in pending_actions:
                     if produced >= total_needed:
                         break
@@ -1078,7 +1139,7 @@ def run_one_task_unrealcv(
                     action_image_names.append(name)
                     new_frames.append(im)
             else:
-                # Execute 4 macro actions, each split into 4 substeps => 16 frames
+                # 执行旧版 4 个宏动作；每个拆成 4 个子步，总共 16 帧。
                 substeps_per_action = 4
                 for a in pending_actions:
                     for sub in _split_action_to_substeps(a, substeps=substeps_per_action):
@@ -1115,8 +1176,8 @@ def run_one_task_unrealcv(
                         break
                     if max_actions_i <= 0 and frame_idx >= int(num_frames):
                         break
-            # If produced is insufficient: only pad by in-place sampling in num_frames mode; do not pad in max_actions mode
-            # (strictly one frame per executed action).
+            # 如果生成帧不足：只在 num_frames 模式下用原地采样补齐；max_actions 模式下不补。
+            # max_actions 模式严格保持“每个已执行动作对应一帧”。
             if max_actions_i <= 0:
                 while produced < total_needed and frame_idx < int(num_frames):
                     im = _capture_unrealcv_lit_pil(env, cam_id=0)
@@ -1126,8 +1187,8 @@ def run_one_task_unrealcv(
                         _save_pil_jpeg(im, os.path.join(images_dir, f"frame_{frame_idx:04d}.jpg"), quality=95)
                     new_frames.append(im)
 
-            # Patch the latest segment action log with per-action frame names (best-effort):
-            # We rewrite the file only if it exists and lengths match.
+            # 尽力把最新 segment action log 补上每个动作对应的帧名：
+            # 仅当文件存在且长度匹配时才重写。
             try:
                 if seg >= 0 and action_image_names and len(action_image_names) == len(pending_actions):
                     p_actions = os.path.join(out_dir, f"{base_name}_seg{seg:02d}_actions.json")
@@ -1144,7 +1205,7 @@ def run_one_task_unrealcv(
         last_upload_n = int(len(new_frames))
         resp = _post_frames(new_frames, include_instruction=False)
 
-    # Best-effort: update summary with final counters
+    # 尽力更新 summary 中的最终计数器。
     try:
         p_sum = os.path.join(out_dir, f"{base_name}_summary.json")
         if os.path.exists(p_sum):
@@ -1160,6 +1221,7 @@ def run_one_task_unrealcv(
 
 
 def _chunks_stream(paths: List[str], *, num_frames: int, step: int) -> List[List[str]]:
+    """增量流式上传切分：首轮 1 帧，之后每轮 step 帧。"""
     p = paths[: int(num_frames)]
     chunks: List[List[str]] = []
     chunks.append(p[:1])
@@ -1171,7 +1233,13 @@ def _chunks_stream(paths: List[str], *, num_frames: int, step: int) -> List[List
 
 
 def _obs_points(pred_num_frames: int, step: int) -> List[int]:
-    """Same points logic as server: [1, 1+step, 1+2*step, ..., num_frames]."""
+    """
+    与服务端相同的 points 逻辑。
+
+    初学者公式：`points = [1, 1+step, 1+2*step, ..., num_frames]`。
+    服务端默认用 `ready_default = n >= points[seg+1]` 判断某个 segment 是否可输出动作：
+    已收到帧数 `n` 到达该段右边界时，该段才算 ready。
+    """
     end = int(pred_num_frames)
     if end <= 0:
         return []
@@ -1190,26 +1258,27 @@ def _obs_points(pred_num_frames: int, step: int) -> List[int]:
 
 def _chunks_prefix(paths: List[str], *, num_frames: int, step: int) -> List[List[str]]:
     """
-    Prefix mode: send full prefix each call to match v2v semantics:
-      call0: [1]
-      call1: [1..17]
-      call2: [1..33]
-      call3: [1..49]
+        Prefix mode：每次调用都发送完整 prefix，用来匹配 v2v 语义：
+          第 0 次调用 `call0`: [1]
+          公式/形状说明：call1: [1..17]
+          公式/形状说明：call2: [1..33]
+          公式/形状说明：call3: [1..49]
+
     """
     p = paths[: int(num_frames)]
     pts = _obs_points(int(num_frames), int(step))
     if not pts or pts[0] != 1 or pts[-1] != int(num_frames):
-        raise ValueError(f"bad points computed: {pts} for num_frames={num_frames} step={step}")
+        raise ValueError(f"points 计算结果非法: {pts}，num_frames={num_frames} step={step}")
     return [p[: int(k)] for k in pts]
 
 
 def _chunks_prefix_from_points(paths: List[str], *, points: List[int]) -> List[List[str]]:
-    """Build prefix chunks given explicit absolute points (e.g. [1,17,33])."""
+    """按显式绝对 points 构造 prefix chunks，例如 [1,17,33]。"""
     if not points or int(points[0]) != 1:
-        raise ValueError(f"bad points: {points}")
+        raise ValueError(f"points 非法: {points}")
     max_k = int(max(points))
     if len(paths) < max_k:
-        raise ValueError(f"need >={max_k} frames for points={points}, got {len(paths)}")
+        raise ValueError(f"points={points} 需要至少 {max_k} 帧，实际只有 {len(paths)} 帧")
     p = paths[:max_k]
     return [p[: int(k)] for k in points]
 
@@ -1236,9 +1305,10 @@ def run_one_route(
     action_head_stride: int = 1,
     action_head_pre_resize_hw: int = 256,
 ) -> None:
+    """离线 dataset 模式：回放已有 route 图像并保存每段动作/位姿 JSON。"""
     prompt = _load_prompt(route.meta_path)
     if not prompt:
-        raise RuntimeError(f"empty prompt: {route.meta_path}")
+        raise RuntimeError(f"prompt 为空: {route.meta_path}")
     start_pose = _load_start_pose_cm_deg(route.raw_logs_path)
 
     real_paths = _sorted_frame_paths(route.images_dir)
@@ -1246,13 +1316,13 @@ def run_one_route(
 
     obs_points = _obs_points(int(num_frames), int(step))  # e.g. [1,17,33,49]
     if len(obs_points) < 2:
-        raise RuntimeError(f"bad points computed: {obs_points} for num_frames={num_frames} step={step}")
+        raise RuntimeError(f"points 计算结果非法: {obs_points}，num_frames={num_frames} step={step}")
 
-    # If we allow emitting the last segment without requiring points[-1] real frames,
-    # only the prefix up to points[-2] (e.g. 33) must exist in the dataset.
+    # 如果允许在没有 points[-1] 真实帧时发射最后一个 segment，
+    # 则 dataset 中只需要存在到 points[-2]（例如 33）的 prefix。
     send_points = obs_points
     if bool(prefix_mode) and bool(allow_future_last_segment) and int(obs_points[-1]) > int(obs_points[-2]):
-        send_points = obs_points[:-1]  # drop final 49
+        send_points = obs_points[:-1]  # 丢掉最终的 49。
 
     max_need = int(max(send_points))
     frame_paths = _take_with_pad(real_paths, max_need, bool(pad_short_real))
@@ -1261,12 +1331,12 @@ def run_one_route(
     if prefix_mode:
         chunks = _chunks_prefix_from_points(frame_paths, points=[int(k) for k in send_points])
         paths_for_map = frame_paths
-        # trigger last segment (seg02) without adding more real frames:
-        # resend the max prefix once more (server sees no new frames but will emit last seg).
+        # 不增加更多真实帧，触发最后一个 segment（seg02）：
+        # 再发送一次最大 prefix；服务端看到没有新增帧，但会发射最后一个 seg。
         if bool(allow_future_last_segment) and int(obs_points[-1]) > int(obs_points[-2]):
             chunks.append(chunks[-1])
     else:
-        # stream mode uses incremental chunks, requires full num_frames frames
+        # stream 模式使用增量 chunks，需要完整 num_frames 帧。
         full_paths = _take_with_pad(real_paths, int(num_frames), bool(pad_short_real))
         chunks = _chunks_stream(full_paths, num_frames=int(num_frames), step=int(step))
         paths_for_map = full_paths
@@ -1274,7 +1344,7 @@ def run_one_route(
     out_dir = os.path.join(out_root, str(save_dir_name or session_id))
     os.makedirs(out_dir, exist_ok=True)
 
-    # Save input summary once
+    # 只保存一次输入 summary。
     summary = {
         "session_id": session_id,
         "route_id": route.route_id,
@@ -1305,7 +1375,7 @@ def run_one_route(
     with open(os.path.join(out_dir, f"{session_id}_summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
-    cur_pose = start_pose[:]  # absolute pose in cm/deg
+    cur_pose = start_pose[:]  # 绝对 pose，单位 cm/deg。
 
     for call_i, chunk_paths in enumerate(chunks):
         images_b64 = [_image_to_data_url(p, codec=str(image_codec), quality=int(jpeg_quality)) for p in chunk_paths]
@@ -1326,21 +1396,23 @@ def run_one_route(
 
         actions = resp.get("actions", [])
         seg = int(resp.get("segment_index", -1))
-        # Warmup call (first frame) may return no actions with segment_index=-1.
+        # 预热调用（首帧）可能不返回动作，此时 segment_index=-1。
         if seg < 0:
             continue
-        # Validate action count by mode
+        # 按模式校验动作数量。
+        # 当前 Stage-2 `tsformer_latent` 每个帧间转移返回一个动作；
+        # 为兼容旧 checkpoint/tools，仍接受旧版 4 动作宏输出。
         mode_l = str(action_head_mode).strip().lower()
         if mode_l in ("actionhead_ref_vit", "actionhead_ref", "actionhead_vit", "ref_vit", "actionhead"):
             if seg < 0 or seg >= len(obs_points) - 1:
-                raise RuntimeError(f"bad segment_index from server: seg={seg} obs_points={obs_points}")
-            expected_n = int(obs_points[seg + 1]) - int(obs_points[seg])  # usually == step
+                raise RuntimeError(f"服务端返回的 segment_index 非法: seg={seg} obs_points={obs_points}")
+            expected_n = int(obs_points[seg + 1]) - int(obs_points[seg])
         else:
             expected_n = 4
-
         if not isinstance(actions, list) or len(actions) != int(expected_n):
             raise RuntimeError(
-                f"server returned invalid actions at call={call_i}, segment={seg}: {type(actions)} len={getattr(actions,'__len__',lambda:None)()}"
+                f"服务端在 call={call_i}, segment={seg} 返回非法 actions: "
+                f"{type(actions)} len={getattr(actions, '__len__', lambda: None)()}，期望 {expected_n}"
             )
 
         actions_server = [[float(x) for x in a] for a in actions]
@@ -1348,8 +1420,8 @@ def run_one_route(
         cumsum_server = _cumsum_actions(actions_server)
         cumsum_client = _cumsum_actions(actions_client)
 
-        # Per-action frame mapping (dataset mode):
-        # Only meaningful for actionhead_ref_vit (per-frame actions).
+        # 每个动作对应的帧映射（dataset 模式）：
+        # 仅当服务端每个帧间转移返回一个动作时才有意义。
         action_frames: List[Dict[str, Any]] = []
         if mode_l in ("actionhead_ref_vit", "actionhead_ref", "actionhead_vit", "ref_vit", "actionhead") and seg >= 0 and seg < len(obs_points) - 1:
             obs_len = int(obs_points[seg])
@@ -1359,18 +1431,18 @@ def run_one_route(
                 img_path_upload: Optional[str] = None
                 img_path_real: Optional[str] = None
 
-                # Upload-mapped frame (includes padding/repeats when --pad_short_real=1).
+                # 上传侧映射帧；--pad_short_real=1 时包含 padding/重复帧。
                 if 1 <= abs_to <= len(paths_for_map):
                     img_path_upload = paths_for_map[int(abs_to) - 1]
 
-                # Real dataset frame (may exist even if not uploaded in allow_future_last_segment mode).
+                # 真实 dataset 帧；即使 allow_future_last_segment 模式未上传，也可能存在。
                 if 1 <= abs_to <= int(real_count):
                     img_path_real = real_paths[int(abs_to) - 1]
 
                 is_real = 1 <= abs_to <= int(real_count)
                 is_padded = (not is_real) and (img_path_upload is not None)
 
-                # Backward-compatible single path: prefer real, else upload (padded) if available.
+                # 兼容旧格式的单路径：优先真实帧，否则使用可用的上传帧（可能是 padded）。
                 img_path = img_path_real or img_path_upload
                 action_frames.append(
                     {
@@ -1388,7 +1460,7 @@ def run_one_route(
                     }
                 )
 
-        # Write actions json (one file per segment)
+        # 写 actions json；每个 segment 一个文件。
         actions_json = {
             "session_id": session_id,
             "route_id": route.route_id,
@@ -1412,7 +1484,7 @@ def run_one_route(
         with open(os.path.join(out_dir, f"{session_id}_seg{seg:02d}_actions.json"), "w", encoding="utf-8") as f:
             json.dump(actions_json, f, ensure_ascii=False, indent=2)
 
-        # Absolute pose points (integrate with configured frame/order)
+        # 绝对 pose 点；按配置的 frame/order 积分。
         pose_points: List[List[float]] = []
         if seg == 0:
             pose_points.append(cur_pose[:])
@@ -1434,57 +1506,58 @@ def run_one_route(
             "call_index": call_i,
             "units": {"translation": "cm", "angles": "deg"},
             "pose_order": ["x", "y", "z", "roll", "yaw", "pitch"],
-            "points": pose_points,  # seg0: 1+N points (start + N), else: N points
+            "points": pose_points,  # seg0 为 1+N 个点（起点 + N），其他 segment 为 N 个点。
         }
         with open(os.path.join(out_dir, f"{session_id}_seg{seg:02d}_poses.json"), "w", encoding="utf-8") as f:
             json.dump(poses_json, f, ensure_ascii=False, indent=2)
 
 
 def main():
+    """命令行入口：支持 dataset、unrealcv 和模拟器侧 service 三种模式。"""
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", type=str, default="dataset", choices=["dataset", "unrealcv", "service"], help="dataset: send frames from dataset_root; unrealcv: capture frames from gym_unrealcv using task json(s); service: expose /reset and /step_actions for local StageA remote_sim.")
-    ap.add_argument("--dataset_root", type=str, default="", help="(mode=dataset) Dataset root containing route folders with images/ + meta.json (+ raw_logs.json optional).")
-    ap.add_argument("--task_json", type=str, default="", help="(mode=unrealcv) Single task json path, e.g. ./test_jsons/2025-03-30_11-49-14.json")
-    ap.add_argument("--json_folder", type=str, default="", help="(mode=unrealcv) Folder containing multiple task json files.")
-    ap.add_argument("--json_order", type=str, default="asc", choices=["asc", "desc"], help="(mode=unrealcv) Order for iterating --json_folder by filename.")
-    ap.add_argument("--json_start", type=str, default="", help="(mode=unrealcv) Optional lower bound filename for --json_folder (e.g. 2025-03-30_12-02-10 or 2025-03-30_12-02-10.json).")
-    ap.add_argument("--json_start_exclusive", type=int, default=0, choices=[0, 1], help="(mode=unrealcv) If 1, start strictly after --json_start (resume mode).")
-    ap.add_argument("--json_end", type=str, default="", help="(mode=unrealcv) Optional upper bound filename for --json_folder (inclusive). Same format as --json_start.")
-    ap.add_argument("--env_id", type=str, default="UnrealTrack-DowntownWest-ContinuousColor-v0", help="(mode=unrealcv) gym env id.")
-    ap.add_argument("--time_dilation", type=int, default=10, help="(mode=unrealcv) Time dilation wrapper parameter.")
-    ap.add_argument("--seed", type=int, default=0, help="(mode=unrealcv) Random seed.")
-    ap.add_argument("--resolution", type=str, default="256,256", help="(mode=unrealcv) Capture resolution as 'W,H'. Default 256,256.")
-    ap.add_argument("--ue_port", type=int, default=0, help="(mode=unrealcv) If >0, set UnrealCV socket base port in unrealcv.ini before launching UE. Useful to run multiple UE instances in parallel (e.g. 9393/9394).")
-    ap.add_argument("--host", type=str, default="0.0.0.0", help="(mode=service) HTTP listen host.")
-    ap.add_argument("--port", type=int, default=8765, help="(mode=service) HTTP listen port.")
-    ap.add_argument("--task_json_root", type=str, default="", help="(mode=service) Optional local UAV-Flow-Eval test_jsons directory for resolving task_id -> task json on the simulator machine.")
-    ap.add_argument("--yaw_offset_deg", type=float, default=-180.0, help="(mode=unrealcv) Yaw offset applied when calling UnrealCV set_rotation. batch_run_act_all.py uses -180.")
-    ap.add_argument("--action_frame", type=str, default="body", choices=["world", "body"], help="How to interpret dx/dy when integrating poses/logs: world=direct add; body=dx,dy in body forward/right rotated by yaw.")
-    ap.add_argument("--body_apply_order", type=str, default="yaw_first", choices=["yaw_first", "trans_first", "midpoint"], help="Only for --action_frame=body. yaw_first: yaw+=dyaw then translate; trans_first: translate with old yaw then yaw+=dyaw; midpoint: translate with yaw+0.5*dyaw then yaw+=dyaw.")
-    ap.add_argument("--max_actions", type=int, default=48, help="(mode=unrealcv) If >0, stop after executing this many actions (each action -> 1 captured frame). Default 48 (i.e. 1+48=49 frames total). Set 0 to use --num_frames bound instead.")
-    ap.add_argument("--server_url", type=str, default="http://127.0.0.1:8002", help="Server base URL (no trailing endpoint).")
-    ap.add_argument("--out_dir", type=str, default=r"E:\xjc\UAV-Flow-main1\UAV-Flow-main\UAV-Flow-Eval\cache", help="Where to write per-session json outputs.")
-    ap.add_argument("--route_id", type=str, default="", help="If set, only run this route id (folder name).")
-    ap.add_argument("--max_routes", type=int, default=0, help="If >0, limit number of routes processed.")
-    ap.add_argument("--select_n", type=int, default=0, help="If >0, pick first N routes after filtering (deterministic).")
-    ap.add_argument("--min_real_frames", type=int, default=0, help="If >0, only keep routes with real image count >= this threshold.")
-    ap.add_argument("--pad_short_real", type=int, default=0, choices=[0, 1], help="If 1, pad short routes by repeating last frame to reach required frames.")
-    ap.add_argument("--run_id", type=str, default="", help="Optional run id. If empty, uses timestamp.")
-    ap.add_argument("--run_subdir", type=int, default=1, choices=[0, 1], help="If 1, write outputs under out_dir/client_run_<run_id>/ to avoid overwrite.")
-    ap.add_argument("--session_id_mode", type=str, default="route_run", choices=["route", "route_run"], help="Server session_id naming to avoid overwriting server latent dirs.")
-    ap.add_argument("--allow_future_last_segment", type=int, default=1, choices=[0, 1], help="If 1, allow seg02 emission with only 33 real prefix frames (34-49 predicted). Requires server support.")
-    ap.add_argument("--dry_run", type=int, default=0, choices=[0, 1], help="If 1, only print selected routes and exit.")
-    ap.add_argument("--image_codec", type=str, default="jpeg", choices=["jpeg", "jpg", "png"], help="Image codec for uploading frames to server.")
-    ap.add_argument("--jpeg_quality", type=int, default=90, help="Only used when --image_codec=jpeg/jpg.")
-    ap.add_argument("--prefix_mode", type=int, default=0, choices=[0, 1], help="If 1, send full prefix each call: 1,1-17,1-33,... (requires server support).")
-    ap.add_argument("--timeout_s", type=int, default=600, help="HTTP request timeout (seconds). seg0 inference can take several minutes.")
-    ap.add_argument("--action_head_mode", type=str, default="actionhead_ref_vit", choices=["tsformer_latent", "actionhead_ref_vit"], help="Which action head mode to request from server.")
-    ap.add_argument("--action_head_batch_size", type=int, default=8)
-    ap.add_argument("--action_head_stride", type=int, default=1)
-    ap.add_argument("--action_head_pre_resize_hw", type=int, default=256, help="Intermediate pre-resize before actionhead preprocessing (default 256).")
-    ap.add_argument("--config_json", type=str, default="", help="Optional: server-style config.json; if set, reads infinity.num_frames/step from it.")
-    ap.add_argument("--num_frames", type=int, default=81, help="Fallback if --config_json not set.")
-    ap.add_argument("--step", type=int, default=16, help="Fallback if --config_json not set.")
+    ap.add_argument("--mode", type=str, default="dataset", choices=["dataset", "unrealcv", "service"], help="dataset：从 --dataset_root 读取离线帧；unrealcv：使用 task json 现场采集 gym_unrealcv 帧；service：暴露 /reset 和 /step_actions，供本地 StageA remote_sim 调用。")
+    ap.add_argument("--dataset_root", type=str, default="", help="(mode=dataset) 数据集根目录，内部应包含 route 子目录、images/、meta.json，以及可选 raw_logs.json。")
+    ap.add_argument("--task_json", type=str, default="", help="(mode=unrealcv) 单个 task json 路径，例如 ./test_jsons/2025-03-30_11-49-14.json。")
+    ap.add_argument("--json_folder", type=str, default="", help="(mode=unrealcv) 包含多个 task json 的目录。")
+    ap.add_argument("--json_order", type=str, default="asc", choices=["asc", "desc"], help="(mode=unrealcv) 遍历 --json_folder 时按文件名升序或降序排序。")
+    ap.add_argument("--json_start", type=str, default="", help="(mode=unrealcv) 可选起始文件名下界，例如 2025-03-30_12-02-10 或带 .json 后缀。")
+    ap.add_argument("--json_start_exclusive", type=int, default=0, choices=[0, 1], help="(mode=unrealcv) 设为 1 时从 --json_start 之后的文件开始，常用于断点续跑。")
+    ap.add_argument("--json_end", type=str, default="", help="(mode=unrealcv) 可选结束文件名上界（包含该文件），格式同 --json_start。")
+    ap.add_argument("--env_id", type=str, default="UnrealTrack-DowntownWest-ContinuousColor-v0", help="(mode=unrealcv) gym 环境 id。")
+    ap.add_argument("--time_dilation", type=int, default=10, help="(mode=unrealcv) time_dilation 包装器参数，用来加速/减速仿真。")
+    ap.add_argument("--seed", type=int, default=0, help="(mode=unrealcv) 随机种子。")
+    ap.add_argument("--resolution", type=str, default="256,256", help="(mode=unrealcv) 采集分辨率，格式为 'W,H'，默认 256,256。")
+    ap.add_argument("--ue_port", type=int, default=0, help="(mode=unrealcv) >0 时在启动 UE 前写入 unrealcv.ini 的 socket 基础端口，便于并行运行多个 UE 实例（如 9393/9394）。")
+    ap.add_argument("--host", type=str, default="0.0.0.0", help="(mode=service) HTTP 服务监听主机。")
+    ap.add_argument("--port", type=int, default=8765, help="(mode=service) HTTP 服务监听端口。")
+    ap.add_argument("--task_json_root", type=str, default="", help="(mode=service) 模拟器机器上的 UAV-Flow-Eval test_jsons 目录，用于把 task_id 解析成 task json。")
+    ap.add_argument("--yaw_offset_deg", type=float, default=-180.0, help="(mode=unrealcv) 调用 UnrealCV set_rotation 时附加的 yaw 偏移；batch_run_act_all.py 使用 -180。")
+    ap.add_argument("--action_frame", type=str, default="body", choices=["world", "body"], help="积分 pose/log 时如何解释 dx/dy：world=直接相加；body=把 dx,dy 视为机体系前进/右移，并按 yaw 旋转到世界系。")
+    ap.add_argument("--body_apply_order", type=str, default="yaw_first", choices=["yaw_first", "trans_first", "midpoint"], help="仅 --action_frame=body 生效。yaw_first: 先 yaw+=dyaw 再平移；trans_first: 用旧 yaw 平移再 yaw+=dyaw；midpoint: 用 yaw+0.5*dyaw 平移再更新 yaw。")
+    ap.add_argument("--max_actions", type=int, default=48, help="(mode=unrealcv) >0 时执行到指定动作数后停止（每个动作对应 1 帧）。默认 48，即 1+48=49 帧；设为 0 时改用 --num_frames 边界。")
+    ap.add_argument("--server_url", type=str, default="http://127.0.0.1:8002", help="推理服务基础 URL，不要包含具体端点。")
+    ap.add_argument("--out_dir", type=str, default=r"E:\xjc\UAV-Flow-main1\UAV-Flow-main\UAV-Flow-Eval\cache", help="每个 session 的 JSON 输出目录。")
+    ap.add_argument("--route_id", type=str, default="", help="设置后只运行该 route_id（通常是 route 文件夹名）。")
+    ap.add_argument("--max_routes", type=int, default=0, help=">0 时最多处理这么多条 route。")
+    ap.add_argument("--select_n", type=int, default=0, help=">0 时在过滤后确定性选择前 N 条 route。")
+    ap.add_argument("--min_real_frames", type=int, default=0, help=">0 时只保留真实图片数量不小于该阈值的 route。")
+    ap.add_argument("--pad_short_real", type=int, default=0, choices=[0, 1], help="设为 1 时，真实帧不足的 route 会重复最后一帧补齐到所需帧数。")
+    ap.add_argument("--run_id", type=str, default="", help="可选 run id；为空时使用当前时间戳。")
+    ap.add_argument("--run_subdir", type=int, default=1, choices=[0, 1], help="设为 1 时输出到 out_dir/client_run_<run_id>/，避免覆盖历史结果。")
+    ap.add_argument("--session_id_mode", type=str, default="route_run", choices=["route", "route_run"], help="服务端 session_id 命名方式，用于避免覆盖服务端 latent 目录。")
+    ap.add_argument("--allow_future_last_segment", type=int, default=1, choices=[0, 1], help="设为 1 时允许只用 33 帧真实 prefix 触发 seg02（34-49 由预测段补足）；需要服务端支持。")
+    ap.add_argument("--dry_run", type=int, default=0, choices=[0, 1], help="设为 1 时只打印将要处理的 route/task，不实际请求服务端。")
+    ap.add_argument("--image_codec", type=str, default="jpeg", choices=["jpeg", "jpg", "png"], help="上传给服务端的图像编码格式。")
+    ap.add_argument("--jpeg_quality", type=int, default=90, help="仅 --image_codec=jpeg/jpg 时使用的 JPEG 质量。")
+    ap.add_argument("--prefix_mode", type=int, default=0, choices=[0, 1], help="设为 1 时每次发送完整 prefix：1,1-17,1-33,...；需要服务端支持。")
+    ap.add_argument("--timeout_s", type=int, default=600, help="HTTP 请求超时秒数；seg0 推理可能需要几分钟。")
+    ap.add_argument("--action_head_mode", type=str, default="actionhead_ref_vit", choices=["tsformer_latent", "actionhead_ref_vit"], help="请求服务端使用的 action head 模式。")
+    ap.add_argument("--action_head_batch_size", type=int, default=8, help="传给服务端 action head 的批大小。")
+    ap.add_argument("--action_head_stride", type=int, default=1, help="传给服务端 action head 的帧间步长。")
+    ap.add_argument("--action_head_pre_resize_hw", type=int, default=256, help="actionhead 预处理前的中间缩放尺寸，默认 256。")
+    ap.add_argument("--config_json", type=str, default="", help="可选服务端风格 config.json；设置后从其中读取 infinity.num_frames/step。")
+    ap.add_argument("--num_frames", type=int, default=81, help="未设置 --config_json 时使用的 num_frames 默认值。")
+    ap.add_argument("--step", type=int, default=16, help="未设置 --config_json 时使用的 step 默认值。")
     args = ap.parse_args()
 
     if args.config_json.strip():
@@ -1498,7 +1571,7 @@ def main():
     os.makedirs(out_root, exist_ok=True)
 
     if bool(int(args.dry_run)):
-        print(f"[dry_run] run_id={run_id} mode={args.mode} out_root={out_root}")
+        print(f"[预演] run_id={run_id} mode={args.mode} out_root={out_root}（只预览，不执行）")
         return
 
     try:
@@ -1506,7 +1579,7 @@ def main():
         res_w = int(parts[0])
         res_h = int(parts[1])
     except Exception as e:
-        raise SystemExit(f"bad --resolution '{args.resolution}', expect 'W,H'") from e
+        raise SystemExit(f"--resolution 非法: '{args.resolution}'，期望格式为 'W,H'") from e
 
     if str(args.mode).strip().lower() == "service":
         env = _make_unrealcv_env(
@@ -1531,7 +1604,7 @@ def main():
 
     if str(args.mode).strip().lower() == "dataset":
         if not str(args.dataset_root).strip():
-            raise SystemExit("--dataset_root is required when --mode=dataset")
+            raise SystemExit("--mode=dataset 时必须提供 --dataset_root")
         dataset_root = os.path.abspath(args.dataset_root)
         routes = _discover_routes(dataset_root)
         if args.route_id.strip():
@@ -1547,13 +1620,13 @@ def main():
                     keep.append(r)
             routes = keep
 
-        # Deterministic selection
+        # 确定性选择。
         if args.select_n and int(args.select_n) > 0:
             routes = routes[: int(args.select_n)]
         if args.max_routes and args.max_routes > 0:
             routes = routes[: int(args.max_routes)]
         if not routes:
-            raise SystemExit("No valid routes found.")
+            raise SystemExit("没有找到有效 route。")
 
         out_root_eff = out_root
         if bool(int(args.run_subdir)):
@@ -1565,12 +1638,12 @@ def main():
                 session_id = f"{r.route_id}__{run_id}"
             else:
                 session_id = r.route_id
-            save_dir_name = r.route_id  # stable folder name under this run
+            save_dir_name = r.route_id  # 本次 run 下稳定的目录名。
             try:
                 real_n = len(_sorted_frame_paths(r.images_dir))
             except Exception:
                 real_n = -1
-            print(f"[run] mode=dataset route_id={r.route_id} session_id={session_id} real_frames={real_n} images_dir={r.images_dir}")
+            print(f"[运行] mode=dataset route_id={r.route_id} session_id={session_id} real_frames={real_n} images_dir={r.images_dir}，开始处理")
             try:
                 run_one_route(
                     route=r,
@@ -1594,21 +1667,22 @@ def main():
                     action_head_pre_resize_hw=int(args.action_head_pre_resize_hw),
                 )
             except Exception as e:
-                print(f"[fail] route_id={r.route_id} err={e}")
+                print(f"[失败] route_id={r.route_id} err={e}，该 route 处理失败")
         return
 
-    # mode=unrealcv
+    # 中文说明：mode=unrealcv。
     task_paths: List[str] = []
     if str(args.task_json).strip():
         task_paths = [os.path.abspath(str(args.task_json).strip())]
     elif str(args.json_folder).strip():
         jf = os.path.abspath(str(args.json_folder).strip())
         if not os.path.isdir(jf):
-            raise SystemExit(f"--json_folder is not a dir: {jf}")
+            raise SystemExit(f"--json_folder 不是目录: {jf}")
         names = [n for n in os.listdir(jf) if n.lower().endswith(".json")]
         names.sort(reverse=(str(args.json_order).strip().lower() == "desc"))
-        # Optional filename bounds
+        # 可选文件名边界。
         def _norm_json_name(s: str) -> str:
+            """把起止过滤参数标准化成 `.json` 文件名。"""
             s = str(s or "").strip()
             if not s:
                 return ""
@@ -1625,9 +1699,9 @@ def main():
             names = [n for n in names if str(n) <= str(end_name)]
         task_paths = [os.path.join(jf, n) for n in names]
     else:
-        raise SystemExit("--task_json or --json_folder is required when --mode=unrealcv")
+        raise SystemExit("--mode=unrealcv 时必须提供 --task_json 或 --json_folder")
     if not task_paths:
-        raise SystemExit("No task json files found.")
+        raise SystemExit("没有找到 task json 文件。")
 
     env = _make_unrealcv_env(
         env_id=str(args.env_id),
@@ -1638,7 +1712,7 @@ def main():
     )
 
     for p in task_paths:
-        print(f"[run] mode=unrealcv task={p} env_id={args.env_id} resolution={res_w}x{res_h}")
+        print(f"[运行] mode=unrealcv task={p} env_id={args.env_id} resolution={res_w}x{res_h}，开始处理")
         try:
             run_one_task_unrealcv(
                 task_json_path=p,
@@ -1664,7 +1738,7 @@ def main():
                 save_images=True,
             )
         except Exception as e:
-            print(f"[fail] task={p} err={e}")
+            print(f"[失败] task={p} err={e}，该 task 处理失败")
 
     try:
         env.close()
@@ -1674,4 +1748,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -1,6 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
-"""Loss functions."""
+"""损失函数。"""
 
 import torch.nn as nn
 
@@ -13,10 +13,10 @@ _LOSSES = {
 
 def get_loss_func(loss_name):
     """
-    Retrieve the loss given the loss name.
-    Args (int):
-        loss_name: the name of the loss to use.
+    根据损失函数名称返回对应实现。
+    参数 (int)：
+        loss_name: 要使用的损失函数名称。
     """
     if loss_name not in _LOSSES.keys():
-        raise NotImplementedError("Loss {} is not supported".format(loss_name))
+        raise NotImplementedError("不支持损失函数 {}".format(loss_name))
     return _LOSSES[loss_name]

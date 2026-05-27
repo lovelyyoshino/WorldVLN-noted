@@ -1,18 +1,18 @@
-# WorldVLN Inference Packaging Notes
+# WorldVLN 推理打包说明
 
-This document is intended for maintainers who want to keep the `infer/` directory publishable as a clean WorldVLN inference package.
+本文档面向维护者，用于说明如何让 `infer/` 目录保持为可发布、干净的 WorldVLN 推理包。
 
-## Primary Entry Points
+## 主要入口
 
-The current public inference surface is built around:
+当前公开推理接口围绕以下文件组织：
 
 - `server.py`
 - `run_server.sh`
 - `config.json`
 
-## Files Required for the Service Path
+## 服务路径必需文件
 
-If you want to preserve only the `InfinityStar -> latent2action` online service path, the following code should remain available:
+如果只保留 `InfinityStar -> latent2action` 在线服务路径，以下代码必须继续可用：
 
 - `server.py`
 - `config.json`
@@ -24,30 +24,29 @@ If you want to preserve only the `InfinityStar -> latent2action` online service 
 - `../Worldmodel/action_decoder/actionhead_runtime/timesformer/`
 - `../Worldmodel/action_decoder/actionhead_runtime/models/vae96_to_tsformer_adapter.py`
 
-## Optional Files
+## 可选文件
 
-The following files are not required for the main online serving path, but may still be useful for local debugging or experimentation:
+以下文件不是主在线服务路径必需项，但对本地调试或实验可能仍有用：
 
 - `config.local_bestrecord.json`
 - `../train/action_decoder/actionhead_training/pretrain_latent_p2p.py`
 - `../train/action_decoder/actionhead_training/latent_patch_embed.py`
 
-## Files That Should Not Be Published
+## 不应发布的文件
 
-To keep the package clean for open-source release, avoid committing local runtime artifacts, private assets, and unnecessary experimental files.
+为了让开源发布包保持干净，请避免提交本地运行产物、私有资产和不必要的实验文件。
 
-Examples include:
+例如：
 
 - `__pycache__/`
-- local cache directories such as `cache/`
-- private checkpoints
-- logs, archives, temporary files, and local experiment artifacts
+- `cache/` 等本地 cache 目录
+- 私有 checkpoint
+- 日志、压缩包、临时文件和本地实验产物
 
-When pruning vendored trees, retain only the source files needed by the published service workflow and avoid carrying unrelated training or legacy experiment code unless it is still required by the runtime path.
+清理 vendored 目录时，只保留已发布服务流程必需的源码文件；除非运行时路径仍然依赖，否则不要携带无关训练代码或旧实验代码。
 
-## Notes
+## 备注
 
-- The inference package now reuses the top-level `Worldmodel/` and `action_decoder/` folders instead of vendoring separate copies.
-- Default paths have been converted to repository-relative behavior where possible.
-- Model weights should continue to be supplied through environment variables or mounted local paths rather than committed into the repository.
-
+- 推理包现在复用顶层 `Worldmodel/` 和 `action_decoder/` 目录，不再 vendoring 单独副本。
+- 默认路径已尽量改为相对仓库根目录解析。
+- 模型权重仍应通过环境变量或挂载的本地路径提供，不应提交进仓库。

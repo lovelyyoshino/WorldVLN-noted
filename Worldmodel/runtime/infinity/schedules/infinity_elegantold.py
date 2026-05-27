@@ -11,14 +11,16 @@ import torch.nn.functional as F
 
 def interpolate(tensor, size, mode, quantizer, is_semantic_scale):
     """
-    arguments:
-        tensor: (B,C,T,H,W)
-        size: (C1,T,H1,W1)
-        mode: str
-        quantizer: quantizer
-        is_semantic_scale: bool
-    return:
-        tensor: (B,*size)
+    按目标尺度插值视频特征，并在需要时切换语义/细节通道维度。
+
+    参数:
+        tensor: 输入特征，形状为 (B,C,T,H,W)。
+        size: 目标形状 (C1,T,H1,W1)，其中 C1 是目标通道数。
+        mode: 插值模式字符串。
+        quantizer: VAE 量化器，提供维度投影层和插值配置。
+        is_semantic_scale: True 表示语义尺度，False 表示细节尺度。
+    返回:
+        插值后的特征，形状为 (B,*size)。
     """
     B, C, T, H, W = tensor.shape
     C1, T, H1, W1 = size
@@ -34,18 +36,19 @@ def interpolate(tensor, size, mode, quantizer, is_semantic_scale):
             elif C < C1:
                 proj = quantizer.detail_proj_up
         if C != C1:
-            tensor = tensor.permute(0,2,3,4,1) #  (B,C,T,H,W) -> (B,T,H,W,C)
-            tensor = proj(tensor) # (B,T,H,W,C1)
-            tensor = tensor.permute(0,4,1,2,3) # (B,T,H,W,C1) -> (B,C1,T,H,W)
-        tensor = F.interpolate(tensor, size=(T, H1, W1), mode=mode) # (B,C1,T,H,W) -> (B,C1,T,H1,W1)
+            tensor = tensor.permute(0,2,3,4,1) #  调整为 (B,T,H,W,C)，方便线性投影通道。
+            tensor = proj(tensor) # 投影到目标通道数 C1。
+            tensor = tensor.permute(0,4,1,2,3) # 调回 (B,C1,T,H,W)。
+        tensor = F.interpolate(tensor, size=(T, H1, W1), mode=mode) # 只插值时间和空间尺寸。
         return tensor
     else:
-        tensor = tensor.permute(0,2,1,3,4) # (B,C,T,H,W) -> (B,T,C,H,W)
+        tensor = tensor.permute(0,2,1,3,4) # 把通道维放进插值尺寸里一起处理。
         tensor = F.interpolate(tensor, size=(C1, H1, W1), mode=mode)
-        tensor = tensor.permute(0,2,1,3,4) # (B,T,C1,H1,W1) -> (B,C1,T,H1,W1)
+        tensor = tensor.permute(0,2,1,3,4) # 调回 (B,C1,T,H1,W1)。
     return tensor
 
 def get_scale_pack_info(scale_schedule, first_full_spatial_size_scale_index, args):
+    """为每个尺度生成打包元信息，包括所属 clip、帧范围和可参考的历史尺度。"""
     meta = {}
     sid2clipid_innsid = {}
     clipid_innsid2sid = {}
@@ -56,7 +59,7 @@ def get_scale_pack_info(scale_schedule, first_full_spatial_size_scale_index, arg
     for si in range(len(scale_schedule)):
         clipid = si // scales_per_clip
         if clipid == 0:
-            frame_ss, frame_ee = 0, scale_schedule[scales_per_clip*(clipid+1)-1][0] # compressed_frame_ss and compressed_frame_ee
+            frame_ss, frame_ee = 0, scale_schedule[scales_per_clip*(clipid+1)-1][0] # 压缩后帧起点和终点。
         else:
             frame_ss = scale_schedule[0][0] + (clipid-1) * compress_frames_inner_clip
             frame_ee = frame_ss + scale_schedule[scales_per_clip*(clipid+1)-1][0]
@@ -64,7 +67,7 @@ def get_scale_pack_info(scale_schedule, first_full_spatial_size_scale_index, arg
                 assert scale_schedule[si][0] == compress_frames_inner_clip
         sid2clipid_innsid[si] = (clipid, si % scales_per_clip)
         clipid_innsid2sid[(clipid, si % scales_per_clip)] = si
-        # add clip ind for ref
+        # 给当前尺度记录 clip 编号和可参考的历史 clip。
         if si <= first_full_spatial_size_scale_index:
             meta[si] = {
                 'clipid': clipid,
@@ -78,14 +81,14 @@ def get_scale_pack_info(scale_schedule, first_full_spatial_size_scale_index, arg
                 'clipid': clipid,
                 'frame_ss': frame_ss,
                 'frame_ee': frame_ee,
-                # Reference historical clips as "memory".
-                # By default we allow attending to ALL previous clips (bounded by context_clips below).
-                # This aligns better with streaming inference where past observations act as memory.
+                # 把历史 clip 当作“记忆”来引用。
+                # 默认允许关注所有更早的 clip，下面再用 context_clips 截断。
+                # 这样更适合流式推理：过去看到的内容就是当前的记忆。
                 'left_ref': list(range(clipid-1, -1, -1)),
                 'right_ref': [-1],
             }
             meta[si]['left_ref'] = meta[si]['left_ref'][:context_clips]
-        # append inner scale ind to clip ind, (frame pack)
+        # 如果只从大尺度取上下文，就把 clip 编号补成 (clip 编号, clip 内尺度编号)。
         if args.context_from_largest_no > 0:
             meta[si]['left_ref'] = [(meta[si]['left_ref'][i], max(0, scales_per_clip - args.context_from_largest_no - args.context_interval*i)) for i in range(len(meta[si]['left_ref']))]
             meta[si]['right_ref'] = [(meta[si]['right_ref'][i], max(0, scales_per_clip - args.context_from_largest_no - args.context_interval*i)) for i in range(len(meta[si]['right_ref']))]
@@ -118,6 +121,7 @@ def video_encode(
     text_lens=[],
     **kwargs,
 ):
+    """兼容旧接口的视频编码入口，实际转交给 global_bsc 编码实现。"""
     return video_encode_global_bsc(
         vae,
         inp_B3HW,
@@ -147,6 +151,7 @@ def video_encode_global_bsc(
     text_lens=[],
     **kwargs,
 ):
+    """按多尺度 schedule 编码视频特征，打包训练序列、目标 token 和注意力引用关系。"""
     if vae_features is None:
         raw_features, _, _ = vae.encode_for_raw_features(inp_B3HW, scale_schedule=None, slice=True)
         raw_features_list = [raw_features]
@@ -155,11 +160,11 @@ def video_encode_global_bsc(
         print(f'raw_features.shape: {raw_features.shape}')
     else:
         raw_features_list = vae_features
-    # raw_features_list: list of [1,d,t,h,w]:
+    # raw_features_list 是多个样本的特征列表，每个元素形状通常为 [1,d,t,h,w]。
     gt_all_bit_indices = []
     pred_all_bit_indices = []
     var_input_list = []
-    sequece_packing_scales = [] # with trunk
+    sequece_packing_scales = [] # 每个样本实际参与打包的尺度列表。
     flatten_packing_scales = []
     h_div_w_template_list = np.array(list(dynamic_resolution_h_w.keys()))
     visual_rope_cache_list = []
@@ -180,7 +185,7 @@ def video_encode_global_bsc(
             min_t = min(dynamic_resolution_h_w[mapped_h_div_w_template][args.pn]['pt2scale_schedule'].keys())
             image_scale_schedule = dynamic_resolution_h_w[mapped_h_div_w_template][args.pn]['pt2scale_schedule'][min_t]
             scale_schedule = dynamic_resolution_h_w[mapped_h_div_w_template][args.pn]['pt2scale_schedule'][t]
-            
+
             if args.apply_spatial_patchify:
                 vae_scale_schedule = [(pt, ph + (ph % 2), pw + (pw % 2)) for pt, ph, pw in scale_schedule]
             else:
@@ -190,10 +195,10 @@ def video_encode_global_bsc(
             scale_pack_info_list.append(scale_pack_info)
 
             if raw_features.dim() == 4:
-                codes_out = raw_features.unsqueeze(2) # [B, d, t, h, w]
+                codes_out = raw_features.unsqueeze(2) # 补上时间维，得到 [B,d,t,h,w]。
             else:
-                codes_out = raw_features # [B, d, t, h, w]
-            # print(f'{raw_features.shape=}, {scale_schedule=}')
+                codes_out = raw_features # 已经是 [B,d,t,h,w]。
+            # 调试时可打印 raw_features.shape 和 scale_schedule。
             v_d = codes_out.shape[1]
             B, C, T, H, W = codes_out.shape
             if args.noise_input:
@@ -220,11 +225,12 @@ def video_encode_global_bsc(
                 if tokens_remain < 0 and (not args.allow_less_one_elem_in_seq or examples > 1):
                     valid_scales = si
                     break
-                    
+
                 rel_si_in_one_clip = si % len(image_scale_schedule)
-                if si < len(image_scale_schedule): # image
+                if si < len(image_scale_schedule): # 首个 clip 的图像尺度使用 image repetition。
                     repeat_times = image_scale_repetition[rel_si_in_one_clip]
                 else:
+                    # 后续视频尺度使用 video repetition，保持 clip 内相对尺度一致。
                     repeat_times = video_scale_repetition[rel_si_in_one_clip]
                 select_repeat_idx = np.random.randint(0, repeat_times)
                 frame_ss, frame_ee = scale_pack_info[si]['frame_ss'], scale_pack_info[si]['frame_ee']
@@ -257,7 +263,7 @@ def video_encode_global_bsc(
                             lfq = vae.quantizer.lfq_detail
                         except:
                             lfq = vae.quantizer.lfq
-                    quantized, _, bit_indices, loss = lfq(residual) # quantized shape: [B, d, t, h, w], bit_indices shape: [B,t,h,w,d]
+                    quantized, _, bit_indices, loss = lfq(residual) # quantized 为 [B,d,t,h,w]，bit_indices 为 [B,t,h,w,d]。
 
                     if args.reduce_accumulate_error_method == 'bsc':
                         if si < min(len(vae_scale_schedule)-1, self_correction.noise_apply_layers):
@@ -278,8 +284,8 @@ def video_encode_global_bsc(
                         quantized_scaled = F.interpolate(quantized, size=target.shape[-3:], mode=vae.quantizer.z_interplote_up).contiguous()
                     next_var_input = cum_var_input + quantized_scaled
                     real_si += 1
-                
-                if si < len(vae_scale_schedule)-1: # since first scale is [sos], here we only need len(vae_scale_schedule)-1 cum_var_input and x_BLC_wo_prefix
+
+                if si < len(vae_scale_schedule)-1: # 第一层相当于 [sos]，这里只需要后续尺度的累计输入。
                     if vae_scale_schedule[si][-2:] == vae_scale_schedule[-1][-2:]:
                         if args.noise_input:
                             next_var_input = torch.randn((B, v_d, *vae_scale_schedule[si+1]), device=device, dtype=raw_features.dtype)
@@ -291,36 +297,36 @@ def video_encode_global_bsc(
             flatten_packing_scales.extend(scale_schedule[:valid_scales])
             if infer_mode:
                 return noise_list, x_recon_raw, pred_all_bit_indices, None, None, scale_pack_info
-    
-    # train partial scales to enable training 480p without sp
+
+    # 当完整尺度 token 过多时，只训练一部分尺度，使 480p 等设置也能在长度限制内训练。
     if args.allow_less_one_elem_in_seq and len(sequece_packing_scales) == 1 and np.array(sequece_packing_scales[0]).prod(-1).sum() > args.train_max_token_len:
         scale_schedule = sequece_packing_scales[0]
 
         if args.train_with_var_seq_len:
-            if len(scale_schedule) == scales_in_one_clip * 4: # 49f clip4 = 4 clips (image + 3 video)
+            if len(scale_schedule) == scales_in_one_clip * 4: # 49 帧 clip4：1 个图像 clip + 3 个视频 clip。
                 S = scales_in_one_clip
                 outcomes = [
-                        # --- clip 0 only (image) ---
+                        # --- 只选 clip 0（图像） ---
                         lambda: list(range(S)),
-                        # --- clip 0 + clip 1 semantic ---
+                        # --- clip 0 + clip 1 的语义尺度 ---
                         lambda: list(range(S + 8)),
                         lambda: list(range(S + 11)),
-                        # --- clip 0 + clip 1 detail ---
+                        # --- clip 0 + clip 1 的细节尺度 ---
                         lambda: list(range(S + 11)) + [S+11],
                         lambda: list(range(S + 11)) + [S+12],
                         lambda: list(range(S + 11)) + [S+13],
-                        # --- cross-clip: anchor clip0 → anchor clip1 → clip2 semantic ---
+                        # --- 跨 clip：clip0 锚点 -> clip1 锚点 -> clip2 语义尺度 ---
                         lambda: [S-1] + [2*S-1] + list(range(2*S, 2*S + 11)),
-                        # --- cross-clip: anchor clip0 → anchor clip1 → clip2 detail ---
+                        # --- 跨 clip：clip0 锚点 -> clip1 锚点 -> clip2 细节尺度 ---
                         lambda: [S-1] + [2*S-1] + [2*S + 11],
                         lambda: [S-1] + [2*S-1] + [2*S + 12],
-                        # --- cross-clip: anchor clip0 → anchor clip1 → anchor clip2 → clip3 semantic ---
+                        # --- 跨 clip：clip0/clip1/clip2 锚点 -> clip3 语义尺度 ---
                         lambda: [S-1] + [2*S-1] + [3*S-1] + list(range(3*S, 3*S + 11)),
-                        # --- cross-clip: anchor clip0 → anchor clip1 → anchor clip2 → clip3 detail ---
+                        # --- 跨 clip：clip0/clip1/clip2 锚点 -> clip3 细节尺度 ---
                         lambda: [S-1] + [2*S-1] + [3*S-1] + [3*S + 11],
                         lambda: [S-1] + [2*S-1] + [3*S-1] + [3*S + 12],
                     ]
-            elif len(scale_schedule) == scales_in_one_clip * 3: # train 10s video
+            elif len(scale_schedule) == scales_in_one_clip * 3: # 训练 10 秒视频时的候选尺度组合。
                 outcomes = [
                         lambda: list(range(scales_in_one_clip)),
                         lambda: list(range(scales_in_one_clip + 8)),
@@ -354,16 +360,15 @@ def video_encode_global_bsc(
                         lambda: [scales_in_one_clip-1] + [scales_in_one_clip+13],
                         lambda: [scales_in_one_clip-1] + [scales_in_one_clip+14],
                     ]
-            
-            # `outcomes` (candidates) length can vary by schedule (e.g. 7 or 11),
-            # while `args.video_var_len_prob` might provide fewer entries.
-            # NumPy requires len(a) == len(p), so we make this robust by truncating
-            # both to the common length and renormalizing probabilities.
+
+            # outcomes 候选数量会随 schedule 改变（例如 7 或 11 个），
+            # args.video_var_len_prob 可能给得更短。
+            # NumPy 要求 len(a) == len(p)，所以取公共长度并重新归一化概率。
             raw_probs = json.loads(args.video_var_len_prob)
             probabilities = np.array(raw_probs, dtype=np.float32)
             n = min(len(outcomes), len(probabilities))
             if n <= 0:
-                # Fallback: always pick the first outcome.
+                # 兜底：没有可用概率时固定选择第一个候选。
                 select_si_list = outcomes[0]()
             else:
                 outcomes = outcomes[:n]
@@ -373,19 +378,19 @@ def video_encode_global_bsc(
                     probabilities = np.ones(n, dtype=np.float32) / n
                 else:
                     probabilities /= s
-                # Choose one of the outcome functions based on the probabilities and execute it
+                # 按概率选择一个候选函数，并立即执行得到尺度编号列表。
                 select_si_list = np.random.choice(outcomes, p=probabilities)()
 
         else:
-            select_si_list = [scales_in_one_clip-1] # context first fsuper_scale_lengthsrame must be selected
+            select_si_list = [scales_in_one_clip-1] # 必选首个 clip 的上下文锚点尺度。
             if args.train_192pshort:
-                # select_si_list.append(2*scales_in_one_clip-4)
+                # 旧实验分支：短 192p 训练可以追加更少的视频尺度。
                 if args.train_192pshort > 1:
                     select_si_list = list(range(0, scales_in_one_clip+args.train_192pshort))
                 else:
                     select_si_list = list(range(0, scales_in_one_clip+11))
             else:
-                select_si_list = list(range(0, scales_in_one_clip)) # all first frame must be selected
+                select_si_list = list(range(0, scales_in_one_clip)) # 首帧的所有尺度都要保留，作为上下文基础。
                 select_si_list.append(scales_in_one_clip + np.random.choice([11, 12, 13], p=[0.7, 0.2, 0.1]))
 
             other_si_list = list(range(scales_in_one_clip-1)) + list(range(scales_in_one_clip, 2*scales_in_one_clip))
@@ -398,15 +403,14 @@ def video_encode_global_bsc(
                     train_token_len += token_len
                     select_si_list.append(si)
 
-            # Safety fallback:
-            # Some schedules (e.g. clip16 with short total frames) can still overshoot
-            # when the mandatory/randomly selected video scale is too large.
-            # Ensure selected scales always fit train_max_token_len by dropping
-            # optional video scales first (keep first-clip scales as anchor/context).
+            # 安全兜底：
+            # 某些 schedule（例如总帧数较短的 clip16）在必选/随机视频尺度过大时仍会超长。
+            # 这里优先删除可选的视频尺度，保留首个 clip 作为锚点和上下文，
+            # 保证最终 token 数不超过 train_max_token_len。
             selected_tokens = int(np.array(scale_schedule)[select_si_list].prod(-1).sum() + text_lens[0])
             if selected_tokens > args.train_max_token_len:
                 first_clip_set = set(range(scales_in_one_clip))
-                # Drop largest optional scales first.
+                # 先丢弃 token 数最多的可选尺度。
                 optional_sorted = sorted(
                     [si for si in select_si_list if si not in first_clip_set],
                     key=lambda si: int(np.array(scale_schedule[si]).prod()),
@@ -417,13 +421,13 @@ def video_encode_global_bsc(
                         break
                     select_si_list.remove(si)
                     selected_tokens = int(np.array(scale_schedule)[select_si_list].prod(-1).sum() + text_lens[0])
-                
+
         select_si_list.sort()
         new_si_2_real_si, real_si_2_new_si = {}, {}
         for new_si, real_si in enumerate(select_si_list):
             new_si_2_real_si[new_si] = real_si
             real_si_2_new_si[real_si] = new_si
-        
+
         sequece_packing_scales = [[scale_schedule[si] for si in select_si_list]]
         flatten_packing_scales = [flatten_packing_scales[si] for si in select_si_list]
         gt_all_bit_indices = [gt_all_bit_indices[si] for si in select_si_list]
@@ -432,23 +436,22 @@ def video_encode_global_bsc(
         visual_rope_cache_list = [visual_rope_cache_list[si] for si in select_si_list]
         other_info_by_scale = [other_info_by_scale[si] for si in select_si_list]
 
-        # remap scale_pack_info
+        # 重新映射 scale_pack_info：裁剪尺度后，旧 sid 要转换成新的 sid。
         new_scale_pack_info = {}
         for new_query_sid in new_si_2_real_si:
             real_query_sid = new_si_2_real_si[new_query_sid]
             new_scale_pack_info[new_query_sid] = {'ref_sids': []}
             for real_ref_sid in scale_pack_info_list[0][real_query_sid]['ref_sids']:
-                # NOTE:
-                # We may select only a subset of scales (select_si_list) to fit train_max_token_len.
-                # In that case some original ref_sids can point to scales that are NOT selected,
-                # so they don't exist in real_si_2_new_si. Those references should be safely dropped;
-                # querysid_refsid already includes self-edges and text edges.
+                # 注意：
+                # 为了满足 train_max_token_len，select_si_list 可能只保留部分尺度。
+                # 原始 ref_sids 可能指向未被选中的尺度，因此在 real_si_2_new_si 中不存在。
+                # 这些引用可以安全丢弃；querysid_refsid 后面仍会加入自连接和文本连接。
                 new_ref_sid = real_si_2_new_si.get(real_ref_sid, None)
                 if new_ref_sid is None:
                     continue
                 new_scale_pack_info[new_query_sid]['ref_sids'].append(new_ref_sid)
         scale_pack_info_list = [new_scale_pack_info]
-        
+
     scale_lengths = [ pt * ph * pw for pt,ph,pw in flatten_packing_scales]
     scale_lengths = scale_lengths + text_lens
     valid_scales = len(flatten_packing_scales) + len(text_lens)
@@ -458,11 +461,11 @@ def video_encode_global_bsc(
         pad_seq_len = int(np.ceil(cur_seq_len/args.pad_to_multiplier))*args.pad_to_multiplier - cur_seq_len
     else:
         pad_seq_len = args.train_max_token_len - cur_seq_len
-    assert pad_seq_len >= 0, f'pad_seq_len: {pad_seq_len} < 0, {scale_lengths=}'
+    assert pad_seq_len >= 0, f'pad_seq_len: {pad_seq_len} < 0，{scale_lengths=}'
     if pad_seq_len:
         scale_lengths = scale_lengths + [pad_seq_len]
     max_sid_nums = 2000
-    querysid_refsid = torch.zeros((max_sid_nums, max_sid_nums), device=args.device, dtype=torch.bool) # Attention! this shape should be the same for different iterations !!!
+    querysid_refsid = torch.zeros((max_sid_nums, max_sid_nums), device=args.device, dtype=torch.bool) # 注意：不同迭代中这个形状必须保持一致。
     for i in range(valid_scales):
         querysid_refsid[i][i] = True
     base = 0
@@ -476,29 +479,29 @@ def video_encode_global_bsc(
                 global_refsid = base + local_refsid
                 querysid_refsid[global_querysid][global_refsid] = True
         base += len(scale_schedule)
-        
+
     gt_ms_idx_Bl = []
     for item in gt_all_bit_indices:
         if args.apply_spatial_patchify:
-            # item shape: (B,t,H,W,d)
-            item = item.permute(0,1,4,2,3) # (B,t,d,H,W)
-            # (B,t,d,H,W) -> (B,t,4d,H/2,W/2)
+            # item 形状为 (B,t,H,W,d)。
+            item = item.permute(0,1,4,2,3) # 调整为 (B,t,d,H,W)。
+            # pixel_unshuffle 后变为 (B,t,4d,H/2,W/2)。
             item = torch.nn.functional.pixel_unshuffle(item, 2)
             _, tt, dd, hh, ww = item.shape
-            # (B,t,4d,H/2,W/2) -> (B,t,H/2,W/2,4d) -> (B,t*H/2*w/2,4d)
+            # 展平成序列：(B,t,H/2,W/2,4d) -> (B,t*H/2*w/2,4d)。
             item = item.permute(0,1,3,4,2).reshape(B, tt*hh*ww, dd)
         else:
             _, tt, hh, ww, dd = item.shape
             item = item.reshape(B, tt*hh*ww, dd)
         gt_ms_idx_Bl.append(item.type(torch.long))
-    gt_BLC = gt_ms_idx_Bl # torch.cat(gt_ms_idx_Bl, 1).contiguous().type(torch.long)
+    gt_BLC = gt_ms_idx_Bl # 保持按尺度分组，不在这里拼接成一个长序列。
     for i in range(len(var_input_list)):
         if args.apply_spatial_patchify:
-            # (B,d,t,H,W) -> (B,t,d,H,W) -> (B,t,4d,H/2,W/2) -> (B,t,H/2,W/2,4d)
+            # 输入变量同样按 patchify 后的空间布局展平成 token 序列。
             var_input_list[i] = torch.nn.functional.pixel_unshuffle(var_input_list[i].permute(0,2,1,3,4), 2).permute(0,1,3,4,2)
             var_input_list[i] = var_input_list[i].reshape(B, -1, 4*vae.codebook_dim)
         else:
-            # (B,d,t,H,W) -> (B,t,H,W,d)
+            # 普通路径：把通道维放到最后，再展平成 BLC。
             var_input_list[i] = var_input_list[i].permute(0,2,3,4,1)
             var_input_list[i] = var_input_list[i].reshape(B, -1, vae.codebook_dim)
     x_BLC = torch.cat(var_input_list, 1)
@@ -517,6 +520,7 @@ def video_decode(
     trunc_scales=-1,
     **kwargs,
 ):
+    """根据多尺度 token 索引逐层还原 VAE latent，并解码回视频图像。"""
     image_scale_repetition = json.loads(args.image_scale_repetition)
     video_scale_repetition = json.loads(args.video_scale_repetition)
     assert len(image_scale_repetition) == len(video_scale_repetition), f'{len(image_scale_repetition)} != {len(video_scale_repetition)}'
@@ -528,9 +532,10 @@ def video_decode(
     for si, (pt, ph, pw) in enumerate(scale_schedule):
         if trunc_scales > 0 and si >= trunc_scales:
             break
-        if si < len(image_scale_repetition): # image
+        if si < len(image_scale_repetition): # 图像尺度使用 image repetition。
             repeat_times = image_scale_repetition[si%len(image_scale_repetition)]
         else:
+            # 视频尺度使用 video repetition，与编码端保持一致。
             repeat_times = video_scale_repetition[si%len(image_scale_repetition)]
         for repeat_idx in range(repeat_times):
             tgt_shape = (pt, scale_schedule[-1][-2], scale_schedule[-1][-1])
@@ -546,7 +551,7 @@ def video_decode(
             else:
                 codes = vae.quantizer.lfq_detail.indices_to_codes(all_indices[real_si], label_type)
                 codes = F.interpolate(codes, size=tgt_shape, mode=vae.quantizer.z_interplote_up).contiguous()
-            
+
             summed_codes[-1] = F.interpolate(summed_codes[-1], size=tgt_shape, mode=vae.quantizer.z_interplote_up).contiguous()
             summed_codes[-1] += codes
             real_si += 1
@@ -555,15 +560,16 @@ def video_decode(
                 summed_codes.append(noise_list[noise_ptr])
                 noise_ptr += 1
     if trunc_scales < 0:
-        assert real_si == len(all_indices), f'all_repeated_scales={real_si} != len(all_indices)={len(all_indices)}'
+        assert real_si == len(all_indices), f'all_repeated_scales={real_si} 与 len(all_indices)={len(all_indices)} 不一致'
     summed_codes = torch.cat(summed_codes, dim=-3)
     x_recon = vae.decode(summed_codes, slice=True)
     x_recon = torch.clamp(x_recon, min=-1, max=1)
     return x_recon
 
 def get_visual_rope_embeds(rope2d_freqs_grid, scale_schedule, sid, real_sid, device=None, args=None, scale_pack_info=None, first_full_spatial_size_scale_index=None):
-    # freqs_scales: (2, max_scales, ceil(dim_div_2 / 4))
-    # freqs_frames: (2, max_frames, ceil(dim_div_2 / 4))
+    """为指定尺度生成视觉 RoPE 位置编码，覆盖尺度、帧、高度和宽度四个维度。"""
+    # freqs_scales 形状为 (2, max_scales, ceil(dim_div_2 / 4))。
+    # freqs_frames 形状为 (2, max_frames, ceil(dim_div_2 / 4))。
     rope2d_freqs_grid['freqs_scales'] = rope2d_freqs_grid['freqs_scales'].to(device)
     rope2d_freqs_grid['freqs_frames'] = rope2d_freqs_grid['freqs_frames'].to(device)
     rope2d_freqs_grid['freqs_height'] = rope2d_freqs_grid['freqs_height'].to(device)
@@ -582,6 +588,6 @@ def get_visual_rope_embeds(rope2d_freqs_grid, scale_schedule, sid, real_sid, dev
         f_frames[   :,  None,      :,  None,   None,   :].expand(-1,  1, -1, ph, pw, -1),
         f_height[   :,  None,  None,      :,   None,   :].expand(-1,  1, pt, -1, pw, -1),
         f_width[    :,  None,  None,   None,      :,   :].expand(-1,  1, pt, ph, -1, -1),
-    ], dim=-1)  # (2, 1, pt, ph, pw, dim_div_2)
-    rope_embeds = rope_embeds.reshape(2, 1, 1, 1, 1*pt*ph*pw, dim_div_2)  # (2, 1, 1, 1, 1*pt*ph*pw, dim_div_2)
+    ], dim=-1)  # 拼成 (2,1,pt,ph,pw,dim_div_2)。
+    rope_embeds = rope_embeds.reshape(2, 1, 1, 1, 1*pt*ph*pw, dim_div_2)  # 展平成注意力使用的 token 维度。
     return rope_embeds

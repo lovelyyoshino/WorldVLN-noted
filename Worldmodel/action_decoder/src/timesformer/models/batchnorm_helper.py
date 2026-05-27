@@ -1,6 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
-"""BatchNorm (BN) utility functions and custom batch-size BN implementations"""
+"""BatchNorm (BN) 工具函数和自定义小批量 BN 实现。"""
 
 from functools import partial
 import torch
@@ -13,11 +13,14 @@ import timesformer.utils.distributed as du
 
 def get_norm(cfg):
     """
-    Args:
-        cfg (CfgNode): model building configs, details are in the comments of
-            the config file.
-    Returns:
-        nn.Module: the normalization layer.
+        根据配置返回模型要使用的归一化层类型。
+
+        参数：
+            cfg (CfgNode): 模型构建配置，字段含义见配置文件中的说明。
+
+        返回：
+            nn.Module: 归一化层类或带参数的构造函数。
+
     """
     if cfg.BN.NORM_TYPE == "batchnorm":
         return nn.BatchNorm3d
@@ -29,31 +32,33 @@ def get_norm(cfg):
         )
     else:
         raise NotImplementedError(
-            "Norm type {} is not supported".format(cfg.BN.NORM_TYPE)
+            "不支持归一化类型 {}".format(cfg.BN.NORM_TYPE)
         )
 
 
 class SubBatchNorm3d(nn.Module):
     """
-    The standard BN layer computes stats across all examples in a GPU. In some
-    cases it is desirable to compute stats across only a subset of examples
-    (e.g., in multigrid training https://arxiv.org/abs/1912.00998).
-    SubBatchNorm3d splits the batch dimension into N splits, and run BN on
-    each of them separately (so that the stats are computed on each subset of
-    examples (1/N of batch) independently. During evaluation, it aggregates
-    the stats from all splits into one BN.
+    将一个 batch 按 batch 维切成多份，并分别计算 3D BatchNorm 统计量。
+
+    标准 BN 会在一个 GPU 上的全部样本上统计均值和方差。有些训练方式
+    （例如 multigrid training）希望只在子集样本上统计。这个模块会把
+    batch 维分成 N 份，对每一份单独做 BN；评估前再把各份 running stats
+    聚合回一个普通 BN。
     """
 
     def __init__(self, num_splits, **args):
         """
-        Args:
-            num_splits (int): number of splits.
-            args (list): other arguments.
+                初始化分组 BatchNorm 需要的普通 BN 和 split BN。
+
+                参数：
+                    num_splits (int): batch 维要切分的份数。
+                    args (dict): 传给 ``nn.BatchNorm3d`` 的其他参数。
+
         """
         super(SubBatchNorm3d, self).__init__()
         self.num_splits = num_splits
         num_features = args["num_features"]
-        # Keep only one set of weight and bias.
+        # 只保留一组可学习的 weight 和 bias。
         if args.get("affine", True):
             self.affine = True
             args["affine"] = False
@@ -67,11 +72,13 @@ class SubBatchNorm3d(nn.Module):
 
     def _get_aggregated_mean_std(self, means, stds, n):
         """
-        Calculate the aggregated mean and stds.
-        Args:
-            means (tensor): mean values.
-            stds (tensor): standard deviations.
-            n (int): number of sets of means and stds.
+                把多组均值和方差合并成一组 running stats。
+
+                参数：
+                    means (tensor): 各 split 的均值。
+                    stds (tensor): 各 split 的方差。
+                    n (int): split 的数量。
+
         """
         mean = means.view(n, -1).sum(0) / n
         std = (
@@ -82,7 +89,7 @@ class SubBatchNorm3d(nn.Module):
 
     def aggregate_stats(self):
         """
-        Synchronize running_mean, and running_var. Call this before eval.
+        聚合 ``running_mean`` 和 ``running_var``，通常在 eval 前调用。
         """
         if self.split_bn.track_running_stats:
             (
@@ -95,6 +102,7 @@ class SubBatchNorm3d(nn.Module):
             )
 
     def forward(self, x):
+        """按训练或评估模式对输入 ``x`` 执行 SubBatchNorm3d。"""
         if self.training:
             n, c, t, h, w = x.shape
             x = x.view(n // self.num_splits, c * self.num_splits, t, h, w)
@@ -110,14 +118,13 @@ class SubBatchNorm3d(nn.Module):
 
 class GroupGather(Function):
     """
-    GroupGather performs all gather on each of the local process/ GPU groups.
+    在本地进程/GPU 分组内做 all_gather 并汇总统计量。
     """
 
     @staticmethod
     def forward(ctx, input, num_sync_devices, num_groups):
         """
-        Perform forwarding, gathering the stats across different process/ GPU
-        group.
+        前向阶段收集同一同步分组内各进程/GPU 的统计量。
         """
         ctx.num_sync_devices = num_sync_devices
         ctx.num_groups = num_groups
@@ -144,8 +151,7 @@ class GroupGather(Function):
     @staticmethod
     def backward(ctx, grad_output):
         """
-        Perform backwarding, gathering the gradients across different process/ GPU
-        group.
+        反向阶段收集同一同步分组内各进程/GPU 的梯度。
         """
         grad_output_list = [
             torch.zeros_like(grad_output) for k in range(du.get_local_size())
@@ -171,12 +177,16 @@ class GroupGather(Function):
 
 
 class NaiveSyncBatchNorm3d(nn.BatchNorm3d):
+    """朴素版同步 3D BatchNorm，在本地 GPU 分组间同步均值和方差。"""
+
     def __init__(self, num_sync_devices, **args):
         """
-        Naive version of Synchronized 3D BatchNorm.
-        Args:
-            num_sync_devices (int): number of device to sync.
-            args (list): other arguments.
+                初始化同步 3D BatchNorm 的设备分组信息。
+
+                参数：
+                    num_sync_devices (int): 每个同步分组中的设备数量。
+                    args (dict): 传给 ``nn.BatchNorm3d`` 的其他参数。
+
         """
         self.num_sync_devices = num_sync_devices
         if self.num_sync_devices > 0:
@@ -191,10 +201,11 @@ class NaiveSyncBatchNorm3d(nn.BatchNorm3d):
         super(NaiveSyncBatchNorm3d, self).__init__(**args)
 
     def forward(self, input):
+        """在训练时跨设备同步统计量，并返回归一化后的 ``input``。"""
         if du.get_local_size() == 1 or not self.training:
             return super().forward(input)
 
-        assert input.shape[0] > 0, "SyncBatchNorm does not support empty inputs"
+        assert input.shape[0] > 0, "SyncBatchNorm 不支持空输入"
         C = input.shape[1]
         mean = torch.mean(input, dim=[0, 2, 3, 4])
         meansqr = torch.mean(input * input, dim=[0, 2, 3, 4])

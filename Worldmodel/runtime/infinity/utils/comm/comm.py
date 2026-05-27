@@ -15,13 +15,33 @@ if torch.__version__ >= "2.4.0":
     _torch_register_fake_wrapper = torch.library.register_fake
 else:
     def noop_custom_op_wrapper(name, fn=None, /, *, mutates_args, device_types=None, schema=None):
+        """中文说明：`noop_custom_op_wrapper` 实现Infinity 序列并行通信算子中的 `noop_custom_op_wrapper` 步骤，供训练、推理或调试流程复用。
+
+        新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+        关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+        """
         def wrap(func):
+            """中文说明：`wrap` 实现Infinity 序列并行通信算子中的 `wrap` 步骤，供训练、推理或调试流程复用。
+
+            新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+            关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+            """
             return func
         if fn is None:
             return wrap
         return fn
     def noop_register_fake_wrapper(op, fn=None, /, *, lib=None, _stacklevel=1):
+        """中文说明：`noop_register_fake_wrapper` 实现Infinity 序列并行通信算子中的 `noop_register_fake_wrapper` 步骤，供训练、推理或调试流程复用。
+
+        新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+        关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+        """
         def wrap(func):
+            """中文说明：`wrap` 实现Infinity 序列并行通信算子中的 `wrap` 步骤，供训练、推理或调试流程复用。
+
+            新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+            关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+            """
             return func
         if fn is None:
             return wrap
@@ -33,22 +53,37 @@ else:
 __sp_comm_group__ = None
 
 def set_sp_comm_group(group=None):
+    """中文说明：`set_sp_comm_group` 读取或构造分布式 rank/group/world-size 信息，是理解多卡行为的基础。
+
+    新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+    关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+    """
     global __sp_comm_group__
     assert __sp_comm_group__ is None and group is not None
     __sp_comm_group__ = group
 
 def get_sp_comm_group():
+    """中文说明：`get_sp_comm_group` 读取或构造分布式 rank/group/world-size 信息，是理解多卡行为的基础。
+
+    新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+    关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+    """
     global __sp_comm_group__
     assert __sp_comm_group__ is not None
     return __sp_comm_group__
 
 
 # ======================================================
-# Model
+# 模型
 # ======================================================
 
 
 def model_sharding(model: torch.nn.Module):
+    """中文说明：`model_sharding` 实现Infinity 序列并行通信算子中的 `model_sharding` 步骤，供训练、推理或调试流程复用。
+
+    新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+    关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+    """
     global_rank = dist.get_rank()
     world_size = dist.get_world_size()
     for _, param in model.named_parameters():
@@ -63,11 +98,16 @@ def model_sharding(model: torch.nn.Module):
 
 
 # ======================================================
-# AllGather & ReduceScatter
+# 聚合 AllGather 与切分规约 ReduceScatter
 # ======================================================
 
 
 class AsyncAllGatherForTwo(torch.autograd.Function):
+    """中文说明：`AsyncAllGatherForTwo` 封装Infinity 序列并行通信算子中的状态和子模块。
+
+    新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+    关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+    """
     @staticmethod
     def forward(
         ctx: Any,
@@ -79,9 +119,9 @@ class AsyncAllGatherForTwo(torch.autograd.Function):
         group: Optional[ProcessGroup] = None,
     ) -> Tuple[Tensor, Any]:
         """
-        Returns:
-            outputs: Tensor
-            handle: Optional[Work], if overlap is True
+        返回：
+            outputs：输出张量。
+            handle：当 overlap=True 时返回异步 Work 句柄。
         """
         from torch.distributed._functional_collectives import all_gather_tensor
 
@@ -89,17 +129,17 @@ class AsyncAllGatherForTwo(torch.autograd.Function):
         ctx.sp_rank = sp_rank
         ctx.sp_size = sp_size
 
-        # all gather inputs
+        # 聚合 all_gather 输入
         all_inputs = all_gather_tensor(inputs.unsqueeze(0), 0, group)
-        # compute local qkv
+        # 计算本地 qkv
         local_qkv = F.linear(inputs, weight, bias).unsqueeze(0)
 
-        # remote compute
+        # 远端计算
         remote_inputs = all_inputs[1 - sp_rank].view(list(local_qkv.shape[:-1]) + [-1])
-        # compute remote qkv
+        # 计算远端 qkv
         remote_qkv = F.linear(remote_inputs, weight, bias)
 
-        # concat local and remote qkv
+        # 拼接本地与远端 qkv
         if sp_rank == 0:
             qkv = torch.cat([local_qkv, remote_qkv], dim=0)
         else:
@@ -111,6 +151,11 @@ class AsyncAllGatherForTwo(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx: Any, *grad_outputs) -> Tuple[Tensor, None, None]:
+        """中文说明：`backward` 实现Infinity 序列并行通信算子的反向传播；返回梯度顺序必须和 forward 输入顺序一致。
+
+        新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+        关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+        """
         from torch.distributed._functional_collectives import reduce_scatter_tensor
 
         group = ctx.group
@@ -118,7 +163,7 @@ class AsyncAllGatherForTwo(torch.autograd.Function):
         sp_size = ctx.sp_size
         inputs, weight, remote_inputs = ctx.saved_tensors
 
-        # split qkv_grad
+        # 拆分 qkv 梯度
         qkv_grad = grad_outputs[0]
         qkv_grad = rearrange(qkv_grad, "b (sp n) c -> sp b n c", sp=sp_size)
         qkv_grad = torch.chunk(qkv_grad, 2, dim=0)
@@ -127,12 +172,12 @@ class AsyncAllGatherForTwo(torch.autograd.Function):
         else:
             remote_qkv_grad, local_qkv_grad = qkv_grad
 
-        # compute remote grad
+        # 计算远端梯度
         remote_inputs_grad = torch.matmul(remote_qkv_grad, weight).squeeze(0)
         weight_grad = torch.matmul(remote_qkv_grad.transpose(-1, -2), remote_inputs).squeeze(0).sum(0)
         bias_grad = remote_qkv_grad.squeeze(0).sum(0).sum(0)
 
-        # launch async reduce scatter
+        # 启动异步 reduce_scatter
         remote_inputs_grad_zero = torch.zeros_like(remote_inputs_grad)
         if sp_rank == 0:
             remote_inputs_grad = torch.cat([remote_inputs_grad_zero, remote_inputs_grad], dim=0)
@@ -140,17 +185,22 @@ class AsyncAllGatherForTwo(torch.autograd.Function):
             remote_inputs_grad = torch.cat([remote_inputs_grad, remote_inputs_grad_zero], dim=0)
         remote_inputs_grad = reduce_scatter_tensor(remote_inputs_grad, "sum", 0, group)
 
-        # compute local grad and wait for reduce scatter
+        # 计算本地梯度并等待 reduce_scatter
         local_input_grad = torch.matmul(local_qkv_grad, weight).squeeze(0)
         weight_grad += torch.matmul(local_qkv_grad.transpose(-1, -2), inputs).squeeze(0).sum(0)
         bias_grad += local_qkv_grad.squeeze(0).sum(0).sum(0)
 
-        # sum remote and local grad
+        # 合并远端与本地梯度
         inputs_grad = remote_inputs_grad + local_input_grad
         return inputs_grad, weight_grad, bias_grad, None, None, None
 
 
 class AllGather(torch.autograd.Function):
+    """中文说明：`AllGather` 封装Infinity 序列并行通信算子中的状态和子模块。
+
+    新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+    关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+    """
     @staticmethod
     def forward(
         ctx: Any,
@@ -159,9 +209,9 @@ class AllGather(torch.autograd.Function):
         overlap: bool = False,
     ) -> Tuple[Tensor, Any]:
         """
-        Returns:
-            outputs: Tensor
-            handle: Optional[Work], if overlap is True
+        返回：
+            outputs：输出张量。
+            handle：当 overlap=True 时返回异步 Work 句柄。
         """
         assert ctx is not None or not overlap
 
@@ -184,6 +234,11 @@ class AllGather(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx: Any, *grad_outputs) -> Tuple[Tensor, None, None]:
+        """中文说明：`backward` 实现Infinity 序列并行通信算子的反向传播；返回梯度顺序必须和 forward 输入顺序一致。
+
+        新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+        关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+        """
         return (
             ReduceScatter.forward(None, grad_outputs[0], ctx.comm_grp, False)[0],
             None,
@@ -192,6 +247,11 @@ class AllGather(torch.autograd.Function):
 
 
 class ReduceScatter(torch.autograd.Function):
+    """中文说明：`ReduceScatter` 封装Infinity 序列并行通信算子中的状态和子模块。
+
+    新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+    关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+    """
     @staticmethod
     def forward(
         ctx: Any,
@@ -200,9 +260,9 @@ class ReduceScatter(torch.autograd.Function):
         overlap: bool = False,
     ) -> Tuple[Tensor, Any]:
         """
-        Returns:
-            outputs: Tensor
-            handle: Optional[Work], if overlap is True
+        返回：
+            outputs：输出张量。
+            handle：当 overlap=True 时返回异步 Work 句柄。
         """
         assert ctx is not None or not overlap
 
@@ -228,7 +288,12 @@ class ReduceScatter(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx: Any, *grad_outputs) -> Tuple[Tensor, None, None]:
-        # TODO: support async backward
+        # 待办：支持异步 backward
+        """中文说明：`backward` 实现Infinity 序列并行通信算子的反向传播；返回梯度顺序必须和 forward 输入顺序一致。
+
+        新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+        关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+        """
         return (
             AllGather.forward(None, grad_outputs[0], ctx.comm_grp, False)[0],
             None,
@@ -237,12 +302,17 @@ class ReduceScatter(torch.autograd.Function):
 
 
 # ======================================================
-# AlltoAll
+# 全互换通信（All-to-All）
 # ======================================================
 
 
 @_torch_custom_op_wrapper("distributed::_all_to_all_func", mutates_args=(), device_types="cuda")
 def _all_to_all_func(input_: torch.Tensor, world_size: int = 1, scatter_dim: int = 0, gather_dim: int = 0) -> torch.Tensor:
+    """中文说明：`_all_to_all_func` 执行分布式通信包装；阅读时把张量切分维度、rank 方向和 backward 的反向通信配对检查。
+
+    新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+    关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+    """
     input_list = [t.contiguous() for t in torch.tensor_split(input_, world_size, scatter_dim)]
     output_list = [torch.empty_like(input_list[0]) for _ in range(world_size)]
     group = get_sp_comm_group()
@@ -252,6 +322,11 @@ def _all_to_all_func(input_: torch.Tensor, world_size: int = 1, scatter_dim: int
 
 @_torch_register_fake_wrapper("distributed::_all_to_all_func")
 def _all_to_all_func_fake(input_: torch.Tensor, world_size: int = 1, scatter_dim: int = 0, gather_dim: int = 0) -> torch.Tensor:
+    """中文说明：`_all_to_all_func_fake` 执行分布式通信包装；阅读时把张量切分维度、rank 方向和 backward 的反向通信配对检查。
+
+    新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+    关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+    """
     inp_shape = list(input_.shape)
     group = get_sp_comm_group()
     world_size = dist.get_world_size(group)
@@ -265,17 +340,22 @@ def _all_to_all_func_fake(input_: torch.Tensor, world_size: int = 1, scatter_dim
 
 
 class _AllToAll(torch.autograd.Function):
-    """All-to-all communication.
+    """中文说明：执行 all-to-all 通信。
 
-    Args:
-        input_: input matrix
-        process_group: communication group
-        scatter_dim: scatter dimension
-        gather_dim: gather dimension
+    参数：
+        input_：输入矩阵。
+        process_group：通信进程组。
+        scatter_dim：执行 scatter 的维度。
+        gather_dim：执行 gather 的维度。
     """
 
     @staticmethod
     def forward(ctx, input_, process_group, scatter_dim, gather_dim):
+        """中文说明：`forward` 执行Infinity 序列并行通信算子的前向计算；重点核对输入输出张量 shape 是否与调用方约定一致。
+
+        新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+        关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+        """
         ctx.process_group = process_group
         ctx.scatter_dim = scatter_dim
         ctx.gather_dim = gather_dim
@@ -285,6 +365,11 @@ class _AllToAll(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, *grad_output):
+        """中文说明：`backward` 实现Infinity 序列并行通信算子的反向传播；返回梯度顺序必须和 forward 输入顺序一致。
+
+        新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+        关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+        """
         process_group = ctx.process_group
         scatter_dim = ctx.gather_dim
         gather_dim = ctx.scatter_dim
@@ -293,25 +378,35 @@ class _AllToAll(torch.autograd.Function):
 
 
 def all_to_all_comm(input_, process_group=None, scatter_dim=2, gather_dim=1):
+    """中文说明：`all_to_all_comm` 执行分布式通信包装；阅读时把张量切分维度、rank 方向和 backward 的反向通信配对检查。
+
+    新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+    关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+    """
     return _AllToAll.apply(input_, process_group, scatter_dim, gather_dim)
 
 
 # ======================================================
-# Sequence Gather & Split
+# 序列维 gather 与 split
 # ======================================================
 
 
 def _split_sequence_func(inputs, pg: dist.ProcessGroup, dim=-1):
+    """中文说明：`_split_sequence_func` 实现Infinity 序列并行通信算子中的 `_split_sequence_func` 步骤，供训练、推理或调试流程复用。
+
+    新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+    关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+    """
     world_size = dist.get_world_size(pg)
     if world_size == 1:
         return inputs
 
-    # Split along last dimension.
+    # 沿最后一维拆分。
     rank = dist.get_rank(pg)
     dim_size = inputs.size(dim)
     assert dim_size % world_size == 0, (
-        f"The dimension to split ({dim_size}) is not a multiple of world size ({world_size}), "
-        f"cannot split tensor evenly"
+        f"要切分的维度大小 ({dim_size}) 不是 world size ({world_size}) 的倍数，"
+        f"无法均匀切分 tensor"
     )
 
     outputs = torch.split(inputs, dim_size // world_size, dim=dim)[rank]
@@ -320,29 +415,39 @@ def _split_sequence_func(inputs, pg: dist.ProcessGroup, dim=-1):
 
 @_torch_custom_op_wrapper("distributed::_gather_sequence_func", mutates_args=(), device_types="cuda")
 def _gather_sequence_func(inputs: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    """中文说明：`_gather_sequence_func` 执行分布式通信包装；阅读时把张量切分维度、rank 方向和 backward 的反向通信配对检查。
+
+    新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+    关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+    """
     pg = get_sp_comm_group()
     world_size = dist.get_world_size(pg)
     if world_size == 1:
         return inputs
 
-    # all gather
+    # 聚合 all_gather 结果
     inputs = inputs.contiguous()
     outputs = [torch.empty_like(inputs) for _ in range(world_size)]
     dist.all_gather(outputs, inputs, group=pg)
 
-    # concat
+    # 拼接
     outputs = torch.cat(outputs, dim=dim)
     return outputs
 
 
 @_torch_register_fake_wrapper("distributed::_gather_sequence_func")
 def _gather_sequence_func_fake(inputs: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    """中文说明：`_gather_sequence_func_fake` 执行分布式通信包装；阅读时把张量切分维度、rank 方向和 backward 的反向通信配对检查。
+
+    新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+    关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+    """
     inp_shape = list(inputs.shape)
     pg = get_sp_comm_group()
     world_size = dist.get_world_size(pg)
     if world_size == 1:
         return inputs
-    
+
     inp_shape[dim] = inp_shape[dim] * world_size
     outputs = torch.empty(torch.Size(inp_shape), dtype=inputs.dtype, device=inputs.device, layout=inputs.layout)
     return outputs
@@ -358,20 +463,30 @@ else:
 
 class _GatherForwardSplitBackward(torch.autograd.Function):
     """
-    Gather the input sequence.
+    聚合输入序列。
 
-    Args:
-        input_: input matrix.
-        process_group: process group.
-        dim: dimension
+    参数：
+        input_：输入矩阵。.
+        process_group：进程组。
+        dim：通信作用的维度。
     """
 
     @staticmethod
     def symbolic(graph, input_):
+        """中文说明：`symbolic` 实现Infinity 序列并行通信算子中的 `symbolic` 步骤，供训练、推理或调试流程复用。
+
+        新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+        关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+        """
         return _wrapper_gather_sequence_func(input_)
 
     @staticmethod
     def forward(ctx, input_, process_group, dim, grad_scale):
+        """中文说明：`forward` 执行Infinity 序列并行通信算子的前向计算；重点核对输入输出张量 shape 是否与调用方约定一致。
+
+        新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+        关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+        """
         ctx.process_group = process_group
         ctx.dim = dim
         ctx.grad_scale = grad_scale
@@ -379,6 +494,11 @@ class _GatherForwardSplitBackward(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
+        """中文说明：`backward` 实现Infinity 序列并行通信算子的反向传播；返回梯度顺序必须和 forward 输入顺序一致。
+
+        新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+        关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+        """
         if ctx.grad_scale == "up":
             grad_output = grad_output * dist.get_world_size(ctx.process_group)
         elif ctx.grad_scale == "down":
@@ -389,20 +509,30 @@ class _GatherForwardSplitBackward(torch.autograd.Function):
 
 class _SplitForwardGatherBackward(torch.autograd.Function):
     """
-    Split sequence.
+    拆分序列。
 
-    Args:
-        input_: input matrix.
-        process_group: parallel mode.
-        dim: dimension
+    参数：
+        input_：输入矩阵。.
+        process_group：并行通信进程组。
+        dim：通信作用的维度。
     """
 
     @staticmethod
     def symbolic(graph, input_):
+        """中文说明：`symbolic` 实现Infinity 序列并行通信算子中的 `symbolic` 步骤，供训练、推理或调试流程复用。
+
+        新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+        关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+        """
         return _split_sequence_func(input_)
 
     @staticmethod
     def forward(ctx, input_, process_group, dim, grad_scale):
+        """中文说明：`forward` 执行Infinity 序列并行通信算子的前向计算；重点核对输入输出张量 shape 是否与调用方约定一致。
+
+        新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+        关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+        """
         ctx.process_group = process_group
         ctx.dim = dim
         ctx.grad_scale = grad_scale
@@ -410,6 +540,11 @@ class _SplitForwardGatherBackward(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
+        """中文说明：`backward` 实现Infinity 序列并行通信算子的反向传播；返回梯度顺序必须和 forward 输入顺序一致。
+
+        新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+        关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+        """
         if ctx.grad_scale == "up":
             grad_output = grad_output * dist.get_world_size(ctx.process_group)
         elif ctx.grad_scale == "down":
@@ -418,8 +553,18 @@ class _SplitForwardGatherBackward(torch.autograd.Function):
 
 
 def split_sequence(input_, process_group, dim, grad_scale=1.0):
+    """中文说明：`split_sequence` 实现Infinity 序列并行通信算子中的 `split_sequence` 步骤，供训练、推理或调试流程复用。
+
+    新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+    关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+    """
     return _SplitForwardGatherBackward.apply(input_, process_group, dim, grad_scale)
 
 
 def gather_sequence(input_, process_group, dim, grad_scale=None):
+    """中文说明：`gather_sequence` 执行分布式通信包装；阅读时把张量切分维度、rank 方向和 backward 的反向通信配对检查。
+
+    新手提示：重点公式是 split/gather 在 sequence 维互逆，forward 的 all-to-all 与 backward 的 reduce/scatter 必须配对。
+    关键关系：forward 负责数据分发或聚合，backward 通常执行互逆通信来传回梯度。
+    """
     return _GatherForwardSplitBackward.apply(input_, process_group, dim, grad_scale)

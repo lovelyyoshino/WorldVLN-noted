@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # =============================================================================
-# Stage 2 — latent→action training (DDP)
+# Stage 2：latent→action 训练（DDP）
 #
-# Required paths are provided through environment variables below.
+# 必需路径由下面的环境变量提供。
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,7 +15,7 @@ echo "[cwd] $(pwd)"
 export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
 export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 
-# Optional conda env. If unset, use the current `python` on PATH.
+# 可选 conda 环境；若不设置，则使用 PATH 中的当前 `python`。
 CONDA_ENV_PREFIX="${CONDA_ENV_PREFIX:-}"
 CONDA_ROOT_HINT="${CONDA_ROOT_HINT:-}"
 
@@ -35,7 +35,7 @@ activate_conda_prefix() {
   if [[ -f "${prefix}/bin/activate" ]]; then
     source "${prefix}/bin/activate"; return 0
   fi
-  echo "[error] Failed to activate conda env prefix: ${prefix}" >&2
+  echo "[error] 激活 conda env prefix 失败：${prefix}" >&2
   exit 1
 }
 if [[ -n "${CONDA_ENV_PREFIX}" ]]; then
@@ -64,7 +64,7 @@ require_env() {
   local name="$1"
   local val="${!name:-}"
   if [[ -z "${val}" ]]; then
-    echo "[error] Missing required env var: ${name}" >&2
+    echo "[error] 缺少必需环境变量：${name}" >&2
     exit 2
   fi
 }
@@ -90,7 +90,7 @@ PY
 )}"
 echo "[ddp] master_addr=${MASTER_ADDR} master_port=${MASTER_PORT}"
 
-# ---- optional args ----
+# ---- 可选参数 ----
 RESUME_ARGS=()
 if [[ -n "${RESUME}" ]]; then
   RESUME_ARGS+=(--resume "${RESUME}")

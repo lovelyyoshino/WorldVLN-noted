@@ -1,51 +1,49 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
-"""Functions for computing metrics."""
+"""指标计算函数。"""
 
 import torch
 import numpy as np
 
 def topks_correct(preds, labels, ks):
     """
-    Given the predictions, labels, and a list of top-k values, compute the
-    number of correct predictions for each top-k value.
+    根据预测、标签和 top-k 列表，计算每个 top-k 下的正确预测数。
 
-    Args:
-        preds (array): array of predictions. Dimension is batchsize
-            N x ClassNum.
-        labels (array): array of labels. Dimension is batchsize N.
-        ks (list): list of top-k values. For example, ks = [1, 5] correspods
-            to top-1 and top-5.
+    参数：
+        preds (array): 预测数组，维度为 batchsize 的 `N x ClassNum`。
+        labels (array): 标签数组，维度为 batchsize 的 `N`。
+        ks (list): top-k 列表，例如 `ks = [1, 5]` 表示 top-1 和 top-5。
 
-    Returns:
-        topks_correct (list): list of numbers, where the `i`-th entry
-            corresponds to the number of top-`ks[i]` correct predictions.
+    返回：
+        topks_correct (list): 正确预测数列表，其中第 `i` 项对应
+            `top-ks[i]` 的正确预测数量。
     """
     assert preds.size(0) == labels.size(
         0
-    ), "Batch dim of predictions and labels must match"
-    # Find the top max_k predictions for each sample
+    ), "预测和标签的 batch 维度必须一致"
+    # 为每个样本取前 max_k 个预测结果。
     _top_max_k_vals, top_max_k_inds = torch.topk(
         preds, max(ks), dim=1, largest=True, sorted=True
     )
-    # (batch_size, max_k) -> (max_k, batch_size).
+    # 形状/映射说明：(batch_size, max_k) -> (max_k, batch_size).
     top_max_k_inds = top_max_k_inds.t()
-    # (batch_size, ) -> (max_k, batch_size).
+    # 形状/映射说明：(batch_size, ) -> (max_k, batch_size).
     rep_max_k_labels = labels.view(1, -1).expand_as(top_max_k_inds)
-    # (i, j) = 1 if top i-th prediction for the j-th sample is correct.
+    # 若第 j 个样本的第 i 个 top 预测正确，则 (i, j) = 1。
     top_max_k_correct = top_max_k_inds.eq(rep_max_k_labels)
-    # Compute the number of topk correct predictions for each k.
+    # 统计每个 k 对应的 top-k 正确预测数。
     topks_correct = [top_max_k_correct[:k, :].float().sum() for k in ks]
     return topks_correct
 
 
 def topk_errors(preds, labels, ks):
     """
-    Computes the top-k error for each k.
-    Args:
-        preds (array): array of predictions. Dimension is N.
-        labels (array): array of labels. Dimension is N.
-        ks (list): list of ks to calculate the top accuracies.
+    计算每个 k 对应的 top-k 错误率。
+
+    参数：
+        preds (array): 预测数组，维度为 `N`。
+        labels (array): 标签数组，维度为 `N`。
+        ks (list): 需要计算的 top-k 列表。
     """
     num_topks_correct = topks_correct(preds, labels, ks)
     return [(1.0 - x / preds.size(0)) * 100.0 for x in num_topks_correct]
@@ -53,26 +51,28 @@ def topk_errors(preds, labels, ks):
 
 def topk_accuracies(preds, labels, ks):
     """
-    Computes the top-k accuracy for each k.
-    Args:
-        preds (array): array of predictions. Dimension is N.
-        labels (array): array of labels. Dimension is N.
-        ks (list): list of ks to calculate the top accuracies.
+    计算每个 k 对应的 top-k accuracy。
+
+    参数：
+        preds (array): 预测数组，维度为 `N`。
+        labels (array): 标签数组，维度为 `N`。
+        ks (list): 需要计算的 top-k 列表。
     """
     num_topks_correct = topks_correct(preds, labels, ks)
     return [(x / preds.size(0)) * 100.0 for x in num_topks_correct]
 
 def multitask_topks_correct(preds, labels, ks=(1,)):
     """
-    Args:
-        preds: tuple(torch.FloatTensor), each tensor should be of shape
-            [batch_size, class_count], class_count can vary on a per task basis, i.e.
-            outputs[i].shape[1] can be different to outputs[j].shape[j].
-        labels: tuple(torch.LongTensor), each tensor should be of shape [batch_size]
-        ks: tuple(int), compute accuracy at top-k for the values of k specified
-            in this parameter.
-    Returns:
-        tuple(float), same length at topk with the corresponding accuracy@k in.
+    计算多任务场景下的 top-k 正确数。
+
+    参数：
+        preds: `tuple(torch.FloatTensor)`，每个张量形状均为
+            `[batch_size, class_count]`，不同任务的 `class_count` 可不同。
+        labels: `tuple(torch.LongTensor)`，每个张量形状均为 `[batch_size]`。
+        ks: `tuple(int)`，指定需要计算的 top-k。
+
+    返回：
+        tuple(float): 与 `ks` 等长，对应各个 `accuracy@k` 的正确样本数。
     """
     max_k = int(np.max(ks))
     task_count = len(preds)
@@ -82,7 +82,7 @@ def multitask_topks_correct(preds, labels, ks=(1,)):
         all_correct = all_correct.cuda()
     for output, label in zip(preds, labels):
         _, max_k_idx = output.topk(max_k, dim=1, largest=True, sorted=True)
-        # Flip batch_size, class_count as .view doesn't work on non-contiguous
+        # 交换 batch_size 和 class 维度，因为 `.view` 不适用于非连续张量。
         max_k_idx = max_k_idx.t()
         correct_for_task = max_k_idx.eq(label.view(1, -1).expand_as(max_k_idx))
         all_correct.add_(correct_for_task)

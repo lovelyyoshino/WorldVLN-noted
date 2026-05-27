@@ -1,6 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
-"""Optimizer."""
+"""优化器构建和学习率设置工具。"""
 
 import torch
 
@@ -9,37 +9,37 @@ import timesformer.utils.lr_policy as lr_policy
 
 def construct_optimizer(model, cfg):
     """
-    Construct a stochastic gradient descent or ADAM optimizer with momentum.
-    Details can be found in:
-    Herbert Robbins, and Sutton Monro. "A stochastic approximation method."
-    and
-    Diederik P.Kingma, and Jimmy Ba.
-    "Adam: A Method for Stochastic Optimization."
+        构建带 momentum 的随机梯度下降优化器，或 ADAM/AdamW 优化器。
 
-    Args:
-        model (model): model to perform stochastic gradient descent
-        optimization or ADAM optimization.
-        cfg (config): configs of hyper-parameters of SGD or ADAM, includes base
-        learning rate,  momentum, weight_decay, dampening, and etc.
+        相关算法可参考：
+        说明：Herbert Robbins, and Sutton Monro. "A stochastic approximation method."
+        以及
+        说明：Diederik P.Kingma, and Jimmy Ba.
+        说明："Adam: A Method for Stochastic Optimization."
+
+        参数：
+            model (model): 需要由 SGD、ADAM 或 AdamW 优化的模型。
+            cfg (config): SGD/ADAM/AdamW 的超参数配置，包括 base learning rate、
+            momentum、weight_decay、dampening 等。
+
     """
-    # Batchnorm parameters.
+    # BatchNorm 参数。
     bn_params = []
-    # Non-batchnorm parameters.
+    # 非 BatchNorm 参数。
     non_bn_parameters = []
     for name, p in model.named_parameters():
         if "bn" in name:
             bn_params.append(p)
         else:
             non_bn_parameters.append(p)
-    # Apply different weight decay to Batchnorm and non-batchnorm parameters.
-    # In Caffe2 classification codebase the weight decay for batchnorm is 0.0.
-    # Having a different weight decay on batchnorm might cause a performance
-    # drop.
+    # 对 BatchNorm 和非 BatchNorm 参数使用不同的 weight decay。
+    # Caffe2 分类代码里 BatchNorm 的 weight decay 是 0.0。
+    # 给 BatchNorm 设置不同的 weight decay 可能导致性能下降。
     optim_params = [
         {"params": bn_params, "weight_decay": cfg.BN.WEIGHT_DECAY},
         {"params": non_bn_parameters, "weight_decay": cfg.SOLVER.WEIGHT_DECAY},
     ]
-    # Check all parameters will be passed into optimizer.
+    # 确认所有参数都会被传给 optimizer。
     assert len(list(model.parameters())) == len(non_bn_parameters) + len(
         bn_params
     ), "parameter size does not match: {} + {} != {}".format(
@@ -79,21 +79,24 @@ def construct_optimizer(model, cfg):
 
 def get_epoch_lr(cur_epoch, cfg):
     """
-    Retrieves the lr for the given epoch (as specified by the lr policy).
-    Args:
-        cfg (config): configs of hyper-parameters of ADAM, includes base
-        learning rate, betas, and weight decays.
-        cur_epoch (float): the number of epoch of the current training stage.
+        按 lr policy 查询指定 epoch 的学习率。
+
+        参数：
+            cfg (config): 优化器和 lr policy 的超参数配置。
+            cur_epoch (float): 当前训练阶段的 epoch 编号。
+
     """
     return lr_policy.get_lr_at_epoch(cfg, cur_epoch)
 
 
 def set_lr(optimizer, new_lr):
     """
-    Sets the optimizer lr to the specified value.
-    Args:
-        optimizer (optim): the optimizer using to optimize the current network.
-        new_lr (float): the new learning rate to set.
+        把 optimizer 的 lr 设置为指定值。
+
+        参数：
+            optimizer (optim): 当前网络使用的优化器。
+            new_lr (float): 要设置的新学习率。
+
     """
     for param_group in optimizer.param_groups:
         param_group["lr"] = new_lr

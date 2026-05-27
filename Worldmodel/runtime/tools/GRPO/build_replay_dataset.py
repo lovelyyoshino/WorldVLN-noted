@@ -12,6 +12,7 @@ import numpy as np
 
 
 def _rank01_average_ties(vals: np.ndarray) -> np.ndarray:
+    """把同组 reward 转成 [0,1] rank，ties 使用平均 rank。"""
     n = int(vals.shape[0])
     if n <= 1:
         return np.zeros((n,), dtype=np.float64)
@@ -29,6 +30,7 @@ def _rank01_average_ties(vals: np.ndarray) -> np.ndarray:
 
 
 def main():
+    """CLI 入口：从 reward 字段生成 grpo_weight/grpo_score/grpo_gate。"""
     ap = argparse.ArgumentParser()
     ap.add_argument("--input_jsonl", type=str, required=True)
     ap.add_argument("--output_jsonl", type=str, required=True)
@@ -41,7 +43,7 @@ def main():
         type=str,
         default="precomputed_adv",
         choices=["precomputed_adv", "raw_reward", "gate_mean", "rank_gate"],
-        help="How to derive grpo_weight/grpo_score/grpo_gate from rewards (legacy rank_gate kept for compatibility).",
+        help="如何从 rewards 推导 grpo_weight/grpo_score/grpo_gate（保留旧版 rank_gate 以兼容历史数据）。",
     )
     args = ap.parse_args()
 
@@ -67,7 +69,7 @@ def main():
         idx = np.asarray(inds, dtype=np.int64)
         r_act = np.asarray([float(rows[i].get("grpo_reward_act", rows[i].get("grpo_reward", 0.0))) for i in idx], dtype=np.float64)
         r_task = np.asarray([float(rows[i].get("grpo_reward_task", 0.0)) for i in idx], dtype=np.float64)
-        # Prefer CE advantage if present (more GRPO-ish); else fall back to raw CE.
+        # 优先使用已有 CE 优势值（advantage，更接近 GRPO）；否则退回原始 CE。
         r_ce = np.asarray(
             [
                 float(
@@ -103,7 +105,7 @@ def main():
             m = (r >= mu).astype(np.float64)
             w = (np.power(float(args.alpha_decay), np.maximum(0, clip_ids - 1))) * m * s
         else:
-            # raw_reward: no gating, no ranking
+            # raw_reward：不做门控（gating），也不做排序（ranking）。
             m = np.ones_like(r, dtype=np.float64)
             s = r.copy()
             w = r.copy()
@@ -115,9 +117,8 @@ def main():
     with open(out_path, "w", encoding="utf-8") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    print(f"[build_replay_dataset] wrote {len(rows)} lines -> {out_path}")
+    print(f"[build_replay_dataset] 已写入 {len(rows)} 行 -> {out_path}")
 
 
 if __name__ == "__main__":
     main()
-

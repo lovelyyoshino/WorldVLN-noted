@@ -3,22 +3,29 @@
 # SPDX-License-Identifier: MIT
 
 """
-Helper script for InfinityStar closed-loop / streaming inference.
+InfinityStar 闭环 / streaming 推理辅助脚本。
 
-In the open-source layout, this file is mainly used for:
+在开源目录里，这个文件主要用于：
 
-- A shared argument builder reused by `infer/server.py` and `action_aware_grpo/grpo_server.py`.
-- Offline debugging: replay a sequence of real frames through the streaming pipeline.
+- 提供共享参数构造函数，供 `infer/server.py` 和 `action_aware_grpo/grpo_server.py` 复用。
+- 做离线调试：把一段真实帧序列送进 streaming 流程重放。
 
-Prepare a directory of real frames (named in chronological order) and the corresponding prompt.
-The script will sort frames automatically and print inference results.
+准备一个真实帧目录（文件名按时间顺序命名）和对应 prompt。
+脚本会自动排序帧，并打印推理结果。
 
-Example:
-  python3 tools/closed_loop_streaming_infer_480p_81f.py \
-    --ckpt ./checkpoints/model.pth \
-    --route_dir ./data/reference_route \
-    --prompt_key instruction \
-    --out_dir ./output_streaming_closed_loop
+示例：
+```bash
+python3 tools/closed_loop_streaming_infer_480p_81f.py \
+  --ckpt ./checkpoints/model.pth \
+  --route_dir ./data/reference_route \
+  --prompt_key instruction \
+  --out_dir ./output_streaming_closed_loop
+```
+
+小白阅读顺序建议：
+1. 先看 `_make_args()`，理解一个 CLI 命令会被补齐成哪些 runtime 参数；
+2. 再看 `main()` 里“加载模型 -> 初始化 session -> 构造 schedule”的准备段；
+3. 最后看 `_write_gt_obs()`、`_infer_full()` 和离线/watch 两条循环，理解缓存如何被 GT 覆盖。
 """
 
 from __future__ import annotations
@@ -45,12 +52,19 @@ from tools.run_infinity import load_tokenizer, load_transformer, load_visual_tok
 
 
 def _is_safetensors_shard_dir(path: str) -> bool:
+    """判断目录是否是 HuggingFace/safetensors 分片 checkpoint。"""
     if not path or not osp.isdir(path):
         return False
     return bool(glob.glob(osp.join(path, "*.safetensors"))) or bool(glob.glob(osp.join(path, "*.safetensors.index.json")))
 
 
 def _resolve_checkpoint_layout(ckpt: str) -> dict[str, str]:
+    """
+    识别 checkpoint 布局并转成 Infinity loader 需要的字段。
+
+    支持三类输入：HF repo 风格的 `gpt/` + `vae/` 分片目录、单独 GPT safetensors
+    分片目录、以及普通 `global_step_*.pth` torch checkpoint。
+    """
     ckpt = osp.abspath(ckpt)
 
     gpt_dir = osp.join(ckpt, "gpt")
@@ -80,6 +94,7 @@ def _resolve_checkpoint_layout(ckpt: str) -> dict[str, str]:
 
 
 def _sorted_images(image_dir: str) -> List[str]:
+    """按文件名顺序收集观测帧，保持离线 replay 的时间顺序稳定。"""
     exts = ("*.png", "*.jpg", "*.jpeg", "*.webp", "*.bmp")
     files: List[str] = []
     for e in exts:
@@ -89,15 +104,16 @@ def _sorted_images(image_dir: str) -> List[str]:
 
 
 def _read_prompt(prompt: Optional[str], prompt_json: Optional[str], prompt_key: str) -> str:
+    """优先使用命令行 prompt，否则从 meta/prompt json 中读取导航指令。"""
     if prompt and prompt.strip():
         return prompt.strip()
     if not prompt_json:
-        raise ValueError("Must provide --prompt or --prompt_json")
+        raise ValueError("必须提供 --prompt 或 --prompt_json")
     with open(prompt_json, "r", encoding="utf-8") as f:
         pj = json.load(f)
     p = pj.get(prompt_key) or pj.get("instruction_unified") or pj.get("instruction") or pj.get("prompt")
     if not isinstance(p, str) or not p.strip():
-        raise ValueError(f"Prompt not found in {prompt_json} (key={prompt_key})")
+        raise ValueError(f"在 {prompt_json} 中找不到有效 prompt（key={prompt_key}）")
     return p.strip()
 
 
@@ -114,10 +130,17 @@ def _make_args(
     tau_image: float,
     tau_video: float,
 ) -> SimpleNamespace:
+    """
+    构造 InfinityStar 推理参数对象。
+
+    中文导读：
+    这里不是普通 argparse，而是把训练/推理脚本散落依赖的字段集中补齐。`infer/server.py`
+    和 GRPO server 都会复用这个函数，因此新增推理参数时要确认这些服务端路径是否也需要同步。
+    """
     ckpt_dir = osp.join(REPO_ROOT, "checkpoint")
     ckpt_layout = _resolve_checkpoint_layout(ckpt)
-    # Prefer the repo's Args (has a complete set of defaults) to avoid missing-field crashes.
-    # Fallback to SimpleNamespace if Tap/Args is unavailable in current python env.
+    # 优先使用仓库里的 Args（默认字段更完整），避免缺字段崩溃。
+    # 如果当前 Python 环境没有 Tap/Args，就退回 SimpleNamespace。
     try:
         from infinity.utils.arg_util import Args as _Args  # type: ignore
         a = _Args()
@@ -125,16 +148,16 @@ def _make_args(
         a = SimpleNamespace()
     a.pn = pn
     a.fps = int(fps)
-    # Keep both names (some utilities use video_fps).
+    # 同时保留两个名字；部分工具会读取 video_fps。
     a.video_fps = int(fps)
-    a.video_frames = int(num_frames)  # model configured with the max length (81 in our use-case)
+    a.video_frames = int(num_frames)  # 按模型最大长度配置（我们的用例里是 81）。
     a.temporal_compress_rate = 4
     a.videovae = 10
     a.vae_type = 64
     a.vae_path = osp.join(ckpt_dir, "infinitystar_videovae.pth")
     a.text_encoder_ckpt = osp.join(ckpt_dir, "text_encoder", "flan-t5-xl-official")
     a.text_channels = 2048
-    # Keep aliases used across repo scripts.
+    # 保留仓库其他脚本会用到的别名。
     a.Ct5 = a.text_channels
     a.tlen = 512
     a.simple_text_proj = 1
@@ -144,11 +167,11 @@ def _make_args(
     a.checkpoint_layout = ckpt_layout["checkpoint_layout"]
     a.vae_model_path = ckpt_layout["vae_model_path"]
 
-    # match finetune schedule family
+    # 匹配 finetune 使用的 schedule family。
     a.dynamic_scale_schedule = dynamic_scale_schedule
     a.mask_type = mask_type
 
-    # inference knobs (match tools/infer_video_480p.py & our finetune inference script)
+    # 推理控制参数：对齐 tools/infer_video_480p.py 和我们的 finetune 推理脚本。
     a.use_flex_attn = True
     a.bf16 = 1
     a.use_apg = 1
@@ -161,13 +184,13 @@ def _make_args(
     a.use_two_stage_lfq = 1
     a.detail_scale_min_tokens = 350
     a.semantic_scales = 11
-    # These are required by the VideoVAE constructor (global_args.*) and also used by Infinity heads.
-    # Match repo defaults / finetune scripts.
+    # VideoVAE 构造函数（global_args.*）需要这些字段，Infinity heads 也会读取。
+    # 这里对齐仓库默认值和 finetune 脚本。
     a.semantic_scale_dim = 16
     a.detail_scale_dim = 64
     a.use_learnable_dim_proj = 0
     a.use_feat_proj = 2
-    # Additional args accessed by Infinity __init__ / attention mask / RoPE helpers.
+    # Infinity __init__、attention mask 和 RoPE helper 会额外访问这些参数。
     a.context_frames = getattr(a, "context_frames", 10000)
     a.steps_per_frame = getattr(a, "steps_per_frame", 3)
     a.inject_sync = getattr(a, "inject_sync", 0)
@@ -185,33 +208,47 @@ def _make_args(
     a.pad_to_multiplier = 128
     a.seed = int(seed)
 
-    # repetition configs (14 scales for 0.40M)
+    # repetition 配置（0.40M 使用 14 个 scale）。
     a.image_scale_repetition = "[3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]"
     a.video_scale_repetition = "[3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2, 1]"
     return a
 
 
 def _load_obs_video_bcthw(frame_paths: List[str], tgt_h: int, tgt_w: int) -> torch.Tensor:
-    """Return [1,3,T,H,W] float in [-1,1] (CPU tensor)."""
+    """
+    把真实观测帧目录读成 world model 需要的 `[1,3,T,H,W]` 张量。
+
+    输出仍在 CPU，范围是 `[-1,1]`。这样调用方可以先决定何时搬到 GPU，
+    避免在 watch 模式下每次轮询都过早占用显存。
+    """
     frames = []
     for p in frame_paths:
         pil = Image.open(p).convert("RGB")
-        frames.append(transform(pil, tgt_h, tgt_w))  # [3,H,W] in [-1,1]
+        frames.append(transform(pil, tgt_h, tgt_w))  # [3,H,W]，范围 [-1,1]。
     video_T3HW = torch.stack(frames, dim=0)  # [T,3,H,W]
     return video_T3HW.permute(1, 0, 2, 3).unsqueeze(0)  # [1,3,T,H,W]
 
 def _take_with_pad(paths: List[str], n: int, pad_short_real: bool) -> List[str]:
+    """截取前 n 帧；若真实帧不足且允许 padding，则重复最后一帧补齐。"""
     if len(paths) >= n:
         return paths[:n]
     if not paths:
-        raise ValueError("no real frames found")
+        raise ValueError("没有找到任何真实观测帧")
     if not pad_short_real:
-        raise ValueError(f"Not enough real frames: need={n} but only={len(paths)} (use --pad_short_real to pad)")
-    # Repeat last frame path to reach n.
+        raise ValueError(f"真实帧数量不足：需要 {n} 帧，但只有 {len(paths)} 帧（可启用 --pad_short_real 进行补齐）")
+    # 重复最后一帧路径，补到 n 帧。
     return paths + [paths[-1]] * (n - len(paths))
 
 
 def _obs_points(total_gt_frames: int, pred_num_frames: int, step: int) -> List[int]:
+    """
+        生成闭环观测边界，例如 1,17,33,...，并裁剪到真实帧和预测帧上限。
+
+        points 表示每一轮已经看到的真实帧数量：
+          公式/形状说明：points = [1, 1+step, 1+2*step, ..., end]
+        推理先用 points[i] 帧预测未来，再等到 points[i+1] 帧到齐后写回 GT cache。
+
+    """
     end = min(int(total_gt_frames), int(pred_num_frames))
     if end <= 0:
         return []
@@ -229,39 +266,57 @@ def _obs_points(total_gt_frames: int, pred_num_frames: int, step: int) -> List[i
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--ckpt", type=str, required=True, help="global_step_*.pth (checkpoint_type=torch)")
-    ap.add_argument("--route_dir", type=str, default="", help="Route directory (reads route_dir/images and route_dir/meta.json by default)")
-    ap.add_argument("--frames_dir", type=str, default="", help="Directory of real observation frames (sorted by filename). Can be omitted if --route_dir is set.")
-    ap.add_argument("--prompt", type=str, default="")
-    ap.add_argument("--prompt_json", type=str, default="")
-    ap.add_argument("--prompt_key", type=str, default="instruction_unified")
-    ap.add_argument("--negative_prompt", type=str, default="")
-    ap.add_argument("--out_dir", type=str, required=True)
+    """
+    命令行闭环 streaming 推理入口。
 
-    ap.add_argument("--num_frames", type=int, default=81)
-    ap.add_argument("--step", type=int, default=16)
-    ap.add_argument("--save_full_pred", action="store_true", help="Also save the full N-frame predicted video for each inference call")
-    ap.add_argument("--pad_short_real", action="store_true", default=True, help="If real frames are fewer than num_frames, pad by repeating the last frame (enabled by default)")
-    ap.add_argument("--no_pad_short_real", action="store_false", dest="pad_short_real", help="Disable padding; fail/stop early when real frames are insufficient")
-    ap.add_argument("--watch", action="store_true", help="Watch mode: wait for new frames under frames_dir and run inference once enough frames are available")
-    ap.add_argument("--poll_interval", type=float, default=0.5, help="Polling interval (seconds) for watch mode")
-    ap.add_argument("--fps", type=int, default=16)
-    ap.add_argument("--pn", type=str, default="0.40M")
-    ap.add_argument("--h_div_w_template", type=float, default=0.562)
+    离线模式会按 segment 保存预测视频；watch 模式会等待新观测帧到齐后再写 GT cache，
+    用来模拟“预测动作 -> 执行 -> 获得新帧 -> 继续预测”的在线流程。
 
-    ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--cfg", type=float, default=34.0)
-    ap.add_argument("--tau_image", type=float, default=1.0)
-    ap.add_argument("--tau_video", type=float, default=0.4)
-    ap.add_argument("--top_k", type=int, default=0)
-    ap.add_argument("--top_p", type=float, default=0.0)
+    可以把主流程记成 5 步：
+    1. 解析 CLI，并把 checkpoint/route/prompt/帧目录整理成统一输入；
+    2. `_make_args()` 补齐 Infinity runtime 依赖的参数字段；
+    3. `load_tokenizer/load_visual_tokenizer/load_transformer` 加载文本编码器、VAE、世界模型；
+    4. `InfinityStreamingSession.reset()` 建立文本 cache，再用 `_write_gt_obs()` 写真实观测 cache；
+    5. 反复执行“完整预测 -> 保存 segment -> `correction_clear_pred()` -> 用更长 GT 覆盖 cache”。
+    """
+    ap = argparse.ArgumentParser(
+        description=(
+            "离线或 watch 模式下的 InfinityStar 闭环 streaming 推理调试脚本。"
+            "它会把真实观测帧分段写入 GT cache，并保存每一段会在下一轮被覆盖的预测视频。"
+        )
+    )
+    ap.add_argument("--ckpt", type=str, required=True, help="世界模型 checkpoint 路径；通常是 `global_step_*.pth` 或 sharded 目录。")
+    ap.add_argument("--route_dir", type=str, default="", help="可选 route 目录；若提供，默认从 `route_dir/images` 读帧、从 `route_dir/meta.json` 读 prompt。")
+    ap.add_argument("--frames_dir", type=str, default="", help="真实观测帧目录，按文件名排序读取；若提供了 `--route_dir`，这里可以省略。")
+    ap.add_argument("--prompt", type=str, default="", help="直接给定导航 prompt；和 `--prompt_json` 二选一即可。")
+    ap.add_argument("--prompt_json", type=str, default="", help="含 prompt 的 JSON 路径；常见是 route 的 `meta.json`。")
+    ap.add_argument("--prompt_key", type=str, default="instruction_unified", help="当从 `--prompt_json` 读取 prompt 时优先尝试的字段名。")
+    ap.add_argument("--negative_prompt", type=str, default="", help="可选 negative prompt，会传给世界模型采样。")
+    ap.add_argument("--out_dir", type=str, required=True, help="输出目录；每次运行会在其中创建一个时间戳子目录保存视频和 run_args。")
 
-    ap.add_argument("--dynamic_scale_schedule", type=str, default="infinity_elegant_clip20frames_v2_allpt")
-    ap.add_argument("--mask_type", type=str, default="infinity_elegant_clip20frames_v2_allpt")
+    ap.add_argument("--num_frames", type=int, default=81, help="每轮完整预测的视频总帧数；默认 81，对应本项目常见的 4n+1 时间规则。")
+    ap.add_argument("--step", type=int, default=16, help="闭环每轮前进多少帧；默认 16，对应 `points=[1,17,33,...]`。")
+    ap.add_argument("--save_full_pred", action="store_true", help="除 segment 之外，额外保存每轮完整的 N 帧预测视频，便于排查 segment 之外的生成质量。")
+    ap.add_argument("--pad_short_real", action="store_true", default=True, help="真实帧不足 `num_frames` 时，是否重复最后一帧补齐；默认开启。")
+    ap.add_argument("--no_pad_short_real", action="store_false", dest="pad_short_real", help="关闭补齐；若真实帧不足，会提前报错或停止。")
+    ap.add_argument("--watch", action="store_true", help="监视模式（watch）：持续等待 `frames_dir` 下出现更多真实帧，每凑够一段就继续下一轮推理。")
+    ap.add_argument("--poll_interval", type=float, default=0.5, help="监视模式（watch）的轮询间隔，单位秒。")
+    ap.add_argument("--fps", type=int, default=16, help="输出视频和时长标签使用的帧率。")
+    ap.add_argument("--pn", type=str, default="0.40M", help="动态分辨率预设名，会影响 scale schedule 和 patch 预算。")
+    ap.add_argument("--h_div_w_template", type=float, default=0.562, help="目标高宽比模板 H/W；会影响 schedule 推导出的目标分辨率。")
+
+    ap.add_argument("--seed", type=int, default=0, help="随机种子基值；每个 step 会在此基础上再加 step_i。")
+    ap.add_argument("--cfg", type=float, default=34.0, help="CFG（Classifier-Free Guidance）强度。")
+    ap.add_argument("--tau_image", type=float, default=1.0, help="图像/首帧相关尺度使用的采样温度。")
+    ap.add_argument("--tau_video", type=float, default=0.4, help="视频续帧相关尺度使用的采样温度。")
+    ap.add_argument("--top_k", type=int, default=0, help="top-k 采样；0 通常表示不启用额外 top-k 截断。")
+    ap.add_argument("--top_p", type=float, default=0.0, help="top-p 采样；0 通常表示不启用额外 nucleus 截断。")
+
+    ap.add_argument("--dynamic_scale_schedule", type=str, default="infinity_elegant_clip20frames_v2_allpt", help="动态尺度计划名，决定每个自回归尺度的 patch 网格和顺序。")
+    ap.add_argument("--mask_type", type=str, default="infinity_elegant_clip20frames_v2_allpt", help="注意力 mask 类型，通常与 dynamic_scale_schedule 成对出现。")
     args_cli = ap.parse_args()
 
-    # local rank support (torchrun)
+    # 支持 torchrun 注入的 local rank。
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
@@ -282,18 +337,19 @@ def main() -> None:
     negative_prompt = (args_cli.negative_prompt or "").strip()
 
     if not frames_dir:
-        raise ValueError("Must provide --frames_dir or --route_dir")
+        raise ValueError("必须提供 --frames_dir 或 --route_dir")
 
     frame_paths = _sorted_images(frames_dir)
     if not frame_paths:
-        raise FileNotFoundError(f"No image frames found under {frames_dir} (write at least 1 frame first)")
+        raise FileNotFoundError(f"在 {frames_dir} 下没有找到任何图像帧（至少先写入 1 帧）")
     if (not args_cli.watch) and (len(frame_paths) < int(args_cli.num_frames)) and bool(args_cli.pad_short_real):
         print(
-            f"[warn] real_frames={len(frame_paths)} < num_frames={args_cli.num_frames}; "
-            f"padding by repeating the last frame to {args_cli.num_frames} for writing GT cache"
+            f"[警告] 真实帧数 {len(frame_paths)} 小于 num_frames={args_cli.num_frames}；"
+            f"写 GT cache 时会通过重复最后一帧补到 {args_cli.num_frames} 帧"
         )
 
-    # Build args + load models
+    # 第 1 段：CLI args -> runtime args。
+    # 这里把命令行参数补成 Infinity 各组件都能读取的一大组字段。
     a = _make_args(
         ckpt=ckpt,
         pn=args_cli.pn,
@@ -307,11 +363,15 @@ def main() -> None:
         tau_video=args_cli.tau_video,
     )
 
+    # 第 2 段：runtime args -> tokenizer / VAE / world model。
+    # 文本编码器提供语言条件，VAE 负责视频 latent，Infinity 负责在已有历史上继续生成未来。
     text_tokenizer, text_encoder = load_tokenizer(t5_path=a.text_encoder_ckpt)
     vae = load_visual_tokenizer(a).float().to("cuda")
     infinity = load_transformer(vae, a)
     infinity.eval().requires_grad_(False)
 
+    # 第 3 段：模型组件 -> streaming session。
+    # session 会统一管理文本 cache、GT 观测 cache 和预测 cache。
     session = InfinityStreamingSession(
         args=a,
         infinity_model=infinity,
@@ -321,24 +381,27 @@ def main() -> None:
         h_div_w_template=float(args_cli.h_div_w_template),
     )
 
-    # output schedule determines target resolution & tau list
+    # 第 4 段：session -> 输出 schedule。
+    # schedule 不只决定“预测多少帧”，还决定目标高宽、每个尺度的 token 网格，以及
+    # tau_image/tau_video 应该如何按 tower_split_index 拼成整段 tau 列表。
     sched_out = session.build_schedule_for_num_frames(num_frames=int(args_cli.num_frames))
     tgt_h, tgt_w = sched_out.tgt_h, sched_out.tgt_w
     tau = [float(a.tau_image)] * int(sched_out.tower_split_index) + [float(a.tau_video)] * (len(sched_out.scale_schedule) - int(sched_out.tower_split_index))
 
-    # prompt with duration tag (match training prompt format)
+    # 给 prompt 加时长标签，以匹配训练时的 prompt 格式。
+    # 公式：duration_seconds = (num_frames - 1) // fps。
     dur_s = (int(args_cli.num_frames) - 1) // int(args_cli.fps)
     prompt_infer = f"<<<t={dur_s}s>>>{prompt}" if int(getattr(a, "append_duration2caption", 0)) else prompt
 
-    # Init session (text cache as GT). IMPORTANT: cfg != 1 -> bs=2, so GT caches will be written with bs=2.
+    # 初始化 session（把 text cache 作为 GT）。注意：cfg != 1 时 bs=2，因此 GT cache 也会按 bs=2 写入。
     session.reset(prompt_infer, negative_prompt=negative_prompt, cfg_scale=float(a.cfg))
 
-    # Loop points (offline): 1, 17, 33, ... , min(81, len(frames))
+    # 离线模式的循环边界：1, 17, 33, ... , min(81, len(frames))。
     total_for_points = int(args_cli.num_frames) if (not args_cli.watch and bool(args_cli.pad_short_real)) else len(frame_paths)
     points = _obs_points(total_gt_frames=total_for_points, pred_num_frames=int(args_cli.num_frames), step=int(args_cli.step))
     if not args_cli.watch:
-        print(f"[info] offline total_gt_frames={len(frame_paths)} pred_num_frames={args_cli.num_frames} points={points}")
-    print(f"[info] tgt_h={tgt_h} tgt_w={tgt_w} cfg={a.cfg} tau_image={a.tau_image} tau_video={a.tau_video} top_k={args_cli.top_k} top_p={args_cli.top_p}")
+        print(f"[信息] 离线模式：真实帧数={len(frame_paths)} 预测帧数={args_cli.num_frames} points={points}")
+    print(f"[信息] tgt_h={tgt_h} tgt_w={tgt_w} cfg={a.cfg} tau_image={a.tau_image} tau_video={a.tau_video} top_k={args_cli.top_k} top_p={args_cli.top_p}")
 
     run_id = time.strftime("%Y-%m-%d_%H-%M-%S")
     run_dir = osp.join(out_dir, run_id)
@@ -373,14 +436,25 @@ def main() -> None:
         )
 
     def _write_gt_obs(cur_frame_paths: List[str], obs_len: int) -> None:
-        """Overwrite GT obs cache with cumulative real frames [1..obs_len]."""
+        """
+        用累计真实帧 `[1..obs_len]` 覆盖 GT obs cache。
+
+        注意这里写入的是“从第 1 帧到当前边界的完整真实历史”，不是只追加最后新到的那几帧。
+        这样做虽然更重，但语义最稳：下一轮预测一定基于真实观测前缀，而不是夹杂旧预测残留。
+        """
         padded = _take_with_pad(cur_frame_paths, int(obs_len), bool(args_cli.pad_short_real))
         obs_cpu = _load_obs_video_bcthw(padded, tgt_h, tgt_w)  # [1,3,T,H,W] CPU
         obs = obs_cpu.to("cuda", non_blocking=True)
         session.compute_kv_cache_gt(obs)
 
     def _infer_full(step_i: int) -> torch.Tensor:
-        """Infer full N frames, return uint8 BGR tensor [T,H,W,3] (first sample)."""
+        """
+        推理完整 N 帧，返回第一个样本的 uint8 BGR tensor `[T,H,W,3]`。
+
+        尽管闭环最终只会保存当前 segment 对应的那一小段未来帧，这里仍先生成完整 `num_frames`
+        视频，是为了与世界模型的标准 streaming 协议保持一致，也方便在 `--save_full_pred` 时
+        检查“超出当前 segment 的更远未来”长什么样。
+        """
         seed = int(args_cli.seed) + int(step_i)
         t0 = time.time()
         _, img = session.infer_chunk(
@@ -395,37 +469,43 @@ def main() -> None:
         )
         dt = time.time() - t0
         vid = img[0] if isinstance(img, torch.Tensor) and img.dim() == 5 else img
-        print(f"[infer] step={step_i} seed={seed} time={dt:.2f}s cache_stats={session.cache_stats()}")
+        print(f"[推理] step={step_i} seed={seed} 耗时={dt:.2f}s cache_stats={session.cache_stats()}")
         return vid
 
     def _save_segment(vid: torch.Tensor, *, step_i: int, obs_len: int, next_obs_len: int) -> None:
         """
-        Save the predicted segment that will be overwritten by next GT write:
-        frames (obs_len+1 .. next_obs_len) in 1-indexed convention.
+        保存下一次写入 GT 时会被覆盖的预测片段：
+        按从 1 开始编号的约定，对应帧 (obs_len+1 .. next_obs_len)。
         """
-        # vid: [T,H,W,3] with T == num_frames
-        start0 = int(obs_len)  # 0-based: obs_len=1 -> start from frame index 1 (2nd frame)
+        # vid: [T,H,W,3]，其中 T == num_frames。
+        start0 = int(obs_len)  # 0-based：obs_len=1 时，从 frame index 1（第 2 帧）开始。
         end0 = int(next_obs_len)
         seg = vid[start0:end0]
         seg_start_1idx = int(obs_len) + 1
         seg_end_1idx = int(next_obs_len)
         save_path = osp.join(run_dir, f"seg_{step_i:02d}_pred_{seg_start_1idx:03d}_{seg_end_1idx:03d}.mp4")
         save_video(seg, fps=int(args_cli.fps), save_filepath=save_path, force_all_keyframes=True)
-        print(f"[save] seg step={step_i} pred={seg_start_1idx}-{seg_end_1idx} saved={save_path}")
+        print(f"[保存] segment step={step_i} 预测帧={seg_start_1idx}-{seg_end_1idx} 路径={save_path}")
 
     def _save_full(vid: torch.Tensor, *, step_i: int, obs_len: int) -> None:
+        """保存当前 step 的完整预测视频，主要用于排查某段 segment 之外的生成质量。"""
         save_path = osp.join(run_dir, f"full_{step_i:02d}_obs{obs_len:03d}_pred{int(args_cli.num_frames):03d}.mp4")
         save_video(vid, fps=int(args_cli.fps), save_filepath=save_path, force_all_keyframes=True)
-        print(f"[save] full step={step_i} saved={save_path}")
+        print(f"[保存] full step={step_i} 路径={save_path}")
 
-    # Always start by writing GT obs for the first frame (obs_len=1).
+    # 总是先写入第一帧的 GT obs（obs_len=1）。
     session.correction_clear_pred()
     _write_gt_obs(frame_paths, obs_len=1)
 
     if not args_cli.watch:
-        # Offline: iterate intervals [1->17], [17->33], ... and save each predicted segment BEFORE writing next GT.
+        # 离线模式时序：
+        # 1. 用当前 GT 历史预测完整 N 帧；
+        # 2. 只保存“下一轮会被 GT 覆盖掉”的那一小段 segment；
+        # 3. 清掉 pred cache；
+        # 4. 用更长的真实历史重写 GT cache；
+        # 5. 进入下一段。
         if len(points) < 2:
-            raise ValueError(f"points={points} too short to do segmented saving (need at least 2 points)")
+            raise ValueError(f"points={points} 太短，无法执行分段保存（至少需要 2 个边界点）")
         for i in range(len(points) - 1):
             obs_len = int(points[i])
             next_obs_len = int(points[i + 1])
@@ -434,14 +514,15 @@ def main() -> None:
                 _save_full(vid, step_i=i, obs_len=obs_len)
             _save_segment(vid, step_i=i, obs_len=obs_len, next_obs_len=next_obs_len)
 
-            # now overwrite caches with GT up to next_obs_len
+            # 现在用到 next_obs_len 为止的 GT 覆盖 cache。
             session.correction_clear_pred()
             _write_gt_obs(frame_paths, obs_len=next_obs_len)
         return
 
-    # watch mode: wait for new frames as 1 -> 1+step -> ... -> num_frames
+    # watch 模式和离线模式的核心差别是：
+    # 离线模式一开始就拿到了全部真实帧；watch 模式则需要边等边推理。
     points_watch = _obs_points(total_gt_frames=10**9, pred_num_frames=int(args_cli.num_frames), step=int(args_cli.step))
-    # Ensure at least the first frame exists, then write GT obs_len=1 already done above.
+    # 至少要有第一帧；上面已经完成 obs_len=1 的 GT 写入。
     for i in range(len(points_watch) - 1):
         obs_len = int(points_watch[i])
         next_obs_len = int(points_watch[i + 1])
@@ -450,7 +531,7 @@ def main() -> None:
             _save_full(vid, step_i=i, obs_len=obs_len)
         _save_segment(vid, step_i=i, obs_len=obs_len, next_obs_len=next_obs_len)
 
-        # wait until enough frames exist for next_obs_len, then overwrite GT cache
+        # 等到 next_obs_len 所需帧数到齐，再覆盖 GT cache。
         while True:
             cur = _sorted_images(frames_dir)
             if len(cur) >= next_obs_len:
@@ -463,4 +544,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -9,8 +9,14 @@ import torch
 from infinity.models.videovae.models.wan_bsq_vae import AutoencoderKLCogVideoX
 
 def video_vae_model(vqgan_ckpt, schedule_mode, codebook_dim, global_args=None, test_mode=True):
+    """按训练配置构造并加载 VideoVAE。
+
+    这个入口函数把推理所需的大量超参数整理成 `Namespace`，随后实例化
+    `AutoencoderKLCogVideoX`，并从 checkpoint 中恢复 `vae` 或 `ema` 权重。
+    对初学者而言，可以把它理解为“VideoVAE 推理侧的一键组网与载权重接口”。
+    """
     args=argparse.Namespace(
-        vqgan_ckpt=vqgan_ckpt, 
+        vqgan_ckpt=vqgan_ckpt,
         sd_ckpt=None,
         use_frames=None,
         inference_type='video',
@@ -254,7 +260,7 @@ def video_vae_model(vqgan_ckpt, schedule_mode, codebook_dim, global_args=None, t
     vae = AutoencoderKLCogVideoX(args)
     state_dict = torch.load(args.vqgan_ckpt, map_location=torch.device("cpu"), weights_only=True)
     if args.ema == "yes":
-        print("testing ema weights")
+        print("测试/推理时使用 ema 权重")
         vae.load_state_dict(state_dict["ema"], strict=False)
     else:
         vae.load_state_dict(state_dict["vae"], strict=False)

@@ -13,7 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 
-"""Numpy BoxMaskList classes and functions."""
+"""带掩码的 numpy BoxList 数据结构。"""
 
 from __future__ import (
     absolute_import,
@@ -27,47 +27,34 @@ from . import np_box_list
 
 
 class BoxMaskList(np_box_list.BoxList):
-    """Convenience wrapper for BoxList with masks.
+    """带掩码字段的 BoxList 包装类，用于同时管理框和像素级掩码。 小白可以先看 `__init__` 保存了哪些字段，再看其他方法如何读取这些字段。
 
-  BoxMaskList extends the np_box_list.BoxList to contain masks as well.
-  In particular, its constructor receives both boxes and masks. Note that the
-  masks correspond to the full image.
-  """
+    数据流提示：类属性通常在初始化时写入，后续方法通过这些属性完成评估、采样或状态转换。
+    """
 
     def __init__(self, box_data, mask_data):
-        """Constructs box collection.
+        """初始化当前对象，保存后续方法会复用的配置、字段或评估状态。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
 
-    Args:
-      box_data: a numpy array of shape [N, 4] representing box coordinates
-      mask_data: a numpy array of shape [N, height, width] representing masks
-        with values are in {0,1}. The masks correspond to the full
-        image. The height and the width will be equal to image height and width.
-
-    Raises:
-      ValueError: if bbox data is not a numpy array
-      ValueError: if invalid dimensions for bbox data
-      ValueError: if mask data is not a numpy array
-      ValueError: if invalid dimension for mask data
-    """
+        数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
+        """
         super(BoxMaskList, self).__init__(box_data)
         if not isinstance(mask_data, np.ndarray):
-            raise ValueError("Mask data must be a numpy array.")
+            raise ValueError("掩码数据必须是 numpy array。")
         if len(mask_data.shape) != 3:
-            raise ValueError("Invalid dimensions for mask data.")
+            raise ValueError("掩码数据维度不合法，应为 [N, H, W]。")
         if mask_data.dtype != np.uint8:
             raise ValueError(
-                "Invalid data type for mask data: uint8 is required."
+                "掩码数据类型不合法：必须是 uint8。"
             )
         if mask_data.shape[0] != box_data.shape[0]:
             raise ValueError(
-                "There should be the same number of boxes and masks."
+                "边界框和掩码的数量必须一致。"
             )
         self.data["masks"] = mask_data
 
     def get_masks(self):
-        """Convenience function for accessing masks.
+        """`get_masks` 是 TimeSformer/PySlowFast 兼容工具函数。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
 
-    Returns:
-      a numpy array of shape [N, height, width] representing masks
-    """
+        数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
+        """
         return self.get_field("masks")

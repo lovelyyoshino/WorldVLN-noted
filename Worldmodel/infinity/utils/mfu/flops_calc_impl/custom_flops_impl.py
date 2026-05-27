@@ -3,13 +3,18 @@
 import torch
 
 def custom_rmsnorm_forward_hook(module, args, kwargs, output):
+    """中文说明：`custom_rmsnorm_forward_hook` 实现FLOPs 计算公式实现中的 `custom_rmsnorm_forward_hook` 步骤，供训练、推理或调试流程复用。
+
+    新手提示：常见公式是矩阵乘 FLOPs≈2*M*N*K，卷积 FLOPs≈2*out_elements*kernel_mul*in_channels/groups。
+    关键公式：TFLOPS = FLOPs / seconds / 1e12，MFU = TFLOPS / device_peak_TFLOPS。
+    """
     if module.training and not torch.is_grad_enabled():
         return
 
     flops = 0
     hidden_states = args[0]
     if len(hidden_states.shape) == 2:
-            # navit mode
+            # 变分辨率 NaViT 模式
             bsz = 1
             seq_len = hidden_states.shape[0]
     else:
@@ -20,6 +25,11 @@ def custom_rmsnorm_forward_hook(module, args, kwargs, output):
     module.__flops__ += int(flops) * (3 if module.training else 1)
 
 def custom_goku_attention_forward_hook(module, args, kwargs, output):
+    """中文说明：`custom_goku_attention_forward_hook` 实现FLOPs 计算公式实现中的 `custom_goku_attention_forward_hook` 步骤，供训练、推理或调试流程复用。
+
+    新手提示：常见公式是矩阵乘 FLOPs≈2*M*N*K，卷积 FLOPs≈2*out_elements*kernel_mul*in_channels/groups。
+    关键公式：TFLOPS = FLOPs / seconds / 1e12，MFU = TFLOPS / device_peak_TFLOPS。
+    """
     if module.training and not torch.is_grad_enabled():
         return
 
@@ -28,7 +38,7 @@ def custom_goku_attention_forward_hook(module, args, kwargs, output):
     inputs_kv = kwargs["inputs_kv"] if kwargs["inputs_kv"] is not None else inputs_q
 
     if len(inputs_q.shape) == 2:
-        # navit mode
+        # 变分辨率 NaViT 模式
         q_bsz = kv_bsz = 1
         q_len = inputs_q.shape[0]
         kv_len = inputs_kv.shape[0]
@@ -57,6 +67,11 @@ def custom_goku_attention_forward_hook(module, args, kwargs, output):
     module.__flops__ += int(flops) * (3 if module.training else 1)
 
 def custom_flex_attention_forward_hook(module, args, kwargs, output):
+    """中文说明：`custom_flex_attention_forward_hook` 实现FLOPs 计算公式实现中的 `custom_flex_attention_forward_hook` 步骤，供训练、推理或调试流程复用。
+
+    新手提示：常见公式是矩阵乘 FLOPs≈2*M*N*K，卷积 FLOPs≈2*out_elements*kernel_mul*in_channels/groups。
+    关键公式：TFLOPS = FLOPs / seconds / 1e12，MFU = TFLOPS / device_peak_TFLOPS。
+    """
     if module.training and not torch.is_grad_enabled():
         return
 
@@ -71,7 +86,7 @@ def custom_flex_attention_forward_hook(module, args, kwargs, output):
     block_mask = getattr(module, "block_mask")
     density = 1
     if block_mask:
-        # ref: https://gist.github.com/Chillee/2e270fc5413dbbce58c779f8c4eac66c
+        # 参考：https://gist.github.com/Chillee/2e270fc5413dbbce58c779f8c4eac66c
         density = (100 - block_mask.sparsity())/100
 
     flops = density * q_bs * q_head * q_dim * q_len * kv_len * 2 * 2
@@ -86,5 +101,4 @@ try:
     from infinity.models.flex_attn import FlexAttn
     CUSTOM_HOOK_MAPPING[FlexAttn] = custom_flex_attention_forward_hook
 except:
-    print(f"[WARN] cannot import custom modules: FlexAttn")
-
+    print(f"[WARN] 无法导入自定义模块：FlexAttn")

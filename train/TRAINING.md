@@ -1,26 +1,26 @@
-# Training Guide
+# 训练指南
 
-This repository keeps a single training entrypoint:
+本仓库保留一个统一训练入口：
 
 - `scripts/train_from_base.sh`
 
-The script starts finetuning from the original sharded base weights and uses repository-relative defaults for data, checkpoints, and outputs.
+该脚本会从原始分片基础权重开始微调，并默认使用相对仓库根目录的数据、checkpoint 和输出路径。
 
-## Open-source Readiness
+## 开源可用性
 
-`scripts/train_from_base.sh` no longer contains machine-specific hard-coded paths (for example, user home folders, cluster mount points, or prior workspace locations).
+`scripts/train_from_base.sh` 不再包含机器绑定的硬编码路径，例如用户 home 目录、集群挂载点或旧工作区位置。
 
-Default paths are resolved relative to the repository root:
+默认路径会按仓库根目录解析：
 
-- checkpoints: `checkpoints/`
-- data: `data/`
-- outputs: `outputs/`
+- checkpoint：`checkpoints/`
+- 数据：`data/`
+- 输出：`outputs/`
 
-The script still converts the repository root into an absolute runtime path for `PYTHONPATH`, but that path is derived from the local clone location at launch time and is portable across machines.
+脚本仍会把仓库根目录转换成 `PYTHONPATH` 使用的绝对运行时路径，但该路径会在启动时根据当前 clone 位置生成，因此可以跨机器迁移。
 
-## Required Layout
+## 必需目录结构
 
-Expected repository layout:
+期望的仓库结构：
 
 ```text
 train/
@@ -37,59 +37,59 @@ train/
 `-- outputs/
 ```
 
-## Required Weights
+## 必需权重
 
-Before launching training, prepare these files under `checkpoints/` or override them with environment variables:
+启动训练前，请在 `checkpoints/` 下准备这些文件，或通过环境变量覆盖路径：
 
-1. T5 text encoder directory
+1. T5 文本编码器目录
 
-   Default path:
+   默认路径：
 
    - `checkpoints/text_encoder/flan-t5-xl-official`
 
-   Environment override:
+   环境变量覆盖：
 
    - `T5_PATH`
 
-2. Video VAE checkpoint
+2. Video VAE checkpoint 文件
 
-   Default path:
+   默认路径：
 
    - `checkpoints/infinitystar_videovae.pth`
 
-   Environment override:
+   环境变量覆盖：
 
    - `VAE_PATH`
 
-3. Base model sharded weights
+3. 基础模型分片权重
 
-   Default path:
+   默认路径：
 
    - `checkpoints/infinitystar_8b_480p_weights`
 
-   Environment override:
+   环境变量覆盖：
 
    - `TORCHSHARD_RESUME_PATH`
 
-The script validates that all three paths exist before calling `train.py`.
+脚本会先检查这三个路径是否都存在，再调用 `train.py`。
 
-## Required Training Data
+## 必需训练数据
 
-The script expects `VIDEO_DATA_PATH` to point to a directory containing JSONL shards.
+脚本要求 `VIDEO_DATA_PATH` 指向一个包含 JSONL 分片的目录。
 
-Default search order:
+默认搜索顺序：
 
 1. `data/uavflow_49f_from_40_60_split8_jsonl`
 2. `data/uavflow_40_60_split8_jsonl`
 3. `data/split8_jsonl`
 
-Environment override:
+环境变量覆盖：
 
 - `VIDEO_DATA_PATH`
 
-Supported shard layouts:
+支持的分片目录结构：
 
-1. Flat layout
+1. 平铺结构
 
 ```text
 data/split8_jsonl/
@@ -99,7 +99,7 @@ data/split8_jsonl/
 `-- part_07.jsonl
 ```
 
-2. Bucketed layout
+2. 分桶结构
 
 ```text
 data/split8_jsonl/
@@ -111,9 +111,9 @@ data/split8_jsonl/
     `-- part_03.jsonl
 ```
 
-## Minimum JSONL Schema
+## 最小 JSONL Schema
 
-Each line must be a JSON object. For video training, the loader expects at least:
+每一行都必须是一个 JSON 对象。对于视频训练，loader 至少需要以下字段：
 
 ```json
 {
@@ -125,7 +125,7 @@ Each line must be a JSON object. For video training, the loader expects at least
 }
 ```
 
-Recommended optional fields:
+推荐的可选字段：
 
 ```json
 {
@@ -136,41 +136,41 @@ Recommended optional fields:
 }
 ```
 
-Notes:
+说明：
 
-1. `video_path` may be absolute or relative, but it must resolve on the training machine.
-2. `end_frame_id` is treated as an inclusive frame index by the loader.
-3. If `frame_idxs` is provided, the loader uses those explicit frame indices.
-4. If `frame_idxs` is not provided, sampling is inferred from the annotated segment and the training configuration.
+1. `video_path` 可以是绝对路径或相对路径，但必须能在训练机器上解析到实际视频文件。
+2. loader 会把 `end_frame_id` 当作包含端点的帧索引。
+3. 如果提供了 `frame_idxs`，loader 会直接使用这些显式帧索引。
+4. 如果没有提供 `frame_idxs`，采样会根据标注片段和训练配置自动推断。
 
-## Launch Behavior
+## 启动行为
 
-`scripts/train_from_base.sh` uses the following defaults:
+`scripts/train_from_base.sh` 使用以下默认配置：
 
-- model: `infinity_qwen8b`
-- resolution preset: `0.40M`
-- video frames: `49`
-- video fps: `16`
-- mask schedule: `infinity_elegant_clip4frames_v2_allpt`
-- optimizer learning rate: `1e-5`
-- total epochs: `10`
-- save frequency: `1000` iterations
+- 模型：`infinity_qwen8b`
+- 分辨率预设：`0.40M`
+- 视频帧数：`49`
+- 视频 fps：`16`
+- mask schedule：`infinity_elegant_clip4frames_v2_allpt`
+- 优化器学习率：`1e-5`
+- 总 epoch 数：`10`
+- 保存频率：每 `1000` 次迭代保存一次
 
-Outputs are written to:
+输出会写入：
 
-- logs: `outputs/run_logs/<EXP_NAME>`
-- checkpoints: `outputs/checkpoints/<EXP_NAME>`
-- token cache: `outputs/cache/<EXP_NAME>`
+- 日志：`outputs/run_logs/<EXP_NAME>`
+- checkpoint：`outputs/checkpoints/<EXP_NAME>`
+- token cache：`outputs/cache/<EXP_NAME>`
 
-## Quick Start
+## 快速开始
 
-Run from the repository root:
+在仓库根目录运行：
 
 ```bash
 bash scripts/train_from_base.sh
 ```
 
-Or with explicit overrides:
+也可以显式覆盖路径和参数：
 
 ```bash
 CHECKPOINTS_DIR=./checkpoints \
@@ -181,41 +181,41 @@ EXP_NAME=my_train_run \
 bash scripts/train_from_base.sh
 ```
 
-## Environment Variables
+## 环境变量
 
-Common overrides:
+常用覆盖项：
 
-- `PYTHON_BIN`: Python executable to use
-- `CHECKPOINTS_DIR`: base directory for all default weight paths
-- `T5_PATH`: explicit T5 path
-- `VAE_PATH`: explicit VAE checkpoint path
-- `TORCHSHARD_RESUME_PATH`: explicit base model shard path
-- `DATA_ROOT`: base data directory
-- `VIDEO_DATA_PATH`: explicit JSONL shard directory
-- `OUTPUT_ROOT`: base output directory
-- `LOCAL_OUT_PATH`: explicit run log directory
-- `BED_PATH`: explicit checkpoint save directory
-- `TOKEN_CACHE_DIR`: explicit token cache directory
-- `EXP_NAME`: experiment name
-- `TRAIN_EPOCHS`: total epochs
-- `SAVE_FREQ_ITERS`: checkpoint save interval
-- `TLR`: learning rate
-- `ARNOLD_WORKER_GPU`: number of GPUs per node
-- `ARNOLD_WORKER_NUM`: number of nodes
-- `ARNOLD_ID`: node rank
-- `ARNOLD_WORKER_0_HOST`: master host
-- `ARNOLD_WORKER_0_PORT`: master port
+- `PYTHON_BIN`：要使用的 Python 可执行文件
+- `CHECKPOINTS_DIR`：所有默认权重路径的基础目录
+- `T5_PATH`：显式 T5 路径
+- `VAE_PATH`：显式 VAE checkpoint 路径
+- `TORCHSHARD_RESUME_PATH`：显式基础模型分片权重路径
+- `DATA_ROOT`：基础数据目录
+- `VIDEO_DATA_PATH`：显式 JSONL 分片目录
+- `OUTPUT_ROOT`：基础输出目录
+- `LOCAL_OUT_PATH`：显式运行日志目录
+- `BED_PATH`：显式 checkpoint 保存目录
+- `TOKEN_CACHE_DIR`：显式 token cache 目录
+- `EXP_NAME`：实验名称
+- `TRAIN_EPOCHS`：总 epoch 数
+- `SAVE_FREQ_ITERS`：checkpoint 保存间隔
+- `TLR`：学习率
+- `ARNOLD_WORKER_GPU`：每个节点的 GPU 数
+- `ARNOLD_WORKER_NUM`：节点数
+- `ARNOLD_ID`：节点 rank
+- `ARNOLD_WORKER_0_HOST`：master host
+- `ARNOLD_WORKER_0_PORT`：master port
 
-## Pre-flight Checklist
+## 训练前检查清单
 
-Before training, verify:
+训练前请确认：
 
-1. `train.py` exists in the repository root.
-2. `checkpoints/text_encoder/flan-t5-xl-official` exists.
-3. `checkpoints/infinitystar_videovae.pth` exists.
-4. `checkpoints/infinitystar_8b_480p_weights` exists.
-5. `VIDEO_DATA_PATH` points to a directory containing JSONL files.
-6. Every JSONL entry points to a readable local video file.
-7. Required Python dependencies from `../requirements.txt` (repository root) are installed.
+1. 仓库根目录存在 `train.py`。
+2. 存在 `checkpoints/text_encoder/flan-t5-xl-official`。
+3. 存在 `checkpoints/infinitystar_videovae.pth`。
+4. 存在 `checkpoints/infinitystar_8b_480p_weights`。
+5. `VIDEO_DATA_PATH` 指向包含 JSONL 文件的目录。
+6. 每条 JSONL 记录都指向可读取的本地视频文件。
+7. 已安装仓库根目录 `../requirements.txt` 中要求的 Python 依赖。
 
-If any required path is missing, the script exits immediately with an error.
+如果任一必需路径缺失，脚本会立即报错退出。

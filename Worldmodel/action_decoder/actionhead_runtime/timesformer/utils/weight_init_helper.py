@@ -1,23 +1,20 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
-"""Utility function for weight initialization"""
+"""模型权重初始化工具。"""
 
 import torch.nn as nn
 from fvcore.nn.weight_init import c2_msra_fill
 
 
 def init_weights(model, fc_init_std=0.01, zero_init_final_bn=True):
-    """
-    Performs ResNet style weight initialization.
-    Args:
-        fc_init_std (float): the expected standard deviation for fc layer.
-        zero_init_final_bn (bool): if True, zero initialize the final bn for
-            every bottleneck.
+    """按 ResNet/TimeSformer 习惯初始化卷积、BN 和全连接层权重。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
     for m in model.modules():
         if isinstance(m, nn.Conv3d):
             """
-            Follow the initialization method proposed in:
+            按以下论文提出的初始化方法处理：
             {He, Kaiming, et al.
             "Delving deep into rectifiers: Surpassing human-level
             performance on imagenet classification."

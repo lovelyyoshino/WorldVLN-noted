@@ -1,18 +1,18 @@
-# Remote Simulator Workflow
+# 远端模拟器流程
 
-The remote_sim path keeps policy inference on the training host and delegates only environment reset, action execution, and rendering to the simulator host.
+`remote_sim` 路径会把策略推理保留在训练机器上，只把环境 reset、动作执行和画面渲染交给模拟器机器。
 
-## Service Endpoints
+## 服务端点
 
-The simulator-side service is implemented by runtime/client.py in service mode. It exposes:
+模拟器侧服务由 `runtime/client.py` 的 service 模式实现，暴露以下接口：
 
 - GET /health
 - POST /reset
 - POST /step_actions
 
-## Start the Service
+## 启动服务
 
-On the simulator machine:
+在模拟器机器上运行：
 
 ```bash
 python runtime/client.py \
@@ -22,23 +22,23 @@ python runtime/client.py \
   --task_json_root /path/to/UAV-Flow-Eval/test_jsons
 ```
 
-## Reverse Port Forwarding
+## 反向端口转发
 
-If the simulator machine cannot be reached directly from the training host, create a reverse tunnel from the simulator machine to the training host:
+如果训练机器无法直接访问模拟器机器，可以从模拟器机器向训练机器建立反向隧道：
 
 ```bash
 ssh -R 18765:127.0.0.1:8765 user@training-host
 ```
 
-Then validate from the training host:
+然后在训练机器上验证：
 
 ```bash
 curl --noproxy '*' http://127.0.0.1:18765/health
 ```
 
-## Rollout Settings
+## Rollout 设置
 
-The open-source action-aware GRPO package keeps only remote_sim for rollout. Use the wrapper command below:
+开源版 action-aware GRPO 包只保留 `remote_sim` 作为 rollout 后端。可使用下面的封装命令：
 
 ```bash
 cd ./action_aware_grpo
@@ -75,4 +75,4 @@ bash scripts/run_stagea_collect.sh \
   STAGEA_PROGRESS_EVERY_N=1
 ```
 
-STAGEA_NPROC should remain 1 unless the simulator service is extended to support multiple concurrent sessions.
+除非模拟器服务已经扩展为支持多个并发 session，否则 `STAGEA_NPROC` 应保持为 1。

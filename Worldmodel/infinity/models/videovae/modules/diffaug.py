@@ -1,7 +1,11 @@
 # Copyright (c) 2025 FoundationVision
 # SPDX-License-Identifier: MIT
 
-"""Training GANs with DiffAugment."""
+"""DiffAugment 数据增强。
+
+该模块服务于 GAN/判别器训练，在不改变网络结构的前提下，对输入图像执行
+亮度、饱和度、对比度、平移、遮挡、缩放等随机扰动，从而提升判别器的泛化能力。
+"""
 
 import numpy as np
 import torch
@@ -9,6 +13,11 @@ import torch.nn.functional as F
 
 
 def DiffAugment(x: torch.Tensor, policy: str = '', channels_first: bool = True) -> torch.Tensor:
+    """按照策略字符串顺序执行可微增强。
+
+    `policy` 形如 `"color,translation,cutout"`。函数会逐项查表调用
+    `AUGMENT_FNS` 中注册的增强算子；若输入不是 `NCHW` 布局，会在增强前后做维度换位。
+    """
     if policy:
         if not channels_first:
             x = x.permute(0, 3, 1, 2)
@@ -22,23 +31,27 @@ def DiffAugment(x: torch.Tensor, policy: str = '', channels_first: bool = True) 
 
 
 def rand_brightness(x: torch.Tensor) -> torch.Tensor:
+    """随机调整亮度，为每个样本加一个标量偏移。"""
     x = x + (torch.rand(x.size(0), 1, 1, 1, dtype=x.dtype, device=x.device) - 0.5)
     return x
 
 
 def rand_saturation(x: torch.Tensor) -> torch.Tensor:
+    """随机调整饱和度，在通道均值附近放大或缩小颜色差异。"""
     x_mean = x.mean(dim=1, keepdim=True)
     x = (x - x_mean) * (torch.rand(x.size(0), 1, 1, 1, dtype=x.dtype, device=x.device) * 2) + x_mean
     return x
 
 
 def rand_contrast(x: torch.Tensor) -> torch.Tensor:
+    """随机调整对比度，公式近似为 `x' = (x - mean) * alpha + mean`。"""
     x_mean = x.mean(dim=[1, 2, 3], keepdim=True)
     x = (x - x_mean) * (torch.rand(x.size(0), 1, 1, 1, dtype=x.dtype, device=x.device) + 0.5) + x_mean
     return x
 
 
 def rand_translation(x: torch.Tensor, ratio: float = 0.125) -> torch.Tensor:
+    """随机平移图像，位移幅度由 `ratio` 与空间尺寸共同决定。"""
     shift_x, shift_y = int(x.size(2) * ratio + 0.5), int(x.size(3) * ratio + 0.5)
     translation_x = torch.randint(-shift_x, shift_x + 1, size=[x.size(0), 1, 1], device=x.device)
     translation_y = torch.randint(-shift_y, shift_y + 1, size=[x.size(0), 1, 1], device=x.device)
@@ -55,6 +68,7 @@ def rand_translation(x: torch.Tensor, ratio: float = 0.125) -> torch.Tensor:
 
 
 def rand_cutout(x: torch.Tensor, ratio: float = 0.2) -> torch.Tensor:
+    """随机挖去一个矩形区域并置零，模拟局部遮挡。"""
     cutout_size = int(x.size(2) * ratio + 0.5), int(x.size(3) * ratio + 0.5)
     offset_x = torch.randint(0, x.size(2) + (1 - cutout_size[0] % 2), size=[x.size(0), 1, 1], device=x.device)
     offset_y = torch.randint(0, x.size(3) + (1 - cutout_size[1] % 2), size=[x.size(0), 1, 1], device=x.device)
@@ -72,6 +86,7 @@ def rand_cutout(x: torch.Tensor, ratio: float = 0.2) -> torch.Tensor:
 
 
 def rand_resize(x: torch.Tensor, min_ratio: float = 0.8, max_ratio: float = 1.2) -> torch.Tensor:
+    """随机缩放后恢复原分辨率，打乱模型对绝对尺度的依赖。"""
     resize_ratio = np.random.rand()*(max_ratio-min_ratio) + min_ratio
     resized_img = F.interpolate(x, size=int(resize_ratio*x.shape[3]), mode='bilinear')
     org_size = x.shape[3]

@@ -1,13 +1,13 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
-"""ResNe(X)t 3D stem helper."""
+"""ResNe(X)t 3D stem 辅助模块。"""
 
 import torch.nn as nn
 
 
 def get_stem_func(name):
     """
-    Retrieves the stem module by name.
+    按名称取得 stem 模块类。
     """
     trans_funcs = {"x3d_stem": X3DStem, "basic_stem": ResNetBasicStem}
     assert (
@@ -18,8 +18,8 @@ def get_stem_func(name):
 
 class VideoModelStem(nn.Module):
     """
-    Video 3D stem module. Provides stem operations of Conv, BN, ReLU, MaxPool
-    on input data tensor for one or multiple pathways.
+    视频 3D stem 模块。
+    对一个或多个 pathway 的输入张量执行 Conv、BN、ReLU、MaxPool 等开头层操作。
     """
 
     def __init__(
@@ -36,32 +36,22 @@ class VideoModelStem(nn.Module):
         stem_func_name="basic_stem",
     ):
         """
-        The `__init__` method of any subclass should also contain these
-        arguments. List size of 1 for single pathway models (C2D, I3D, Slow
-        and etc), list size of 2 for two pathway models (SlowFast).
+                初始化 VideoModelStem。
+                单 pathway 模型（C2D、I3D、Slow 等）的列表长度为 1，
+                双 pathway 模型（SlowFast）的列表长度为 2。
 
-        Args:
-            dim_in (list): the list of channel dimensions of the inputs.
-            dim_out (list): the output dimension of the convolution in the stem
-                layer.
-            kernel (list): the kernels' size of the convolutions in the stem
-                layers. Temporal kernel size, height kernel size, width kernel
-                size in order.
-            stride (list): the stride sizes of the convolutions in the stem
-                layer. Temporal kernel stride, height kernel size, width kernel
-                size in order.
-            padding (list): the paddings' sizes of the convolutions in the stem
-                layer. Temporal padding size, height padding size, width padding
-                size in order.
-            inplace_relu (bool): calculate the relu on the original input
-                without allocating new memory.
-            eps (float): epsilon for batch norm.
-            bn_mmt (float): momentum for batch norm. Noted that BN momentum in
-                PyTorch = 1 - BN momentum in Caffe2.
-            norm_module (nn.Module): nn.Module for the normalization layer. The
-                default is nn.BatchNorm3d.
-            stem_func_name (string): name of the the stem function applied on
-                input to the network.
+                参数：
+                    dim_in (list): 各输入 pathway 的通道数列表。
+                    dim_out (list): 各 stem 卷积输出通道数列表。
+                    kernel (list): stem 卷积核大小列表，顺序为 temporal、height、width。
+                    stride (list): stem 卷积步幅列表，顺序为 temporal、height、width。
+                    padding (list): stem 卷积 padding 列表，顺序为 temporal、height、width。
+                    inplace_relu (bool): 为 True 时在原张量上计算 ReLU，减少额外内存。
+                    eps (float): batch norm 的 epsilon。
+                    bn_mmt (float): batch norm 动量；PyTorch 中的含义是 Caffe2 的 1 - momentum。
+                    norm_module (nn.Module): 归一化层类型，默认是 nn.BatchNorm3d。
+                    stem_func_name (string): 要应用到输入上的 stem 函数名称。
+
         """
         super(VideoModelStem, self).__init__()
 
@@ -76,7 +66,7 @@ class VideoModelStem(nn.Module):
                 }
             )
             == 1
-        ), "Input pathway dimensions are not consistent."
+        ), "输入 pathway 的维度配置不一致。"
         self.num_pathways = len(dim_in)
         self.kernel = kernel
         self.stride = stride
@@ -84,10 +74,13 @@ class VideoModelStem(nn.Module):
         self.inplace_relu = inplace_relu
         self.eps = eps
         self.bn_mmt = bn_mmt
-        # Construct the stem layer.
+        # 构建 stem 层。
         self._construct_stem(dim_in, dim_out, norm_module, stem_func_name)
 
     def _construct_stem(self, dim_in, dim_out, norm_module, stem_func_name):
+        """
+        为每条 pathway 创建对应的 stem 子模块并注册到当前模块中。
+        """
         trans_func = get_stem_func(stem_func_name)
 
         for pathway in range(len(dim_in)):
@@ -105,9 +98,12 @@ class VideoModelStem(nn.Module):
             self.add_module("pathway{}_stem".format(pathway), stem)
 
     def forward(self, x):
+        """
+        对每条 pathway 的输入分别执行 stem 子模块。
+        """
         assert (
             len(x) == self.num_pathways
-        ), "Input tensor does not contain {} pathway".format(self.num_pathways)
+        ), "输入张量不包含 {} 条 pathway".format(self.num_pathways)
         for pathway in range(len(x)):
             m = getattr(self, "pathway{}_stem".format(pathway))
             x[pathway] = m(x[pathway])
@@ -116,9 +112,8 @@ class VideoModelStem(nn.Module):
 
 class ResNetBasicStem(nn.Module):
     """
-    ResNe(X)t 3D stem module.
-    Performs spatiotemporal Convolution, BN, and Relu following by a
-        spatiotemporal pooling.
+    ResNe(X)t 3D stem 模块。
+    先执行时空卷积、BN、ReLU，再执行时空池化。
     """
 
     def __init__(
@@ -134,29 +129,19 @@ class ResNetBasicStem(nn.Module):
         norm_module=nn.BatchNorm3d,
     ):
         """
-        The `__init__` method of any subclass should also contain these arguments.
+                初始化 ResNetBasicStem。
 
-        Args:
-            dim_in (int): the channel dimension of the input. Normally 3 is used
-                for rgb input, and 2 or 3 is used for optical flow input.
-            dim_out (int): the output dimension of the convolution in the stem
-                layer.
-            kernel (list): the kernel size of the convolution in the stem layer.
-                temporal kernel size, height kernel size, width kernel size in
-                order.
-            stride (list): the stride size of the convolution in the stem layer.
-                temporal kernel stride, height kernel size, width kernel size in
-                order.
-            padding (int): the padding size of the convolution in the stem
-                layer, temporal padding size, height padding size, width
-                padding size in order.
-            inplace_relu (bool): calculate the relu on the original input
-                without allocating new memory.
-            eps (float): epsilon for batch norm.
-            bn_mmt (float): momentum for batch norm. Noted that BN momentum in
-                PyTorch = 1 - BN momentum in Caffe2.
-            norm_module (nn.Module): nn.Module for the normalization layer. The
-                default is nn.BatchNorm3d.
+                参数：
+                    dim_in (int): 输入通道数；RGB 通常为 3，光流通常为 2 或 3。
+                    dim_out (int): stem 卷积输出通道数。
+                    kernel (list): stem 卷积核大小，顺序为 temporal、height、width。
+                    stride (list): stem 卷积步幅，顺序为 temporal、height、width。
+                    padding (int): stem 卷积 padding，顺序为 temporal、height、width。
+                    inplace_relu (bool): 为 True 时在原张量上计算 ReLU，减少额外内存。
+                    eps (float): batch norm 的 epsilon。
+                    bn_mmt (float): batch norm 动量；PyTorch 中的含义是 Caffe2 的 1 - momentum。
+                    norm_module (nn.Module): 归一化层类型，默认是 nn.BatchNorm3d。
+
         """
         super(ResNetBasicStem, self).__init__()
         self.kernel = kernel
@@ -165,10 +150,13 @@ class ResNetBasicStem(nn.Module):
         self.inplace_relu = inplace_relu
         self.eps = eps
         self.bn_mmt = bn_mmt
-        # Construct the stem layer.
+        # 构建 stem 层。
         self._construct_stem(dim_in, dim_out, norm_module)
 
     def _construct_stem(self, dim_in, dim_out, norm_module):
+        """
+        构建基础 stem 的 Conv3d、BN、ReLU 和 MaxPool3d。
+        """
         self.conv = nn.Conv3d(
             dim_in,
             dim_out,
@@ -186,6 +174,9 @@ class ResNetBasicStem(nn.Module):
         )
 
     def forward(self, x):
+        """
+        执行基础 stem 的前向计算。
+        """
         x = self.conv(x)
         x = self.bn(x)
         x = self.relu(x)
@@ -195,9 +186,8 @@ class ResNetBasicStem(nn.Module):
 
 class X3DStem(nn.Module):
     """
-    X3D's 3D stem module.
-    Performs a spatial followed by a depthwise temporal Convolution, BN, and Relu following by a
-        spatiotemporal pooling.
+    X3D 的 3D stem 模块。
+    先做空间卷积，再做 depthwise temporal 卷积，随后接 BN 和 ReLU。
     """
 
     def __init__(
@@ -213,29 +203,19 @@ class X3DStem(nn.Module):
         norm_module=nn.BatchNorm3d,
     ):
         """
-        The `__init__` method of any subclass should also contain these arguments.
+                初始化 X3DStem。
 
-        Args:
-            dim_in (int): the channel dimension of the input. Normally 3 is used
-                for rgb input, and 2 or 3 is used for optical flow input.
-            dim_out (int): the output dimension of the convolution in the stem
-                layer.
-            kernel (list): the kernel size of the convolution in the stem layer.
-                temporal kernel size, height kernel size, width kernel size in
-                order.
-            stride (list): the stride size of the convolution in the stem layer.
-                temporal kernel stride, height kernel size, width kernel size in
-                order.
-            padding (int): the padding size of the convolution in the stem
-                layer, temporal padding size, height padding size, width
-                padding size in order.
-            inplace_relu (bool): calculate the relu on the original input
-                without allocating new memory.
-            eps (float): epsilon for batch norm.
-            bn_mmt (float): momentum for batch norm. Noted that BN momentum in
-                PyTorch = 1 - BN momentum in Caffe2.
-            norm_module (nn.Module): nn.Module for the normalization layer. The
-                default is nn.BatchNorm3d.
+                参数：
+                    dim_in (int): 输入通道数；RGB 通常为 3，光流通常为 2 或 3。
+                    dim_out (int): stem 卷积输出通道数。
+                    kernel (list): stem 卷积核大小，顺序为 temporal、height、width。
+                    stride (list): stem 卷积步幅，顺序为 temporal、height、width。
+                    padding (int): stem 卷积 padding，顺序为 temporal、height、width。
+                    inplace_relu (bool): 为 True 时在原张量上计算 ReLU，减少额外内存。
+                    eps (float): batch norm 的 epsilon。
+                    bn_mmt (float): batch norm 动量；PyTorch 中的含义是 Caffe2 的 1 - momentum。
+                    norm_module (nn.Module): 归一化层类型，默认是 nn.BatchNorm3d。
+
         """
         super(X3DStem, self).__init__()
         self.kernel = kernel
@@ -244,10 +224,13 @@ class X3DStem(nn.Module):
         self.inplace_relu = inplace_relu
         self.eps = eps
         self.bn_mmt = bn_mmt
-        # Construct the stem layer.
+        # 构建 stem 层。
         self._construct_stem(dim_in, dim_out, norm_module)
 
     def _construct_stem(self, dim_in, dim_out, norm_module):
+        """
+        构建 X3D stem 的空间卷积、depthwise temporal 卷积、BN 和 ReLU。
+        """
         self.conv_xy = nn.Conv3d(
             dim_in,
             dim_out,
@@ -272,6 +255,9 @@ class X3DStem(nn.Module):
         self.relu = nn.ReLU(self.inplace_relu)
 
     def forward(self, x):
+        """
+        执行 X3D stem 的前向计算。
+        """
         x = self.conv_xy(x)
         x = self.conv(x)
         x = self.bn(x)

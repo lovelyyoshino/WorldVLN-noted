@@ -6,6 +6,11 @@ from typing import List, Optional
 Tensor = torch.Tensor
 
 def _prod(dims):
+    """中文说明：`_prod` 实现FLOPs 计算公式实现中的 `_prod` 步骤，供训练、推理或调试流程复用。
+
+    新手提示：常见公式是矩阵乘 FLOPs≈2*M*N*K，卷积 FLOPs≈2*out_elements*kernel_mul*in_channels/groups。
+    关键公式：TFLOPS = FLOPs / seconds / 1e12，MFU = TFLOPS / device_peak_TFLOPS。
+    """
     p = 1
     for v in dims:
         p *= v
@@ -13,36 +18,76 @@ def _prod(dims):
 
 
 def linear_flops_compute(input, weight, bias=None):
+    """中文说明：`linear_flops_compute` 计算或汇总 FLOPs/TFLOPS/MFU；公式通常是 FLOPs 除以耗时和 1e12，再与设备峰值相除。
+
+    新手提示：常见公式是矩阵乘 FLOPs≈2*M*N*K，卷积 FLOPs≈2*out_elements*kernel_mul*in_channels/groups。
+    关键公式：TFLOPS = FLOPs / seconds / 1e12，MFU = TFLOPS / device_peak_TFLOPS。
+    """
     out_features = weight.shape[0]
     macs = input.numel() * out_features
     return 2 * macs, macs
 
 
 def relu_flops_compute(input, inplace=False):
+    """中文说明：`relu_flops_compute` 计算或汇总 FLOPs/TFLOPS/MFU；公式通常是 FLOPs 除以耗时和 1e12，再与设备峰值相除。
+
+    新手提示：常见公式是矩阵乘 FLOPs≈2*M*N*K，卷积 FLOPs≈2*out_elements*kernel_mul*in_channels/groups。
+    关键公式：TFLOPS = FLOPs / seconds / 1e12，MFU = TFLOPS / device_peak_TFLOPS。
+    """
     return input.numel(), 0
 
 
 def prelu_flops_compute(input: Tensor, weight: Tensor):
+    """中文说明：`prelu_flops_compute` 计算或汇总 FLOPs/TFLOPS/MFU；公式通常是 FLOPs 除以耗时和 1e12，再与设备峰值相除。
+
+    新手提示：常见公式是矩阵乘 FLOPs≈2*M*N*K，卷积 FLOPs≈2*out_elements*kernel_mul*in_channels/groups。
+    关键公式：TFLOPS = FLOPs / seconds / 1e12，MFU = TFLOPS / device_peak_TFLOPS。
+    """
     return input.numel(), 0
 
 
 def elu_flops_compute(input: Tensor, alpha: float = 1.0, inplace: bool = False):
+    """中文说明：`elu_flops_compute` 计算或汇总 FLOPs/TFLOPS/MFU；公式通常是 FLOPs 除以耗时和 1e12，再与设备峰值相除。
+
+    新手提示：常见公式是矩阵乘 FLOPs≈2*M*N*K，卷积 FLOPs≈2*out_elements*kernel_mul*in_channels/groups。
+    关键公式：TFLOPS = FLOPs / seconds / 1e12，MFU = TFLOPS / device_peak_TFLOPS。
+    """
     return input.numel(), 0
 
 
 def leaky_relu_flops_compute(input: Tensor, negative_slope: float = 0.01, inplace: bool = False):
+    """中文说明：`leaky_relu_flops_compute` 计算或汇总 FLOPs/TFLOPS/MFU；公式通常是 FLOPs 除以耗时和 1e12，再与设备峰值相除。
+
+    新手提示：常见公式是矩阵乘 FLOPs≈2*M*N*K，卷积 FLOPs≈2*out_elements*kernel_mul*in_channels/groups。
+    关键公式：TFLOPS = FLOPs / seconds / 1e12，MFU = TFLOPS / device_peak_TFLOPS。
+    """
     return input.numel(), 0
 
 
 def relu6_flops_compute(input: Tensor, inplace: bool = False):
+    """中文说明：`relu6_flops_compute` 计算或汇总 FLOPs/TFLOPS/MFU；公式通常是 FLOPs 除以耗时和 1e12，再与设备峰值相除。
+
+    新手提示：常见公式是矩阵乘 FLOPs≈2*M*N*K，卷积 FLOPs≈2*out_elements*kernel_mul*in_channels/groups。
+    关键公式：TFLOPS = FLOPs / seconds / 1e12，MFU = TFLOPS / device_peak_TFLOPS。
+    """
     return input.numel(), 0
 
 
 def silu_flops_compute(input: Tensor, inplace: bool = False):
+    """中文说明：`silu_flops_compute` 计算或汇总 FLOPs/TFLOPS/MFU；公式通常是 FLOPs 除以耗时和 1e12，再与设备峰值相除。
+
+    新手提示：常见公式是矩阵乘 FLOPs≈2*M*N*K，卷积 FLOPs≈2*out_elements*kernel_mul*in_channels/groups。
+    关键公式：TFLOPS = FLOPs / seconds / 1e12，MFU = TFLOPS / device_peak_TFLOPS。
+    """
     return input.numel(), 0
 
 
 def gelu_flops_compute(input, **kwargs):
+    """中文说明：`gelu_flops_compute` 计算或汇总 FLOPs/TFLOPS/MFU；公式通常是 FLOPs 除以耗时和 1e12，再与设备峰值相除。
+
+    新手提示：常见公式是矩阵乘 FLOPs≈2*M*N*K，卷积 FLOPs≈2*out_elements*kernel_mul*in_channels/groups。
+    关键公式：TFLOPS = FLOPs / seconds / 1e12，MFU = TFLOPS / device_peak_TFLOPS。
+    """
     return input.numel(), 0
 
 
@@ -55,10 +100,20 @@ def pool_flops_compute(input,
                         count_include_pad=True,
                         divisor_override=None,
                         return_indices=None):
+    """中文说明：`pool_flops_compute` 计算或汇总 FLOPs/TFLOPS/MFU；公式通常是 FLOPs 除以耗时和 1e12，再与设备峰值相除。
+
+    新手提示：常见公式是矩阵乘 FLOPs≈2*M*N*K，卷积 FLOPs≈2*out_elements*kernel_mul*in_channels/groups。
+    关键公式：TFLOPS = FLOPs / seconds / 1e12，MFU = TFLOPS / device_peak_TFLOPS。
+    """
     return input.numel(), 0
 
 
 def conv_flops_compute(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
+    """中文说明：`conv_flops_compute` 计算或汇总 FLOPs/TFLOPS/MFU；公式通常是 FLOPs 除以耗时和 1e12，再与设备峰值相除。
+
+    新手提示：常见公式是矩阵乘 FLOPs≈2*M*N*K，卷积 FLOPs≈2*out_elements*kernel_mul*in_channels/groups。
+    关键公式：TFLOPS = FLOPs / seconds / 1e12，MFU = TFLOPS / device_peak_TFLOPS。
+    """
     assert weight.shape[1] * groups == input.shape[1]
 
     batch_size = input.shape[0]
@@ -113,6 +168,11 @@ def conv_trans_flops_compute(
     groups=1,
     dilation=1,
 ):
+    """中文说明：`conv_trans_flops_compute` 计算或汇总 FLOPs/TFLOPS/MFU；公式通常是 FLOPs 除以耗时和 1e12，再与设备峰值相除。
+
+    新手提示：常见公式是矩阵乘 FLOPs≈2*M*N*K，卷积 FLOPs≈2*out_elements*kernel_mul*in_channels/groups。
+    关键公式：TFLOPS = FLOPs / seconds / 1e12，MFU = TFLOPS / device_peak_TFLOPS。
+    """
     batch_size = input.shape[0]
     in_channels = input.shape[1]
     out_channels = weight.shape[1]
@@ -159,9 +219,14 @@ def batch_norm_flops_compute(
     momentum=0.1,
     eps=1e-05,
 ):
+    """中文说明：`batch_norm_flops_compute` 计算或汇总 FLOPs/TFLOPS/MFU；公式通常是 FLOPs 除以耗时和 1e12，再与设备峰值相除。
+
+    新手提示：常见公式是矩阵乘 FLOPs≈2*M*N*K，卷积 FLOPs≈2*out_elements*kernel_mul*in_channels/groups。
+    关键公式：TFLOPS = FLOPs / seconds / 1e12，MFU = TFLOPS / device_peak_TFLOPS。
+    """
     has_affine = weight is not None
     if training:
-        # estimation
+        # 估算
         return input.numel() * (5 if has_affine else 4), 0
     flops = input.numel() * (2 if has_affine else 1)
     return flops, 0
@@ -174,8 +239,13 @@ def layer_norm_flops_compute(
     bias: Optional[Tensor] = None,
     eps: float = 1e-5,
 ):
+    """中文说明：`layer_norm_flops_compute` 计算或汇总 FLOPs/TFLOPS/MFU；公式通常是 FLOPs 除以耗时和 1e12，再与设备峰值相除。
+
+    新手提示：常见公式是矩阵乘 FLOPs≈2*M*N*K，卷积 FLOPs≈2*out_elements*kernel_mul*in_channels/groups。
+    关键公式：TFLOPS = FLOPs / seconds / 1e12，MFU = TFLOPS / device_peak_TFLOPS。
+    """
     has_affine = weight is not None
-    # estimation
+    # 估算
     return input.numel() * (5 if has_affine else 4), 0
 
 
@@ -184,8 +254,13 @@ def group_norm_flops_compute(input: Tensor,
                               weight: Optional[Tensor] = None,
                               bias: Optional[Tensor] = None,
                               eps: float = 1e-5):
+    """中文说明：`group_norm_flops_compute` 计算或汇总 FLOPs/TFLOPS/MFU；公式通常是 FLOPs 除以耗时和 1e12，再与设备峰值相除。
+
+    新手提示：常见公式是矩阵乘 FLOPs≈2*M*N*K，卷积 FLOPs≈2*out_elements*kernel_mul*in_channels/groups。
+    关键公式：TFLOPS = FLOPs / seconds / 1e12，MFU = TFLOPS / device_peak_TFLOPS。
+    """
     has_affine = weight is not None
-    # estimation
+    # 估算
     return input.numel() * (5 if has_affine else 4), 0
 
 
@@ -199,12 +274,22 @@ def instance_norm_flops_compute(
     momentum: float = 0.1,
     eps: float = 1e-5,
 ):
+    """中文说明：`instance_norm_flops_compute` 计算或汇总 FLOPs/TFLOPS/MFU；公式通常是 FLOPs 除以耗时和 1e12，再与设备峰值相除。
+
+    新手提示：常见公式是矩阵乘 FLOPs≈2*M*N*K，卷积 FLOPs≈2*out_elements*kernel_mul*in_channels/groups。
+    关键公式：TFLOPS = FLOPs / seconds / 1e12，MFU = TFLOPS / device_peak_TFLOPS。
+    """
     has_affine = weight is not None
-    # estimation
+    # 估算
     return input.numel() * (5 if has_affine else 4), 0
 
 
 def upsample_flops_compute(*args, **kwargs):
+    """中文说明：`upsample_flops_compute` 计算或汇总 FLOPs/TFLOPS/MFU；公式通常是 FLOPs 除以耗时和 1e12，再与设备峰值相除。
+
+    新手提示：常见公式是矩阵乘 FLOPs≈2*M*N*K，卷积 FLOPs≈2*out_elements*kernel_mul*in_channels/groups。
+    关键公式：TFLOPS = FLOPs / seconds / 1e12，MFU = TFLOPS / device_peak_TFLOPS。
+    """
     input = args[0]
     size = kwargs.get('size', None)
     if size is None and len(args) > 1:
@@ -219,7 +304,7 @@ def upsample_flops_compute(*args, **kwargs):
     scale_factor = kwargs.get('scale_factor', None)
     if scale_factor is None and len(args) > 2:
         scale_factor = args[2]
-    assert scale_factor is not None, "either size or scale_factor should be defined"
+    assert scale_factor is not None, "必须定义 size 或 scale_factor 中的一个"
 
     flops = input.numel()
     if isinstance(scale_factor, tuple) and len(scale_factor) == len(input):
@@ -230,6 +315,11 @@ def upsample_flops_compute(*args, **kwargs):
 
 
 def softmax_flops_compute(input, dim=None, _stacklevel=3, dtype=None):
+    """中文说明：`softmax_flops_compute` 计算或汇总 FLOPs/TFLOPS/MFU；公式通常是 FLOPs 除以耗时和 1e12，再与设备峰值相除。
+
+    新手提示：常见公式是矩阵乘 FLOPs≈2*M*N*K，卷积 FLOPs≈2*out_elements*kernel_mul*in_channels/groups。
+    关键公式：TFLOPS = FLOPs / seconds / 1e12，MFU = TFLOPS / device_peak_TFLOPS。
+    """
     return input.numel(), 0
 
 
@@ -242,11 +332,16 @@ def embedding_flops_compute(
     scale_grad_by_freq=False,
     sparse=False,
 ):
+    """中文说明：`embedding_flops_compute` 计算或汇总 FLOPs/TFLOPS/MFU；公式通常是 FLOPs 除以耗时和 1e12，再与设备峰值相除。
+
+    新手提示：常见公式是矩阵乘 FLOPs≈2*M*N*K，卷积 FLOPs≈2*out_elements*kernel_mul*in_channels/groups。
+    关键公式：TFLOPS = FLOPs / seconds / 1e12，MFU = TFLOPS / device_peak_TFLOPS。
+    """
     return 0, 0
 
 def attn_flops_compute(query, key, value, *args, **kwargs):
     """
-    Count flops for the scaled_dot_product_attention operation.
+    统计 scaled_dot_product_attention 操作的 FLOPs。
     """
     macs = _prod(q.shape) * k.shape[-2]
     macs += _prod(q.shape[:-1]) * k.shape[-2] * v.shape[-1]

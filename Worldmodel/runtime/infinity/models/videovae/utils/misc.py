@@ -22,19 +22,39 @@ COLOR_RESET = "\033[0m"
 ptdtype = {None: torch.float32, 'fp32': torch.float32, 'bf16': torch.bfloat16}
 
 def rank_zero_only(fn):
+    """中文说明：`rank_zero_only` 读取或构造分布式 rank/group/world-size 信息，是理解多卡行为的基础。
+
+    新手提示：这些函数多是训练脚手架，先看输入输出 shape，再看是否只在 rank0 执行。
+    阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+    """
     def wrapped_fn(*args, **kwargs):
+        """中文说明：`wrapped_fn` 实现VideoVAE 通用张量、随机种子和可视化工具中的 `wrapped_fn` 步骤，供训练、推理或调试流程复用。
+
+        新手提示：这些函数多是训练脚手架，先看输入输出 shape，再看是否只在 rank0 执行。
+        阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+        """
         if not dist.is_initialized() or dist.get_rank() == 0:
             return fn(*args, **kwargs)
     return wrapped_fn
 
 @rank_zero_only
 def print_gpu_usage(model_name) -> None:
+    """中文说明：`print_gpu_usage` 实现VideoVAE 通用张量、随机种子和可视化工具中的 `print_gpu_usage` 步骤，供训练、推理或调试流程复用。
+
+    新手提示：这些函数多是训练脚手架，先看输入输出 shape，再看是否只在 rank0 执行。
+    阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+    """
     allocated_memory = torch.cuda.memory_allocated()
     reserved_memory = torch.cuda.memory_reserved()
-    print(f"after {model_name} backward Allocated Memory: {allocated_memory}, Reserved Memory: {reserved_memory}")
+    print(f"{model_name} backward 之后的显存: 已分配={allocated_memory}, 已保留={reserved_memory}")
     torch.cuda.empty_cache()
 
 def seed_everything(seed=0, allow_tf32=True, benchmark=True, deterministic=False):
+    """中文说明：`seed_everything` 设置随机种子，保证数据顺序、初始化和采样过程尽可能可复现。
+
+    新手提示：这些函数多是训练脚手架，先看输入输出 shape，再看是否只在 rank0 执行。
+    阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+    """
     random.seed(seed)
     np.random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
@@ -42,21 +62,26 @@ def seed_everything(seed=0, allow_tf32=True, benchmark=True, deterministic=False
     torch.cuda.manual_seed_all(seed)
 
     torch.backends.cudnn.deterministic = deterministic
-    torch.backends.cudnn.benchmark = benchmark  # default False in torch 2.3.1
+    torch.backends.cudnn.benchmark = benchmark  # torch 2.3.1 中默认值为 False。
 
-    # See https://pytorch.org/docs/stable/generated/torch.use_deterministic_algorithms.html
+    # 参考：https://pytorch.org/docs/stable/generated/torch.use_deterministic_algorithms.html
     os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
-    # See https://pytorch.org/docs/stable/notes/randomness.html
+    # 参考：https://pytorch.org/docs/stable/notes/randomness.html
     torch.use_deterministic_algorithms(deterministic)
 
-    torch.backends.cudnn.allow_tf32 = allow_tf32  # default True in torch 2.3.1
-    torch.backends.cuda.matmul.allow_tf32 = allow_tf32  # default True in torch 2.3.1
+    torch.backends.cudnn.allow_tf32 = allow_tf32  # torch 2.3.1 中默认值为 True。
+    torch.backends.cuda.matmul.allow_tf32 = allow_tf32  # torch 2.3.1 中默认值为 True。
 
-# Function to print model summary in table format
+# 以表格格式打印模型摘要
 @rank_zero_only
 def print_model_summary(models):
-        # Table headers
-        print(f"{'Layer Name':<20} {'Param #':<20}")
+        # 表头
+        """中文说明：`print_model_summary` 实现VideoVAE 通用张量、随机种子和可视化工具中的 `print_model_summary` 步骤，供训练、推理或调试流程复用。
+
+        新手提示：这些函数多是训练脚手架，先看输入输出 shape，再看是否只在 rank0 执行。
+        阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+        """
+        print(f"{'层名':<20} {'参数量':<20}")
         print("="*40)
         total_params = 0
         for model in models:
@@ -66,21 +91,36 @@ def print_model_summary(models):
                 params_str = f"{params/1e6:.2f}M"
                 print(f"{name:<20} {params_str:<20}")
         print("="*40)
-        print(f"Total number of parameters: {total_params/1e6:.2f}M")
+        print(f"参数总量: {total_params/1e6:.2f}M")
 
 def version_checker(base_version, high_version):
+    """中文说明：`version_checker` 实现VideoVAE 通用张量、随机种子和可视化工具中的 `version_checker` 步骤，供训练、推理或调试流程复用。
+
+    新手提示：这些函数多是训练脚手架，先看输入输出 shape，再看是否只在 rank0 执行。
+    阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+    """
     try:
         from bytedance.ndtimeline import __version__
         from packaging.version import Version
         if Version(__version__) < Version(base_version) or Version(__version__) >= Version(high_version):
-            raise RuntimeError(f"bytedance.ndtimeline's version should be >={base_version} <{high_version}, but {__version__} found")
+            raise RuntimeError(f"bytedance.ndtimeline 版本应满足 >={base_version} 且 <{high_version}，当前发现 {__version__}")
     except ImportError:
-        raise RuntimeError(f"bytedance.ndtimeline's version should be >={base_version} <{high_version}")
+        raise RuntimeError(f"需要安装 bytedance.ndtimeline，版本应满足 >={base_version} 且 <{high_version}")
 
 def is_torch_optim_sch(obj):
+    """中文说明：`is_torch_optim_sch` 实现VideoVAE 通用张量、随机种子和可视化工具中的 `is_torch_optim_sch` 步骤，供训练、推理或调试流程复用。
+
+    新手提示：这些函数多是训练脚手架，先看输入输出 shape，再看是否只在 rank0 执行。
+    阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+    """
     return isinstance(obj, (optim.Optimizer, optim.lr_scheduler.LambdaLR))
 
 def rearranged_forward(x, func):
+    """中文说明：`rearranged_forward` 实现VideoVAE 通用张量、随机种子和可视化工具中的 `rearranged_forward` 步骤，供训练、推理或调试流程复用。
+
+    新手提示：这些函数多是训练脚手架，先看输入输出 shape，再看是否只在 rank0 执行。
+    阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+    """
     if x.ndim == 4:
         x = rearrange(x, "B C H W -> B H W C")
     elif x.ndim == 5:
@@ -93,10 +133,20 @@ def rearranged_forward(x, func):
     return x
 
 def is_dtype_16(data):
+    """中文说明：`is_dtype_16` 实现VideoVAE 通用张量、随机种子和可视化工具中的 `is_dtype_16` 步骤，供训练、推理或调试流程复用。
+
+    新手提示：这些函数多是训练脚手架，先看输入输出 shape，再看是否只在 rank0 执行。
+    阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+    """
     return data.dtype == torch.float16 or data.dtype == torch.bfloat16
 
 @contextmanager
 def set_tf32_flags(flag):
+    """中文说明：`set_tf32_flags` 实现VideoVAE 通用张量、随机种子和可视化工具中的 `set_tf32_flags` 步骤，供训练、推理或调试流程复用。
+
+    新手提示：这些函数多是训练脚手架，先看输入输出 shape，再看是否只在 rank0 执行。
+    阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+    """
     old_matmul_flag = torch.backends.cuda.matmul.allow_tf32
     old_cudnn_flag = torch.backends.cudnn.allow_tf32
     torch.backends.cuda.matmul.allow_tf32 = flag
@@ -104,38 +154,63 @@ def set_tf32_flags(flag):
     try:
         yield
     finally:
-        # Restore the original flags
+        # 恢复原始 flags
         torch.backends.cuda.matmul.allow_tf32 = old_matmul_flag
         torch.backends.cudnn.allow_tf32 = old_cudnn_flag
 
 class ByteNASManager:
+    """中文说明：`ByteNASManager` 封装VideoVAE 通用张量、随机种子和可视化工具中的状态和子模块。
+
+    新手提示：这些函数多是训练脚手架，先看输入输出 shape，再看是否只在 rank0 执行。
+    阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+    """
     bytenas_dir = {
-        
+
     }
     _current_bytenas = None
     _username = None
 
     @classmethod
     def set_bytenas(cls, bytenas, username="zhufengda"):
+        """中文说明：`set_bytenas` 实现VideoVAE 通用张量、随机种子和可视化工具中的 `set_bytenas` 步骤，供训练、推理或调试流程复用。
+
+        新手提示：这些函数多是训练脚手架，先看输入输出 shape，再看是否只在 rank0 执行。
+        阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+        """
         cls._current_bytenas = bytenas
         cls._username = username
 
     @classmethod
     def get_work_dir(cls, use_username=True):
+        """中文说明：`get_work_dir` 实现VideoVAE 通用张量、随机种子和可视化工具中的 `get_work_dir` 步骤，供训练、推理或调试流程复用。
+
+        新手提示：这些函数多是训练脚手架，先看输入输出 shape，再看是否只在 rank0 执行。
+        阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+        """
         if use_username:
             username = cls._username
         else:
             username = ""
         base_dir = cls.bytenas_dir[cls._current_bytenas]
         return os.path.join(base_dir, username)
-    
+
     @classmethod
     def __call__(cls, rel_path, use_username=True, prefix=""):
+        """中文说明：`__call__` 实现VideoVAE 通用张量、随机种子和可视化工具中的 `__call__` 步骤，供训练、推理或调试流程复用。
+
+        新手提示：这些函数多是训练脚手架，先看输入输出 shape，再看是否只在 rank0 执行。
+        阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+        """
         return os.path.join(cls.get_work_dir(use_username=use_username), prefix, rel_path)
 
 bytenas_manager = ByteNASManager()
 
 def get_last_ckpt(root_dir):
+    """中文说明：`get_last_ckpt` 处理 checkpoint 保存/加载/恢复；重点看路径选择、key 匹配和缺失权重处理。
+
+    新手提示：这些函数多是训练脚手架，先看输入输出 shape，再看是否只在 rank0 执行。
+    阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+    """
     if not os.path.exists(root_dir): return None
     ckpt_files = {}
     for dirpath, dirnames, filenames in os.walk(root_dir):
@@ -149,9 +224,14 @@ def get_last_ckpt(root_dir):
     return ckpt_files[max_iter]
 
 
-# Shifts src_tf dim to dest dim
-# i.e. shift_dim(x, 1, -1) would be (b, c, t, h, w) -> (b, t, h, w, c)
+# 将 src_tf 维度移动到 dest 位置
+# 例：shift_dim(x, 1, -1) 会把 (b, c, t, h, w) 变为 (b, t, h, w, c)
 def shift_dim(x, src_dim=-1, dest_dim=-1, make_contiguous=True):
+    """中文说明：`shift_dim` 执行张量维度重排或切片；新手阅读时建议在纸上写出每一维含义。
+
+    新手提示：这些函数多是训练脚手架，先看输入输出 shape，再看是否只在 rank0 执行。
+    阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+    """
     n_dims = len(x.shape)
     if src_dim < 0:
         src_dim = n_dims + src_dim
@@ -177,12 +257,17 @@ def shift_dim(x, src_dim=-1, dest_dim=-1, make_contiguous=True):
     return x
 
 
-# reshapes tensor start from dim i (inclusive)
-# to dim j (exclusive) to the desired shape
-# e.g. if x.shape = (b, thw, c) then
-# view_range(x, 1, 2, (t, h, w)) returns
-# x of shape (b, t, h, w, c)
+# 从第 i 维（含）开始重塑张量
+# 到第 j 维（不含）结束，并替换为目标 shape
+# 例：如果 x.shape = (b, thw, c)
+# 示例：view_range(x, 1, 2, (t, h, w)) 会返回
+# 输出 shape 为 (b, t, h, w, c) 的张量
 def view_range(x, i, j, shape):
+    """中文说明：`view_range` 执行张量维度重排或切片；新手阅读时建议在纸上写出每一维含义。
+
+    新手提示：这些函数多是训练脚手架，先看输入输出 shape，再看是否只在 rank0 执行。
+    阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+    """
     shape = tuple(shape)
 
     n_dims = len(x.shape)
@@ -202,7 +287,7 @@ def view_range(x, i, j, shape):
 
 
 def accuracy(output, target, topk=(1,)):
-    """Computes the accuracy over the k top predictions for the specified values of k"""
+    """中文说明：计算指定 top-k 取值下预测是否命中的准确率。"""
     with torch.no_grad():
         maxk = max(topk)
         batch_size = target.size(0)
@@ -219,6 +304,11 @@ def accuracy(output, target, topk=(1,)):
 
 
 def tensor_slice(x, begin, size):
+    """中文说明：`tensor_slice` 执行张量维度重排或切片；新手阅读时建议在纸上写出每一维含义。
+
+    新手提示：这些函数多是训练脚手架，先看输入输出 shape，再看是否只在 rank0 执行。
+    阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+    """
     assert all([b >= 0 for b in begin])
     size = [l - b if s == -1 else s
             for s, b, l in zip(size, begin, x.shape)]
@@ -229,6 +319,11 @@ def tensor_slice(x, begin, size):
 
 
 def save_video_grid(video, fname, nrow=None, fps=16):
+    """中文说明：`save_video_grid` 处理 checkpoint 保存/加载/恢复；重点看路径选择、key 匹配和缺失权重处理。
+
+    新手提示：这些函数多是训练脚手架，先看输入输出 shape，再看是否只在 rank0 执行。
+    阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+    """
     b, c, t, h, w = video.shape
     video = video.permute(0, 2, 3, 4, 1).contiguous()
 
@@ -239,7 +334,7 @@ def save_video_grid(video, fname, nrow=None, fps=16):
     padding = 1
     video_grid = np.zeros((t, (padding + h) * nrow + padding,
                            (padding + w) * ncol + padding, c), dtype='uint8')
-    # print(video_grid.shape)
+    # 调试输出：print(video_grid.shape)
     for i in range(b):
         r = i // ncol
         c = i % ncol
@@ -250,11 +345,16 @@ def save_video_grid(video, fname, nrow=None, fps=16):
     for i in range(t):
         video.append(video_grid[i])
     imageio.mimsave(fname, video, fps=fps)
-    # skvideo.io.vwrite(fname, video_grid, inputdict={'-r': '5'})
-    # print('saved videos to', fname)
+    # 可选保存：skvideo.io.vwrite(fname, video_grid, inputdict={'-r': '5'})
+    # 调试输出：print('视频已保存到', fname)
 
 
 def comp_getattr(args, attr_name, default=None):
+    """中文说明：`comp_getattr` 实现VideoVAE 通用张量、随机种子和可视化工具中的 `comp_getattr` 步骤，供训练、推理或调试流程复用。
+
+    新手提示：这些函数多是训练脚手架，先看输入输出 shape，再看是否只在 rank0 执行。
+    阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+    """
     if hasattr(args, attr_name):
         return getattr(args, attr_name)
     else:
@@ -262,9 +362,14 @@ def comp_getattr(args, attr_name, default=None):
 
 
 def visualize_tensors(t, name=None, nest=0):
+    """中文说明：`visualize_tensors` 实现VideoVAE 通用张量、随机种子和可视化工具中的 `visualize_tensors` 步骤，供训练、推理或调试流程复用。
+
+    新手提示：这些函数多是训练脚手架，先看输入输出 shape，再看是否只在 rank0 执行。
+    阅读重点：确认输入、输出和副作用，再回到调用方看它在整条链路中的位置。
+    """
     if name is not None:
-        print(name, "current nest: ", nest)
-    print("type: ", type(t))
+        print(name, "当前嵌套层级: ", nest)
+    print("类型: ", type(t))
     if 'dict' in str(type(t)):
         print(t.keys())
         for k in t.keys():
@@ -280,7 +385,7 @@ def visualize_tensors(t, name=None, nest=0):
                     print(k, len(t[k]))
                     visualize_tensors(t[k], name, nest + 1)
     elif 'list' in str(type(t)):
-        print("list length: ", len(t))
+        print("列表长度: ", len(t))
         for t2 in t:
             visualize_tensors(t2, name, nest + 1)
     elif 'Tensor' in str(type(t)):

@@ -3,34 +3,44 @@
 import torch.nn as nn
 
 def rnn_flops(flops, rnn_module, w_ih, w_hh, input_size):
+    """中文说明：`rnn_flops` 计算或汇总 FLOPs/TFLOPS/MFU；公式通常是 FLOPs 除以耗时和 1e12，再与设备峰值相除。
+
+    新手提示：常见公式是矩阵乘 FLOPs≈2*M*N*K，卷积 FLOPs≈2*out_elements*kernel_mul*in_channels/groups。
+    关键公式：TFLOPS = FLOPs / seconds / 1e12，MFU = TFLOPS / device_peak_TFLOPS。
+    """
     gates_size = w_ih.shape[0]
-    # matrix matrix mult ih state and internal state
+    # 输入 ih 状态与内部状态的矩阵乘
     flops += 2 * w_ih.shape[0] * w_ih.shape[1] - gates_size
-    # matrix matrix mult hh state and internal state
+    # 隐状态 hh 与内部状态的矩阵乘
     flops += 2 * w_hh.shape[0] * w_hh.shape[1] - gates_size
     if isinstance(rnn_module, (nn.RNN, nn.RNNCell)):
-        # add both operations
+        # 累加两个操作的 FLOPs
         flops += rnn_module.hidden_size
     elif isinstance(rnn_module, (nn.GRU, nn.GRUCell)):
-        # hadamard of r
+        # 门控 r 的 Hadamard 逐元素乘
         flops += rnn_module.hidden_size
-        # adding operations from both states
+        # 累加两个状态分支的操作量
         flops += rnn_module.hidden_size * 3
-        # last two hadamard _product and add
+        # 最后两次 Hadamard 乘法和加法
         flops += rnn_module.hidden_size * 3
     elif isinstance(rnn_module, (nn.LSTM, nn.LSTMCell)):
-        # adding operations from both states
+        # 累加两个状态分支的操作量
         flops += rnn_module.hidden_size * 4
-        # two hadamard _product and add for C state
+        # 单元状态 C 的两次 Hadamard 乘法和加法
         flops += rnn_module.hidden_size + rnn_module.hidden_size + rnn_module.hidden_size
-        # final hadamard
+        # 最后的 Hadamard 逐元素乘
         flops += rnn_module.hidden_size + rnn_module.hidden_size + rnn_module.hidden_size
     return flops
 
 
 def rnn_forward_hook(rnn_module, input, output):
+    """中文说明：`rnn_forward_hook` 实现FLOPs 计算公式实现中的 `rnn_forward_hook` 步骤，供训练、推理或调试流程复用。
+
+    新手提示：常见公式是矩阵乘 FLOPs≈2*M*N*K，卷积 FLOPs≈2*out_elements*kernel_mul*in_channels/groups。
+    关键公式：TFLOPS = FLOPs / seconds / 1e12，MFU = TFLOPS / device_peak_TFLOPS。
+    """
     flops = 0
-    # input is a tuple containing a sequence to process and (optionally) hidden state
+    # 输入是一个元组，包含待处理序列以及可选隐藏状态
     inp = input[0]
     batch_size = inp.shape[0]
     seq_length = inp.shape[1]
@@ -57,6 +67,11 @@ def rnn_forward_hook(rnn_module, input, output):
 
 
 def rnn_cell_forward_hook(rnn_cell_module, input, output):
+    """中文说明：`rnn_cell_forward_hook` 实现FLOPs 计算公式实现中的 `rnn_cell_forward_hook` 步骤，供训练、推理或调试流程复用。
+
+    新手提示：常见公式是矩阵乘 FLOPs≈2*M*N*K，卷积 FLOPs≈2*out_elements*kernel_mul*in_channels/groups。
+    关键公式：TFLOPS = FLOPs / seconds / 1e12，MFU = TFLOPS / device_peak_TFLOPS。
+    """
     flops = 0
     inp = input[0]
     batch_size = inp.shape[0]
@@ -74,7 +89,7 @@ def rnn_cell_forward_hook(rnn_cell_module, input, output):
 
 
 MODULE_HOOK_MAPPING = {
-    # RNN
+    # 循环神经网络 RNN
     nn.RNN: rnn_forward_hook,
     nn.GRU: rnn_forward_hook,
     nn.LSTM: rnn_forward_hook,
@@ -82,4 +97,3 @@ MODULE_HOOK_MAPPING = {
     nn.LSTMCell: rnn_cell_forward_hook,
     nn.GRUCell: rnn_cell_forward_hook,
 }
-

@@ -1,11 +1,11 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
 """
-TimeSformer package init.
+TimeSformer 包初始化。
 
-This repo originally calls `setup_environment()` on import, which depends on `fvcore`.
-For lightweight scripts that only need model definitions (e.g. `timesformer.models.vit`)
-we allow importing without `fvcore` installed.
+原始仓库会在导入时调用依赖 `fvcore` 的 `setup_environment()`。
+对于只需要模型定义的轻量脚本（例如 `timesformer.models.vit`），允许在
+未安装 `fvcore` 时完成导入。
 """
 
 try:
@@ -13,5 +13,5 @@ try:
 
     setup_environment()
 except ModuleNotFoundError:
-    # Allow minimal imports (e.g. VisionTransformer) without optional deps.
+    # 允许在缺少可选依赖时完成最小化导入（例如 VisionTransformer）。
     pass

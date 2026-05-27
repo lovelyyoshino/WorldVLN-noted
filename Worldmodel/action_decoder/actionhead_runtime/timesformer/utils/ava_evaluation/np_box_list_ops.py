@@ -13,11 +13,11 @@
 # limitations under the License.
 # ==============================================================================
 
-"""Bounding Box List operations for Numpy BoxLists.
+"""面向 Numpy BoxList 的边界框列表操作。
 
-Example box operations that are supported:
-  * Areas: compute bounding box areas
-  * IOU: pairwise intersection-over-union scores
+支持的典型框操作包括：
+  * 面积：计算边界框面积
+  * IOU：计算两两交并比分数
 """
 from __future__ import (
     absolute_import,
@@ -31,99 +31,100 @@ from . import np_box_list, np_box_ops
 
 
 class SortOrder(object):
-    """Enum class for sort order.
+    """排序顺序的枚举类。
 
-  Attributes:
-    ascend: ascend order.
-    descend: descend order.
-  """
+      属性：
+        ascend: 升序。
+        descend: 降序。
+
+    """
 
     ASCEND = 1
     DESCEND = 2
 
 
 def area(boxlist):
-    """Computes area of boxes.
+    """计算 BoxList 中每个边界框的面积。
 
-  Args:
-    boxlist: BoxList holding N boxes
+      参数：
+        boxlist: 保存 N 个框的 BoxList。
 
-  Returns:
-    a numpy array with shape [N*1] representing box areas
-  """
+      返回：
+        shape 为 [N*1] 的 numpy array，表示每个框的面积。
+
+    """
     y_min, x_min, y_max, x_max = boxlist.get_coordinates()
     return (y_max - y_min) * (x_max - x_min)
 
 
 def intersection(boxlist1, boxlist2):
-    """Compute pairwise intersection areas between boxes.
+    """计算两个 BoxList 之间两两边界框的交集面积。
 
-  Args:
-    boxlist1: BoxList holding N boxes
-    boxlist2: BoxList holding M boxes
+      参数：
+        boxlist1: 保存 N 个框的 BoxList。
+        boxlist2: 保存 M 个框的 BoxList。
 
-  Returns:
-    a numpy array with shape [N*M] representing pairwise intersection area
-  """
+      返回：
+        shape 为 [N*M] 的 numpy array，表示两两交集面积。
+
+    """
     return np_box_ops.intersection(boxlist1.get(), boxlist2.get())
 
 
 def iou(boxlist1, boxlist2):
-    """Computes pairwise intersection-over-union between box collections.
+    """计算两个边界框集合之间两两交并比。
 
-  Args:
-    boxlist1: BoxList holding N boxes
-    boxlist2: BoxList holding M boxes
+      参数：
+        boxlist1: 保存 N 个框的 BoxList。
+        boxlist2: 保存 M 个框的 BoxList。
 
-  Returns:
-    a numpy array with shape [N, M] representing pairwise iou scores.
-  """
+      返回：
+        shape 为 [N, M] 的 numpy array，表示两两 iou 分数。
+
+    """
     return np_box_ops.iou(boxlist1.get(), boxlist2.get())
 
 
 def ioa(boxlist1, boxlist2):
-    """Computes pairwise intersection-over-area between box collections.
+    """计算两个边界框集合之间两两交集面积占比。
 
-  Intersection-over-area (ioa) between two boxes box1 and box2 is defined as
-  their intersection area over box2's area. Note that ioa is not symmetric,
-  that is, IOA(box1, box2) != IOA(box2, box1).
+      两个框 box1 和 box2 的交集面积占比 (ioa) 定义为它们的交集面积
+      除以 box2 的面积。注意 ioa 不是对称的，即 IOA(box1, box2) !=
+      说明：IOA(box2, box1)。
 
-  Args:
-    boxlist1: BoxList holding N boxes
-    boxlist2: BoxList holding M boxes
+      参数：
+        boxlist1: 保存 N 个框的 BoxList。
+        boxlist2: 保存 M 个框的 BoxList。
 
-  Returns:
-    a numpy array with shape [N, M] representing pairwise ioa scores.
-  """
+      返回：
+        shape 为 [N, M] 的 numpy array，表示两两 ioa 分数。
+
+    """
     return np_box_ops.ioa(boxlist1.get(), boxlist2.get())
 
 
 def gather(boxlist, indices, fields=None):
-    """Gather boxes from BoxList according to indices and return new BoxList.
+    """按照 indices 从 BoxList 中取出部分框，并返回新的 BoxList。
 
-  By default, gather returns boxes corresponding to the input index list, as
-  well as all additional fields stored in the boxlist (indexing into the
-  first dimension).  However one can optionally only gather from a
-  subset of fields.
+      默认情况下，gather 会返回输入索引对应的框，同时带上 boxlist 中保存的所有
+      附加字段（沿第一维索引）。也可以通过 fields 只选择部分字段。
 
-  Args:
-    boxlist: BoxList holding N boxes
-    indices: a 1-d numpy array of type int_
-    fields: (optional) list of fields to also gather from.  If None (default),
-        all fields are gathered from.  Pass an empty fields list to only gather
-        the box coordinates.
+      参数：
+        boxlist: 保存 N 个框的 BoxList。
+        indices: dtype 为 int_ 的 1-D numpy array。
+        fields: 可选字段列表。如果为 None（默认），会收集所有字段；传空列表时
+            只收集框坐标。
 
-  Returns:
-    subboxlist: a BoxList corresponding to the subset of the input BoxList
-        specified by indices
+      返回：
+        subboxlist: 与 indices 指定子集对应的新 BoxList。
 
-  Raises:
-    ValueError: if specified field is not contained in boxlist or if the
-        indices are not of type int_
-  """
+      异常：
+        ValueError: 如果指定字段不在 boxlist 中，或 indices 类型不是 int_。
+
+    """
     if indices.size:
         if np.amax(indices) >= boxlist.num_boxes() or np.amin(indices) < 0:
-            raise ValueError("indices are out of valid range.")
+            raise ValueError("indices 超出有效范围。")
     subboxlist = np_box_list.BoxList(boxlist.get()[indices, :])
     if fields is None:
         fields = boxlist.get_extra_fields()
@@ -134,28 +135,29 @@ def gather(boxlist, indices, fields=None):
 
 
 def sort_by_field(boxlist, field, order=SortOrder.DESCEND):
-    """Sort boxes and associated fields according to a scalar field.
+    """根据某个标量字段对框及其关联字段排序。
 
-  A common use case is reordering the boxes according to descending scores.
+      常见用法是按照 scores 从高到低重新排列检测框。
 
-  Args:
-    boxlist: BoxList holding N boxes.
-    field: A BoxList field for sorting and reordering the BoxList.
-    order: (Optional) 'descend' or 'ascend'. Default is descend.
+      参数：
+        boxlist: 保存 N 个框的 BoxList。
+        field: 用来排序并重排 BoxList 的字段。
+        order: 可选，'descend' 或 'ascend'。默认是 descend。
 
-  Returns:
-    sorted_boxlist: A sorted BoxList with the field in the specified order.
+      返回：
+        sorted_boxlist: 按指定顺序排序后的 BoxList。
 
-  Raises:
-    ValueError: if specified field does not exist or is not of single dimension.
-    ValueError: if the order is not either descend or ascend.
-  """
+      异常：
+        ValueError: 如果指定字段不存在，或字段不是一维。
+        ValueError: 如果 order 既不是 descend 也不是 ascend。
+
+    """
     if not boxlist.has_field(field):
-        raise ValueError("Field " + field + " does not exist")
+        raise ValueError("字段 " + field + " 不存在。")
     if len(boxlist.get_field(field).shape) != 1:
-        raise ValueError("Field " + field + "should be single dimension.")
+        raise ValueError("字段 " + field + " 必须是一维。")
     if order != SortOrder.DESCEND and order != SortOrder.ASCEND:
-        raise ValueError("Invalid sort order")
+        raise ValueError("排序顺序非法。")
 
     field_to_sort = boxlist.get_field(field)
     sorted_indices = np.argsort(field_to_sort)
@@ -167,36 +169,35 @@ def sort_by_field(boxlist, field, order=SortOrder.DESCEND):
 def non_max_suppression(
     boxlist, max_output_size=10000, iou_threshold=1.0, score_threshold=-10.0
 ):
-    """Non maximum suppression.
+    """非极大值抑制（Non maximum suppression, NMS）。
 
-  This op greedily selects a subset of detection bounding boxes, pruning
-  away boxes that have high IOU (intersection over union) overlap (> thresh)
-  with already selected boxes. In each iteration, the detected bounding box with
-  highest score in the available pool is selected.
+      这个操作会贪心地选择一部分检测框，并删除那些与已选框有较高 IOU
+      (intersection over union, 大于阈值) 重叠的框。每轮都会从当前可选框中
+      选择分数最高的检测框。
 
-  Args:
-    boxlist: BoxList holding N boxes.  Must contain a 'scores' field
-      representing detection scores. All scores belong to the same class.
-    max_output_size: maximum number of retained boxes
-    iou_threshold: intersection over union threshold.
-    score_threshold: minimum score threshold. Remove the boxes with scores
-                     less than this value. Default value is set to -10. A very
-                     low threshold to pass pretty much all the boxes, unless
-                     the user sets a different score threshold.
+      参数：
+        boxlist: 保存 N 个框的 BoxList，必须包含表示检测分数的 'scores' 字段。
+          这里假设所有分数属于同一个类别。
+        max_output_size: 最多保留的框数量。
+        iou_threshold: intersection over union 阈值。
+        score_threshold: 最小分数阈值，低于该值的框会被移除。默认值 -10 很低，
+                         基本会放过所有框，除非用户显式设置其他阈值。
 
-  Returns:
-    a BoxList holding M boxes where M <= max_output_size
-  Raises:
-    ValueError: if 'scores' field does not exist
-    ValueError: if threshold is not in [0, 1]
-    ValueError: if max_output_size < 0
-  """
+      返回：
+        保存 M 个框的 BoxList，其中 M <= max_output_size。
+
+      异常：
+        ValueError: 如果 'scores' 字段不存在。
+        ValueError: 如果阈值不在 [0, 1]。
+        ValueError: 如果 max_output_size < 0。
+
+    """
     if not boxlist.has_field("scores"):
-        raise ValueError("Field scores does not exist")
+        raise ValueError("字段 scores 不存在。")
     if iou_threshold < 0.0 or iou_threshold > 1.0:
-        raise ValueError("IOU threshold must be in [0, 1]")
+        raise ValueError("IOU threshold 必须位于 [0, 1]。")
     if max_output_size < 0:
-        raise ValueError("max_output_size must be bigger than 0.")
+        raise ValueError("max_output_size 必须大于等于 0。")
 
     boxlist = filter_scores_greater_than(boxlist, score_threshold)
     if boxlist.num_boxes() == 0:
@@ -204,7 +205,7 @@ def non_max_suppression(
 
     boxlist = sort_by_field(boxlist, "scores")
 
-    # Prevent further computation if NMS is disabled.
+    # 如果 NMS 被关闭，就避免继续做多余计算。
     if iou_threshold == 1.0:
         if boxlist.num_boxes() > max_output_size:
             selected_indices = np.arange(max_output_size)
@@ -214,7 +215,7 @@ def non_max_suppression(
 
     boxes = boxlist.get()
     num_boxes = boxlist.num_boxes()
-    # is_index_valid is True only for all remaining valid boxes,
+    # is_index_valid 只会对仍然有效的候选框保持 True。
     is_index_valid = np.full(num_boxes, 1, dtype=bool)
     selected_indices = []
     num_output = 0
@@ -242,58 +243,52 @@ def non_max_suppression(
 def multi_class_non_max_suppression(
     boxlist, score_thresh, iou_thresh, max_output_size
 ):
-    """Multi-class version of non maximum suppression.
+    """多类别版本的非极大值抑制。
 
-  This op greedily selects a subset of detection bounding boxes, pruning
-  away boxes that have high IOU (intersection over union) overlap (> thresh)
-  with already selected boxes.  It operates independently for each class for
-  which scores are provided (via the scores field of the input box_list),
-  pruning boxes with score less than a provided threshold prior to
-  applying NMS.
+      这个操作会贪心地选择一部分检测框，并删除那些与已选框有较高 IOU
+      (intersection over union, 大于阈值) 重叠的框。它会对输入 box_list 的
+      scores 字段中提供的每个类别独立运行，并在 NMS 前先删掉低于分数阈值的框。
 
-  Args:
-    boxlist: BoxList holding N boxes.  Must contain a 'scores' field
-      representing detection scores.  This scores field is a tensor that can
-      be 1 dimensional (in the case of a single class) or 2-dimensional, which
-      which case we assume that it takes the shape [num_boxes, num_classes].
-      We further assume that this rank is known statically and that
-      scores.shape[1] is also known (i.e., the number of classes is fixed
-      and known at graph construction time).
-    score_thresh: scalar threshold for score (low scoring boxes are removed).
-    iou_thresh: scalar threshold for IOU (boxes that that high IOU overlap
-      with previously selected boxes are removed).
-    max_output_size: maximum number of retained boxes per class.
+      参数：
+        boxlist: 保存 N 个框的 BoxList，必须包含表示检测分数的 'scores' 字段。
+          scores 可以是一维（单类别），也可以是二维；二维时假设 shape 为
+          [num_boxes, num_classes]。还假设 rank 和 scores.shape[1] 都是已知的
+          （也就是类别数固定）。
+        score_thresh: 分数标量阈值，低分框会被移除。
+        iou_thresh: IOU 标量阈值，与已选框 IOU 过高的框会被移除。
+        max_output_size: 每个类别最多保留的框数量。
 
-  Returns:
-    a BoxList holding M boxes with a rank-1 scores field representing
-      corresponding scores for each box with scores sorted in decreasing order
-      and a rank-1 classes field representing a class label for each box.
-  Raises:
-    ValueError: if iou_thresh is not in [0, 1] or if input boxlist does not have
-      a valid scores field.
-  """
+      返回：
+        保存 M 个框的 BoxList，其中一维 scores 字段表示每个框的分数并按降序排列，
+          一维 classes 字段表示每个框的类别标签。
+
+      异常：
+        ValueError: 如果 iou_thresh 不在 [0, 1]，或输入 boxlist 没有合法的
+          scores 字段。
+
+    """
     if not 0 <= iou_thresh <= 1.0:
-        raise ValueError("thresh must be between 0 and 1")
+        raise ValueError("thresh 必须位于 0 到 1 之间。")
     if not isinstance(boxlist, np_box_list.BoxList):
-        raise ValueError("boxlist must be a BoxList")
+        raise ValueError("boxlist 必须是 BoxList。")
     if not boxlist.has_field("scores"):
-        raise ValueError("input boxlist must have 'scores' field")
+        raise ValueError("输入 boxlist 必须包含 'scores' 字段。")
     scores = boxlist.get_field("scores")
     if len(scores.shape) == 1:
         scores = np.reshape(scores, [-1, 1])
     elif len(scores.shape) == 2:
         if scores.shape[1] is None:
             raise ValueError(
-                "scores field must have statically defined second " "dimension"
+                "scores 字段必须静态定义第二维。"
             )
     else:
-        raise ValueError("scores field must be of rank 1 or 2")
+        raise ValueError("scores 字段必须是 1 维或 2 维。")
     num_boxes = boxlist.num_boxes()
     num_scores = scores.shape[0]
     num_classes = scores.shape[1]
 
     if num_boxes != num_scores:
-        raise ValueError("Incorrect scores field length: actual vs expected.")
+        raise ValueError("scores 字段长度错误：实际长度与期望长度不一致。")
 
     selected_boxes_list = []
     for class_idx in range(num_classes):
@@ -319,16 +314,17 @@ def multi_class_non_max_suppression(
 
 
 def scale(boxlist, y_scale, x_scale):
-    """Scale box coordinates in x and y dimensions.
+    """分别在 y 和 x 维度上缩放边界框坐标。
 
-  Args:
-    boxlist: BoxList holding N boxes
-    y_scale: float
-    x_scale: float
+      参数：
+        boxlist: 保存 N 个框的 BoxList。
+        y_scale: float，y 方向缩放比例。
+        x_scale: float，x 方向缩放比例。
 
-  Returns:
-    boxlist: BoxList holding N boxes
-  """
+      返回：
+        boxlist: 保存 N 个缩放后框的 BoxList。
+
+    """
     y_min, x_min, y_max, x_max = np.array_split(boxlist.get(), 4, axis=1)
     y_min = y_scale * y_min
     y_max = y_scale * y_max
@@ -347,21 +343,20 @@ def scale(boxlist, y_scale, x_scale):
 
 
 def clip_to_window(boxlist, window):
-    """Clip bounding boxes to a window.
+    """将边界框裁剪到指定 window 内。
 
-  This op clips input bounding boxes (represented by bounding box
-  corners) to a window, optionally filtering out boxes that do not
-  overlap at all with the window.
+      该操作把输入边界框（用角点坐标表示）限制在 window 范围内，并过滤掉与
+      window 完全没有重叠的框。
 
-  Args:
-    boxlist: BoxList holding M_in boxes
-    window: a numpy array of shape [4] representing the
-            [y_min, x_min, y_max, x_max] window to which the op
-            should clip boxes.
+      参数：
+        boxlist: 保存 M_in 个框的 BoxList。
+        window: shape 为 [4] 的 numpy array，表示用于裁剪的
+                说明：[y_min, x_min, y_max, x_max] window。
 
-  Returns:
-    a BoxList holding M_out boxes where M_out <= M_in
-  """
+      返回：
+        保存 M_out 个框的 BoxList，其中 M_out <= M_in。
+
+    """
     y_min, x_min, y_max, x_max = np.array_split(boxlist.get(), 4, axis=1)
     win_y_min = window[0]
     win_x_min = window[1]
@@ -383,24 +378,24 @@ def clip_to_window(boxlist, window):
 
 
 def prune_non_overlapping_boxes(boxlist1, boxlist2, minoverlap=0.0):
-    """Prunes the boxes in boxlist1 that overlap less than thresh with boxlist2.
+    """删除 boxlist1 中与 boxlist2 重叠小于阈值的框。
 
-  For each box in boxlist1, we want its IOA to be more than minoverlap with
-  at least one of the boxes in boxlist2. If it does not, we remove it.
+      对 boxlist1 中的每个框，我们要求它至少与 boxlist2 中一个框的 IOA 大于
+      minoverlap；否则就移除该框。
 
-  Args:
-    boxlist1: BoxList holding N boxes.
-    boxlist2: BoxList holding M boxes.
-    minoverlap: Minimum required overlap between boxes, to count them as
-                overlapping.
+      参数：
+        boxlist1: 保存 N 个框的 BoxList。
+        boxlist2: 保存 M 个框的 BoxList。
+        minoverlap: 认为两个框有重叠所需的最小重叠值。
 
-  Returns:
-    A pruned boxlist with size [N', 4].
-  """
-    intersection_over_area = ioa(boxlist2, boxlist1)  # [M, N] tensor
+      返回：
+        裁剪后的 boxlist，大小为 [N', 4]。
+
+    """
+    intersection_over_area = ioa(boxlist2, boxlist1)  # 形状/映射说明：[M, N] tensor
     intersection_over_area = np.amax(
         intersection_over_area, axis=0
-    )  # [N] tensor
+    )  # 形状/映射说明：[N] tensor
     keep_bool = np.greater_equal(intersection_over_area, np.array(minoverlap))
     keep_inds = np.nonzero(keep_bool)[0]
     new_boxlist1 = gather(boxlist1, keep_inds)
@@ -408,23 +403,21 @@ def prune_non_overlapping_boxes(boxlist1, boxlist2, minoverlap=0.0):
 
 
 def prune_outside_window(boxlist, window):
-    """Prunes bounding boxes that fall outside a given window.
+    """删除落在给定 window 外部的边界框。
 
-  This function prunes bounding boxes that even partially fall outside the given
-  window. See also ClipToWindow which only prunes bounding boxes that fall
-  completely outside the window, and clips any bounding boxes that partially
-  overflow.
+      只要边界框有一部分落在给定 window 外，这个函数就会删除它。另见
+      ClipToWindow：它只删除完全在 window 外的框，并会裁剪部分越界的框。
 
-  Args:
-    boxlist: a BoxList holding M_in boxes.
-    window: a numpy array of size 4, representing [ymin, xmin, ymax, xmax]
-            of the window.
+      参数：
+        boxlist: 保存 M_in 个框的 BoxList。
+        window: size 为 4 的 numpy array，表示 window 的
+                说明：[ymin, xmin, ymax, xmax]。
 
-  Returns:
-    pruned_corners: a tensor with shape [M_out, 4] where M_out <= M_in.
-    valid_indices: a tensor with shape [M_out] indexing the valid bounding boxes
-     in the input tensor.
-  """
+      返回：
+        pruned_corners: shape 为 [M_out, 4] 的 tensor，其中 M_out <= M_in。
+        valid_indices: shape 为 [M_out] 的 tensor，表示输入 tensor 中有效框的索引。
+
+    """
 
     y_min, x_min, y_max, x_max = np.array_split(boxlist.get(), 4, axis=1)
     win_y_min = window[0]
@@ -446,34 +439,32 @@ def prune_outside_window(boxlist, window):
 
 
 def concatenate(boxlists, fields=None):
-    """Concatenate list of BoxLists.
+    """拼接多个 BoxList。
 
-  This op concatenates a list of input BoxLists into a larger BoxList.  It also
-  handles concatenation of BoxList fields as long as the field tensor shapes
-  are equal except for the first dimension.
+      该操作把多个输入 BoxList 拼成一个更大的 BoxList。只要字段 tensor 除第一维外
+      shape 相同，也会同时拼接这些字段。
 
-  Args:
-    boxlists: list of BoxList objects
-    fields: optional list of fields to also concatenate.  By default, all
-      fields from the first BoxList in the list are included in the
-      concatenation.
+      参数：
+        boxlists: BoxList 对象列表。
+        fields: 可选字段列表，表示也要拼接的字段。默认会包含列表中第一个
+          BoxList 的所有字段。
 
-  Returns:
-    a BoxList with number of boxes equal to
-      sum([boxlist.num_boxes() for boxlist in BoxList])
-  Raises:
-    ValueError: if boxlists is invalid (i.e., is not a list, is empty, or
-      contains non BoxList objects), or if requested fields are not contained in
-      all boxlists
-  """
+      返回：
+        一个 BoxList，其框数量等于 sum([boxlist.num_boxes() for boxlist in BoxList])。
+
+      异常：
+        ValueError: 如果 boxlists 不合法（不是列表、为空、或包含非 BoxList 对象），
+          或请求的字段没有同时存在于所有 boxlists 中。
+
+    """
     if not isinstance(boxlists, list):
-        raise ValueError("boxlists should be a list")
+        raise ValueError("boxlists 必须是 list。")
     if not boxlists:
-        raise ValueError("boxlists should have nonzero length")
+        raise ValueError("boxlists 不能为空。")
     for boxlist in boxlists:
         if not isinstance(boxlist, np_box_list.BoxList):
             raise ValueError(
-                "all elements of boxlists should be BoxList objects"
+                "boxlists 中所有元素都必须是 BoxList 对象。"
             )
     concatenated = np_box_list.BoxList(
         np.vstack([boxlist.get() for boxlist in boxlists])
@@ -485,13 +476,12 @@ def concatenate(boxlists, fields=None):
         first_field_shape = first_field_shape[1:]
         for boxlist in boxlists:
             if not boxlist.has_field(field):
-                raise ValueError("boxlist must contain all requested fields")
+                raise ValueError("boxlist 必须包含所有请求字段。")
             field_shape = boxlist.get_field(field).shape
             field_shape = field_shape[1:]
             if field_shape != first_field_shape:
                 raise ValueError(
-                    "field %s must have same shape for all boxlists "
-                    "except for the 0th dimension." % field
+                    "除第 0 维外，字段 %s 在所有 boxlists 中的 shape 必须一致。" % field
                 )
         concatenated_field = np.concatenate(
             [boxlist.get_field(field) for boxlist in boxlists], axis=0
@@ -501,34 +491,31 @@ def concatenate(boxlists, fields=None):
 
 
 def filter_scores_greater_than(boxlist, thresh):
-    """Filter to keep only boxes with score exceeding a given threshold.
+    """只保留分数高于给定阈值的框。
 
-  This op keeps the collection of boxes whose corresponding scores are
-  greater than the input threshold.
+      该操作会保留对应 scores 大于输入阈值的框集合。
 
-  Args:
-    boxlist: BoxList holding N boxes.  Must contain a 'scores' field
-      representing detection scores.
-    thresh: scalar threshold
+      参数：
+        boxlist: 保存 N 个框的 BoxList，必须包含表示检测分数的 'scores' 字段。
+        thresh: 标量阈值。
 
-  Returns:
-    a BoxList holding M boxes where M <= N
+      返回：
+        保存 M 个框的 BoxList，其中 M <= N。
 
-  Raises:
-    ValueError: if boxlist not a BoxList object or if it does not
-      have a scores field
-  """
+      异常：
+        ValueError: 如果 boxlist 不是 BoxList 对象，或它没有 scores 字段。
+
+    """
     if not isinstance(boxlist, np_box_list.BoxList):
-        raise ValueError("boxlist must be a BoxList")
+        raise ValueError("boxlist 必须是 BoxList。")
     if not boxlist.has_field("scores"):
-        raise ValueError("input boxlist must have 'scores' field")
+        raise ValueError("输入 boxlist 必须包含 'scores' 字段。")
     scores = boxlist.get_field("scores")
     if len(scores.shape) > 2:
-        raise ValueError("Scores should have rank 1 or 2")
+        raise ValueError("scores 必须是 1 维或 2 维。")
     if len(scores.shape) == 2 and scores.shape[1] != 1:
         raise ValueError(
-            "Scores should have rank 1 or have shape "
-            "consistent with [None, 1]"
+            "scores 应为 1 维，或 shape 与 [None, 1] 一致。"
         )
     high_score_indices = np.reshape(
         np.where(np.greater(scores, thresh)), [-1]
@@ -537,24 +524,22 @@ def filter_scores_greater_than(boxlist, thresh):
 
 
 def change_coordinate_frame(boxlist, window):
-    """Change coordinate frame of the boxlist to be relative to window's frame.
+    """把 boxlist 的坐标系转换为相对于 window 的坐标系。
 
-  Given a window of the form [ymin, xmin, ymax, xmax],
-  changes bounding box coordinates from boxlist to be relative to this window
-  (e.g., the min corner maps to (0,0) and the max corner maps to (1,1)).
+      给定 [ymin, xmin, ymax, xmax] 形式的 window，把 boxlist 中的边界框坐标
+      转成相对于该 window 的坐标（例如最小角映射到 (0,0)，最大角映射到 (1,1)）。
 
-  An example use case is data augmentation: where we are given groundtruth
-  boxes (boxlist) and would like to randomly crop the image to some
-  window (window). In this case we need to change the coordinate frame of
-  each groundtruth box to be relative to this new window.
+      一个常见场景是数据增强：已知真实标注框 (boxlist)，并希望把图像随机
+      裁剪到某个 window。此时需要把每个真实标注框的坐标转换到新 window。
 
-  Args:
-    boxlist: A BoxList object holding N boxes.
-    window: a size 4 1-D numpy array.
+      参数：
+        boxlist: 保存 N 个框的 BoxList 对象。
+        window: size 为 4 的 1-D numpy array。
 
-  Returns:
-    Returns a BoxList object with N boxes.
-  """
+      返回：
+        返回包含 N 个框的 BoxList 对象。
+
+    """
     win_height = window[2] - window[0]
     win_width = window[3] - window[1]
     boxlist_new = scale(
@@ -570,15 +555,16 @@ def change_coordinate_frame(boxlist, window):
 
 
 def _copy_extra_fields(boxlist_to_copy_to, boxlist_to_copy_from):
-    """Copies the extra fields of boxlist_to_copy_from to boxlist_to_copy_to.
+    """把 boxlist_to_copy_from 的附加字段复制到 boxlist_to_copy_to。
 
-  Args:
-    boxlist_to_copy_to: BoxList to which extra fields are copied.
-    boxlist_to_copy_from: BoxList from which fields are copied.
+      参数：
+        boxlist_to_copy_to: 接收附加字段的 BoxList。
+        boxlist_to_copy_from: 提供附加字段的 BoxList。
 
-  Returns:
-    boxlist_to_copy_to with extra fields.
-  """
+      返回：
+        带有附加字段的 boxlist_to_copy_to。
+
+    """
     for field in boxlist_to_copy_from.get_extra_fields():
         boxlist_to_copy_to.add_field(
             field, boxlist_to_copy_from.get_field(field)
@@ -589,5 +575,6 @@ def _copy_extra_fields(boxlist_to_copy_to, boxlist_to_copy_from):
 def _update_valid_indices_by_removing_high_iou_boxes(
     selected_indices, is_index_valid, intersect_over_union, threshold
 ):
+    """根据已选框的最大 IOU，把重叠过高的候选框标记为无效。"""
     max_iou = np.max(intersect_over_union[:, selected_indices], axis=1)
     return np.logical_and(is_index_valid, max_iou <= threshold)

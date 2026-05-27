@@ -1,21 +1,17 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
-"""Learning rate policy."""
+"""学习率调度策略工具。"""
 
 import math
 
 
 def get_lr_at_epoch(cfg, cur_epoch):
-    """
-    Retrieve the learning rate of the current epoch with the option to perform
-    warm up in the beginning of the training stage.
-    Args:
-        cfg (CfgNode): configs. Details can be found in
-            slowfast/config/defaults.py
-        cur_epoch (float): the number of epoch of the current training stage.
+    """按配置中的学习率策略计算当前 epoch 的学习率。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或检查点流程。
     """
     lr = get_lr_func(cfg.SOLVER.LR_POLICY)(cfg, cur_epoch)
-    # Perform warm up.
+    # 执行预热阶段。
     if cur_epoch < cfg.SOLVER.WARMUP_EPOCHS:
         lr_start = cfg.SOLVER.WARMUP_START_LR
         lr_end = get_lr_func(cfg.SOLVER.LR_POLICY)(
@@ -27,15 +23,9 @@ def get_lr_at_epoch(cfg, cur_epoch):
 
 
 def lr_func_cosine(cfg, cur_epoch):
-    """
-    Retrieve the learning rate to specified values at specified epoch with the
-    cosine learning rate schedule. Details can be found in:
-    Ilya Loshchilov, and  Frank Hutter
-    SGDR: Stochastic Gradient Descent With Warm Restarts.
-    Args:
-        cfg (CfgNode): configs. Details can be found in
-            slowfast/config/defaults.py
-        cur_epoch (float): the number of epoch of the current training stage.
+    """余弦学习率调度函数。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或检查点流程。
     """
     assert cfg.SOLVER.COSINE_END_LR < cfg.SOLVER.BASE_LR
     return (
@@ -47,41 +37,33 @@ def lr_func_cosine(cfg, cur_epoch):
 
 
 def lr_func_steps_with_relative_lrs(cfg, cur_epoch):
-    """
-    Retrieve the learning rate to specified values at specified epoch with the
-    steps with relative learning rate schedule.
-    Args:
-        cfg (CfgNode): configs. Details can be found in
-            slowfast/config/defaults.py
-        cur_epoch (float): the number of epoch of the current training stage.
+    """分段学习率调度函数，使用相对学习率系数。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或检查点流程。
     """
     ind = get_step_index(cfg, cur_epoch)
     return cfg.SOLVER.LRS[ind] * cfg.SOLVER.BASE_LR
 
 
 def get_step_index(cfg, cur_epoch):
-    """
-    Retrieves the lr step index for the given epoch.
-    Args:
-        cfg (CfgNode): configs. Details can be found in
-            slowfast/config/defaults.py
-        cur_epoch (float): the number of epoch of the current training stage.
+    """根据当前 epoch 找到对应的学习率 step 区间。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或检查点流程。
     """
     steps = cfg.SOLVER.STEPS + [cfg.SOLVER.MAX_EPOCH]
-    for ind, step in enumerate(steps):  # NoQA
+    for ind, step in enumerate(steps):  # 兼容静态检查：保留当前循环变量命名。
         if cur_epoch < step:
             break
     return ind - 1
 
 
 def get_lr_func(lr_policy):
-    """
-    Given the configs, retrieve the specified lr policy function.
-    Args:
-        lr_policy (string): the learning rate policy to use for the job.
+    """根据配置名返回具体学习率策略函数。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或检查点流程。
     """
     policy = "lr_func_" + lr_policy
     if policy not in globals():
-        raise NotImplementedError("Unknown LR policy: {}".format(lr_policy))
+        raise NotImplementedError("未知 LR 策略: {}".format(lr_policy))
     else:
         return globals()[policy]

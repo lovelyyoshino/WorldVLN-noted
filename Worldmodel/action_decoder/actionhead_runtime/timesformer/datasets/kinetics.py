@@ -18,49 +18,46 @@ logger = logging.get_logger(__name__)
 @DATASET_REGISTRY.register()
 class Kinetics(torch.utils.data.Dataset):
     """
-    Kinetics video loader. Construct the Kinetics video loader, then sample
-    clips from the videos. For training and validation, a single clip is
-    randomly sampled from every video with random cropping, scaling, and
-    flipping. For testing, multiple clips are uniformaly sampled from every
-    video with uniform cropping. For uniform cropping, we take the left, center,
-    and right crop if the width is larger than height, or take top, center, and
-    bottom crop if the height is larger than the width.
+    Kinetics 视频数据加载器。
+
+    训练和验证阶段会从每个视频中随机采样一个片段，并配合随机裁剪、缩放和
+    翻转；测试阶段会从每个视频中均匀采样多个片段，再做均匀裁剪。若宽大于高，
+    则裁剪左/中/右；若高大于宽，则裁剪上/中/下。
     """
 
     def __init__(self, cfg, mode, num_retries=10):
         """
-        Construct the Kinetics video loader with a given csv file. The format of
-        the csv file is:
-        ```
-        path_to_video_1 label_1
-        path_to_video_2 label_2
-        ...
-        path_to_video_N label_N
-        ```
-        Args:
-            cfg (CfgNode): configs.
-            mode (string): Options includes `train`, `val`, or `test` mode.
-                For the train and val mode, the data loader will take data
-                from the train or val set, and sample one clip per video.
-                For the test mode, the data loader will take data from test set,
-                and sample multiple clips per video.
-            num_retries (int): number of retries.
+                根据给定的 csv 文件构建 Kinetics 数据加载器。
+
+                csv 文件格式如下：
+                ```
+                说明：path_to_video_1 label_1
+                说明：path_to_video_2 label_2
+                ...
+                说明：path_to_video_N label_N
+                ```
+                参数：
+                    cfg (CfgNode): 配置对象。
+                    mode (string): 支持 `train`、`val` 或 `test`。
+                        `train` 和 `val` 阶段每个视频采样一个片段；
+                        `test` 阶段每个视频采样多个片段。
+                    num_retries (int): 解码失败后的重试次数。
+
         """
-        # Only support train, val, and test mode.
+        # 仅支持 train、val 和 test 三种模式。
         assert mode in [
             "train",
             "val",
             "test",
-        ], "Split '{}' not supported for Kinetics".format(mode)
+        ], "Kinetics 不支持 split '{}'".format(mode)
         self.mode = mode
         self.cfg = cfg
 
         self._video_meta = {}
         self._num_retries = num_retries
-        # For training or validation mode, one single clip is sampled from every
-        # video. For testing, NUM_ENSEMBLE_VIEWS clips are sampled from every
-        # video. For every clip, NUM_SPATIAL_CROPS is cropped spatially from
-        # the frames.
+        # 训练或验证时，每个视频只采样一个片段。
+        # 测试时，每个视频采样 NUM_ENSEMBLE_VIEWS 个片段；
+        # 每个片段再按 NUM_SPATIAL_CROPS 做空间裁剪。
         if self.mode in ["train", "val"]:
             self._num_clips = 1
         elif self.mode in ["test"]:
@@ -68,17 +65,17 @@ class Kinetics(torch.utils.data.Dataset):
                 cfg.TEST.NUM_ENSEMBLE_VIEWS * cfg.TEST.NUM_SPATIAL_CROPS
             )
 
-        logger.info("Constructing Kinetics {}...".format(mode))
+        logger.info("正在构建 Kinetics {}...".format(mode))
         self._construct_loader()
 
     def _construct_loader(self):
         """
-        Construct the video loader.
+        构建视频数据列表。
         """
         path_to_file = os.path.join(
             self.cfg.DATA.PATH_TO_DATA_DIR, "{}.csv".format(self.mode)
         )
-        assert PathManager.exists(path_to_file), "{} dir not found".format(
+        assert PathManager.exists(path_to_file), "未找到 {} 目录".format(
             path_to_file
         )
 
@@ -103,37 +100,39 @@ class Kinetics(torch.utils.data.Dataset):
                     self._video_meta[clip_idx * self._num_clips + idx] = {}
         assert (
             len(self._path_to_videos) > 0
-        ), "Failed to load Kinetics split {} from {}".format(
-            self._split_idx, path_to_file
+        ), "从 {} 加载 Kinetics split {} 失败".format(
+            path_to_file, self._split_idx
         )
         logger.info(
-            "Constructing kinetics dataloader (size: {}) from {}".format(
-                len(self._path_to_videos), path_to_file
+            "正在从 {} 构建 Kinetics 数据加载列表（样本数：{}）".format(
+                path_to_file, len(self._path_to_videos)
             )
         )
 
     def __getitem__(self, index):
         """
-        Given the video index, return the list of frames, label, and video
-        index if the video can be fetched and decoded successfully, otherwise
-        repeatly find a random video that can be decoded as a replacement.
-        Args:
-            index (int): the video index provided by the pytorch sampler.
-        Returns:
-            frames (tensor): the frames of sampled from the video. The dimension
-                is `channel` x `num frames` x `height` x `width`.
-            label (int): the label of the current video.
-            index (int): if the video provided by pytorch sampler can be
-                decoded, then return the index of the video. If not, return the
-                index of the video replacement that can be decoded.
+                根据视频索引返回视频帧、标签和实际使用的索引。
+
+                如果当前视频可以成功读取并解码，就返回其采样结果；否则会反复尝试，直到
+                找到一个可解码的替代视频。
+
+                参数：
+                    index (int): PyTorch 采样器提供的视频索引。
+
+                返回：
+                    frames (tensor): 采样后的视频帧，维度为
+                        说明：`channel` x `num frames` x `height` x `width`。
+                    label (int): 当前视频的标签。
+                    index (int): 若原视频可解码，则返回原索引；否则返回替代视频索引。
+
         """
         short_cycle_idx = None
-        # When short cycle is used, input index is a tupple.
+        # 使用 short cycle 时，输入 index 是一个 tuple。
         if isinstance(index, tuple):
             index, short_cycle_idx = index
 
         if self.mode in ["train", "val"]:
-            # -1 indicates random sampling.
+            # -1 表示随机采样。
             temporal_sample_index = -1
             spatial_sample_index = -1
             min_scale = self.cfg.DATA.TRAIN_JITTER_SCALES[0]
@@ -147,8 +146,7 @@ class Kinetics(torch.utils.data.Dataset):
                     )
                 )
             if self.cfg.MULTIGRID.DEFAULT_S > 0:
-                # Decreasing the scale is equivalent to using a larger "span"
-                # in a sampling grid.
+                # 减小 scale 等价于在采样网格中使用更大的 span。
                 min_scale = int(
                     round(
                         float(min_scale)
@@ -161,9 +159,9 @@ class Kinetics(torch.utils.data.Dataset):
                 self._spatial_temporal_idx[index]
                 // self.cfg.TEST.NUM_SPATIAL_CROPS
             )
-            # spatial_sample_index is in [0, 1, 2]. Corresponding to left,
-            # center, or right if width is larger than height, and top, middle,
-            # or bottom if height is larger than width.
+            # `spatial_sample_index` 取值为 [0, 1, 2]。
+            # 宽大于高时分别表示左、中、右；
+            # 高大于宽时分别表示上、中、下。
             spatial_sample_index = (
                 (
                     self._spatial_temporal_idx[index]
@@ -178,19 +176,18 @@ class Kinetics(torch.utils.data.Dataset):
                 else [self.cfg.DATA.TRAIN_JITTER_SCALES[0]] * 2
                 + [self.cfg.DATA.TEST_CROP_SIZE]
             )
-            # The testing is deterministic and no jitter should be performed.
-            # min_scale, max_scale, and crop_size are expect to be the same.
+            # 测试阶段是确定性的，不应执行随机抖动。
+            # min_scale、max_scale 和 crop_size 应保持一致。
             assert len({min_scale, max_scale}) == 1
         else:
             raise NotImplementedError(
-                "Does not support {} mode".format(self.mode)
+                "不支持 {} 模式".format(self.mode)
             )
         sampling_rate = utils.get_random_sampling_rate(
             self.cfg.MULTIGRID.LONG_CYCLE_SAMPLING_RATE,
             self.cfg.DATA.SAMPLING_RATE,
         )
-        # Try to decode and sample a clip from a video. If the video can not be
-        # decoded, repeatly find a random video replacement that can be decoded.
+        # 尝试解码并采样视频；若失败，则反复寻找可解码的替代视频。
         for i_try in range(self._num_retries):
             video_container = None
             try:
@@ -201,23 +198,23 @@ class Kinetics(torch.utils.data.Dataset):
                 )
             except Exception as e:
                 logger.info(
-                    "Failed to load video from {} with error {}".format(
+                    "从 {} 加载视频失败，错误为 {}".format(
                         self._path_to_videos[index], e
                     )
                 )
-            # Select a random video if the current video was not able to access.
+            # 当前视频不可访问时，随机换一个视频继续尝试。
             if video_container is None:
                 logger.warning(
-                    "Failed to meta load video idx {} from {}; trial {}".format(
+                    "加载视频元信息失败，索引 {}，路径 {}；第 {} 次尝试".format(
                         index, self._path_to_videos[index], i_try
                     )
                 )
                 if self.mode not in ["test"] and i_try > self._num_retries // 2:
-                    # let's try another one
+                    # 改试另一个视频
                     index = random.randint(0, len(self._path_to_videos) - 1)
                 continue
 
-            # Decode video. Meta info is used to perform selective decoding.
+            # 解码视频；元信息用于选择性解码。
             frames = decoder.decode(
                 video_container,
                 sampling_rate,
@@ -230,30 +227,29 @@ class Kinetics(torch.utils.data.Dataset):
                 max_spatial_scale=min_scale,
             )
 
-            # If decoding failed (wrong format, video is too short, and etc),
-            # select another video.
+            # 如果解码失败（格式错误、视频过短等），则换一个视频。
             if frames is None:
                 logger.warning(
-                    "Failed to decode video idx {} from {}; trial {}".format(
+                    "解码视频失败，索引 {}，路径 {}；第 {} 次尝试".format(
                         index, self._path_to_videos[index], i_try
                     )
                 )
                 if self.mode not in ["test"] and i_try > self._num_retries // 2:
-                    # let's try another one
+                    # 改试另一个视频
                     index = random.randint(0, len(self._path_to_videos) - 1)
                 continue
 
 
             label = self._labels[index]
 
-            # Perform color normalization.
+            # 执行颜色归一化。
             frames = utils.tensor_normalize(
                 frames, self.cfg.DATA.MEAN, self.cfg.DATA.STD
             )
 
-            # T H W C -> C T H W.
+            # 将张量维度从 `T H W C` 调整为 `C T H W`。
             frames = frames.permute(3, 0, 1, 2)
-            # Perform data augmentation.
+            # 执行数据增强。
             frames = utils.spatial_sampling(
                 frames,
                 spatial_idx=spatial_sample_index,
@@ -268,7 +264,7 @@ class Kinetics(torch.utils.data.Dataset):
             if not self.cfg.MODEL.ARCH in ['vit']:
                 frames = utils.pack_pathway_output(self.cfg, frames)
             else:
-                # Perform temporal sampling from the fast pathway.
+                # 从快速通路中执行时间采样。
                 frames = torch.index_select(
                      frames,
                      1,
@@ -281,14 +277,14 @@ class Kinetics(torch.utils.data.Dataset):
             return frames, label, index, {}
         else:
             raise RuntimeError(
-                "Failed to fetch video after {} retries.".format(
+                "重试 {} 次后仍未能获取视频。".format(
                     self._num_retries
                 )
             )
 
     def __len__(self):
-        """
-        Returns:
-            (int): the number of videos in the dataset.
+        """返回数据集样本数量，供 DataLoader 决定迭代长度。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+        数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
         """
         return len(self._path_to_videos)

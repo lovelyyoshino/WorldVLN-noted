@@ -13,7 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 
-"""Numpy BoxList classes and functions."""
+"""基于 numpy 的 BoxList 类和辅助函数。"""
 
 from __future__ import (
     absolute_import,
@@ -25,100 +25,103 @@ import numpy as np
 
 
 class BoxList(object):
-    """Box collection.
+    """边界框集合。
 
-  BoxList represents a list of bounding boxes as numpy array, where each
-  bounding box is represented as a row of 4 numbers,
-  [y_min, x_min, y_max, x_max].  It is assumed that all bounding boxes within a
-  given list correspond to a single image.
+  BoxList 用 numpy array 表示一组边界框，每一行是一个框，
+  格式为 [y_min, x_min, y_max, x_max]。这里默认同一个 BoxList 中的
+  所有框都来自同一张图像。
 
-  Optionally, users can add additional related fields (such as
-  objectness/classification scores).
+  用户也可以额外添加相关字段，例如目标置信度或分类分数。
   """
 
     def __init__(self, data):
-        """Constructs box collection.
+        """构造一个边界框集合。
 
-    Args:
-      data: a numpy array of shape [N, 4] representing box coordinates
+            参数：
+              data: shape 为 [N, 4] 的 numpy array，表示框坐标。
 
-    Raises:
-      ValueError: if bbox data is not a numpy array
-      ValueError: if invalid dimensions for bbox data
-    """
+            异常：
+              ValueError: 如果边界框数据不是 numpy array。
+              ValueError: 如果边界框数据维度不合法。
+
+        """
         if not isinstance(data, np.ndarray):
-            raise ValueError("data must be a numpy array.")
+            raise ValueError("data 必须是 numpy array。")
         if len(data.shape) != 2 or data.shape[1] != 4:
-            raise ValueError("Invalid dimensions for box data.")
+            raise ValueError("边界框数据维度不合法，应为 [N, 4]。")
         if data.dtype != np.float32 and data.dtype != np.float64:
             raise ValueError(
-                "Invalid data type for box data: float is required."
+                "边界框数据类型不合法：必须是 float。"
             )
         if not self._is_valid_boxes(data):
             raise ValueError(
-                "Invalid box data. data must be a numpy array of "
-                "N*[y_min, x_min, y_max, x_max]"
+                "边界框数据坐标不合法。data 必须是形如 "
+                "N*[y_min, x_min, y_max, x_max] 的 numpy array。"
             )
         self.data = {"boxes": data}
 
     def num_boxes(self):
-        """Return number of boxes held in collections."""
+        """返回集合中保存的边界框数量。"""
         return self.data["boxes"].shape[0]
 
     def get_extra_fields(self):
-        """Return all non-box fields."""
+        """返回所有非边界框的附加字段名。"""
         return [k for k in self.data.keys() if k != "boxes"]
 
     def has_field(self, field):
+        """判断指定字段是否已经存在于当前 BoxList 中。"""
         return field in self.data
 
     def add_field(self, field, field_data):
-        """Add data to a specified field.
+        """向指定字段添加数据。
 
-    Args:
-      field: a string parameter used to speficy a related field to be accessed.
-      field_data: a numpy array of [N, ...] representing the data associated
-          with the field.
-    Raises:
-      ValueError: if the field is already exist or the dimension of the field
-          data does not matches the number of boxes.
-    """
+            参数：
+              field: 字符串，表示要访问或保存的相关字段名。
+              field_data: shape 为 [N, ...] 的 numpy array，表示该字段对应的数据。
+
+            异常：
+              ValueError: 如果字段已存在，或字段数据第一维与框数量不一致。
+
+        """
         if self.has_field(field):
-            raise ValueError("Field " + field + "already exists")
+            raise ValueError("字段 " + field + " 已存在。")
         if len(field_data.shape) < 1 or field_data.shape[0] != self.num_boxes():
-            raise ValueError("Invalid dimensions for field data")
+            raise ValueError("字段数据维度不合法，第一维必须等于框数量。")
         self.data[field] = field_data
 
     def get(self):
-        """Convenience function for accesssing box coordinates.
+        """便捷地获取边界框坐标。
 
-    Returns:
-      a numpy array of shape [N, 4] representing box corners
-    """
+            返回：
+              shape 为 [N, 4] 的 numpy array，表示框的四个角坐标。
+
+        """
         return self.get_field("boxes")
 
     def get_field(self, field):
-        """Accesses data associated with the specified field in the box collection.
+        """读取边界框集合中指定字段的数据。
 
-    Args:
-      field: a string parameter used to speficy a related field to be accessed.
+            参数：
+              field: 字符串，表示要访问的相关字段名。
 
-    Returns:
-      a numpy 1-d array representing data of an associated field
+            返回：
+              numpy array，表示该字段关联的数据。
 
-    Raises:
-      ValueError: if invalid field
-    """
+            异常：
+              ValueError: 如果字段不存在。
+
+        """
         if not self.has_field(field):
-            raise ValueError("field {} does not exist".format(field))
+            raise ValueError("字段 {} 不存在。".format(field))
         return self.data[field]
 
     def get_coordinates(self):
-        """Get corner coordinates of boxes.
+        """获取所有框的四个角坐标。
 
-    Returns:
-     a list of 4 1-d numpy arrays [y_min, x_min, y_max, x_max]
-    """
+            返回：
+             由 4 个 1-D numpy array 组成的列表：[y_min, x_min, y_max, x_max]。
+
+        """
         box_coordinates = self.get()
         y_min = box_coordinates[:, 0]
         x_min = box_coordinates[:, 1]
@@ -127,15 +130,15 @@ class BoxList(object):
         return [y_min, x_min, y_max, x_max]
 
     def _is_valid_boxes(self, data):
-        """Check whether data fullfills the format of N*[ymin, xmin, ymax, xmin].
+        """检查数据是否满足 N*[ymin, xmin, ymax, xmax] 的格式。
 
-    Args:
-      data: a numpy array of shape [N, 4] representing box coordinates
+            参数：
+              data: shape 为 [N, 4] 的 numpy array，表示框坐标。
 
-    Returns:
-      a boolean indicating whether all ymax of boxes are equal or greater than
-          ymin, and all xmax of boxes are equal or greater than xmin.
-    """
+            返回：
+              bool，表示每个框是否满足 ymax >= ymin 且 xmax >= xmin。
+
+        """
         if data.shape[0] > 0:
             for i in range(data.shape[0]):
                 if data[i, 0] > data[i, 2] or data[i, 1] > data[i, 3]:

@@ -1,4 +1,4 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
 
-"""A More Flexible Video models."""
+"""更灵活的视频模型构建入口。"""

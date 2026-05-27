@@ -13,12 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 
-"""Operations for [N, 4] numpy arrays representing bounding boxes.
-
-Example box operations that are supported:
-  * Areas: compute bounding box areas
-  * IOU: pairwise intersection-over-union scores
-"""
+"""numpy 边界框数组的面积、交集和重叠度工具。"""
 from __future__ import (
     absolute_import,
     division,
@@ -29,27 +24,18 @@ import numpy as np
 
 
 def area(boxes):
-    """Computes area of boxes.
+    """计算框或掩码的面积。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
 
-  Args:
-    boxes: Numpy array with shape [N, 4] holding N boxes
-
-  Returns:
-    a numpy array with shape [N*1] representing box areas
-  """
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
+    """
     return (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
 
 
 def intersection(boxes1, boxes2):
-    """Compute pairwise intersection areas between boxes.
+    """计算两组框或掩码的两两交集面积。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
 
-  Args:
-    boxes1: a numpy array with shape [N, 4] holding N boxes
-    boxes2: a numpy array with shape [M, 4] holding M boxes
-
-  Returns:
-    a numpy array with shape [N*M] representing pairwise intersection area
-  """
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
+    """
     [y_min1, x_min1, y_max1, x_max1] = np.split(boxes1, 4, axis=1)
     [y_min2, x_min2, y_max2, x_max2] = np.split(boxes2, 4, axis=1)
 
@@ -69,15 +55,10 @@ def intersection(boxes1, boxes2):
 
 
 def iou(boxes1, boxes2):
-    """Computes pairwise intersection-over-union between box collections.
+    """计算两组框或掩码的交并比。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
 
-  Args:
-    boxes1: a numpy array with shape [N, 4] holding N boxes.
-    boxes2: a numpy array with shape [M, 4] holding N boxes.
-
-  Returns:
-    a numpy array with shape [N, M] representing pairwise iou scores.
-  """
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
+    """
     intersect = intersection(boxes1, boxes2)
     area1 = area(boxes1)
     area2 = area(boxes2)
@@ -90,19 +71,10 @@ def iou(boxes1, boxes2):
 
 
 def ioa(boxes1, boxes2):
-    """Computes pairwise intersection-over-area between box collections.
+    """计算两组框或掩码的交集面积占比。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
 
-  Intersection-over-area (ioa) between two boxes box1 and box2 is defined as
-  their intersection area over box2's area. Note that ioa is not symmetric,
-  that is, IOA(box1, box2) != IOA(box2, box1).
-
-  Args:
-    boxes1: a numpy array with shape [N, 4] holding N boxes.
-    boxes2: a numpy array with shape [M, 4] holding N boxes.
-
-  Returns:
-    a numpy array with shape [N, M] representing pairwise ioa scores.
-  """
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 DataLoader、模型、评估器或 checkpoint 流程。
+    """
     intersect = intersection(boxes1, boxes2)
     areas = np.expand_dims(area(boxes2), axis=0)
     return intersect / areas

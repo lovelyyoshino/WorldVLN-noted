@@ -1,6 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
-"""Distributed helpers."""
+"""分布式训练通信辅助函数。"""
 
 import functools
 import logging
@@ -12,11 +12,9 @@ _LOCAL_PROCESS_GROUP = None
 
 
 def all_gather(tensors):
-    """
-    All gathers the provided tensors from all processes across machines.
-    Args:
-        tensors (list): tensors to perform all gather across all processes in
-        all machines.
+    """跨进程收集张量，让每个进程拿到所有进程的数据。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
 
     gather_list = []
@@ -34,13 +32,9 @@ def all_gather(tensors):
 
 
 def all_reduce(tensors, average=True):
-    """
-    All reduce the provided tensors from all processes across machines.
-    Args:
-        tensors (list): tensors to perform all reduce across all processes in
-        all machines.
-        average (bool): scales the reduced tensor by the number of overall
-        processes across all machines.
+    """跨进程规约张量，常用于同步 loss 或指标。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
 
     for tensor in tensors:
@@ -60,26 +54,13 @@ def init_process_group(
     init_method,
     dist_backend="nccl",
 ):
+    """初始化 torch.distributed 默认进程组。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
-    Initializes the default process group.
-    Args:
-        local_rank (int): the rank on the current local machine.
-        local_world_size (int): the world size (number of processes running) on
-        the current local machine.
-        shard_id (int): the shard index (machine rank) of the current machine.
-        num_shards (int): number of shards for distributed training.
-        init_method (string): supporting three different methods for
-            initializing process groups:
-            "file": use shared file system to initialize the groups across
-            different processes.
-            "tcp": use tcp address to initialize the groups across different
-        dist_backend (string): backend to use for distributed training. Options
-            includes gloo, mpi and nccl, the details can be found here:
-            https://pytorch.org/docs/stable/distributed.html
-    """
-    # Sets the GPU to use.
+    # 设置当前进程使用的 GPU。
     torch.cuda.set_device(local_rank)
-    # Initialize the process group.
+    # 初始化分布式进程组。
     proc_rank = local_rank + shard_id * local_world_size
     world_size = local_world_size * num_shards
     dist.init_process_group(
@@ -91,8 +72,9 @@ def init_process_group(
 
 
 def is_master_proc(num_gpus=8):
-    """
-    Determines if the current process is the master process.
+    """判断当前进程是否是负责日志和保存的主进程。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
     if torch.distributed.is_initialized():
         return dist.get_rank() % num_gpus == 0
@@ -101,8 +83,9 @@ def is_master_proc(num_gpus=8):
 
 
 def is_root_proc():
-    """
-    Determines if the current process is the root process.
+    """判断当前进程是否是全局 rank 0。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
     if torch.distributed.is_initialized():
         return dist.get_rank() == 0
@@ -111,8 +94,9 @@ def is_root_proc():
 
 
 def get_world_size():
-    """
-    Get the size of the world.
+    """返回分布式训练的总进程数。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
     if not dist.is_available():
         return 1
@@ -122,8 +106,9 @@ def get_world_size():
 
 
 def get_rank():
-    """
-    Get the rank of the current process.
+    """返回当前进程的全局 rank。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
     if not dist.is_available():
         return 0
@@ -133,9 +118,9 @@ def get_rank():
 
 
 def synchronize():
-    """
-    Helper function to synchronize (barrier) among all processes when
-    using distributed training
+    """在所有进程之间执行 barrier 同步。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
     if not dist.is_available():
         return
@@ -149,11 +134,9 @@ def synchronize():
 
 @functools.lru_cache()
 def _get_global_gloo_group():
-    """
-    Return a process group based on gloo backend, containing all the ranks
-    The result is cached.
-    Returns:
-        (group): pytorch dist group.
+    """获取全局 gloo 进程组，用于 CPU/对象通信。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
     if dist.get_backend() == "nccl":
         return dist.new_group(backend="gloo")
@@ -162,14 +145,9 @@ def _get_global_gloo_group():
 
 
 def _serialize_to_tensor(data, group):
-    """
-    Seriialize the tensor to ByteTensor. Note that only `gloo` and `nccl`
-        backend is supported.
-    Args:
-        data (data): data to be serialized.
-        group (group): pytorch dist group.
-    Returns:
-        tensor (ByteTensor): tensor that serialized.
+    """把 Python 对象序列化成 ByteTensor，便于跨进程通信。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
 
     backend = dist.get_backend(group)
@@ -180,8 +158,8 @@ def _serialize_to_tensor(data, group):
     if len(buffer) > 1024 ** 3:
         logger = logging.getLogger(__name__)
         logger.warning(
-            "Rank {} trying to all-gather {:.2f} GB of data on device {}".format(
-                get_rank(), len(buffer) / (1024 ** 3), device
+            "Rank {} 正在尝试在设备 {} 上 all-gather {:.2f} GB 数据".format(
+                get_rank(), device, len(buffer) / (1024 ** 3)
             )
         )
     storage = torch.ByteStorage.from_buffer(buffer)
@@ -190,19 +168,14 @@ def _serialize_to_tensor(data, group):
 
 
 def _pad_to_largest_tensor(tensor, group):
-    """
-    Padding all the tensors from different GPUs to the largest ones.
-    Args:
-        tensor (tensor): tensor to pad.
-        group (group): pytorch dist group.
-    Returns:
-        list[int]: size of the tensor, on each rank
-        Tensor: padded tensor that has the max size
+    """把不同长度的序列化张量补齐到相同长度。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
     world_size = dist.get_world_size(group=group)
     assert (
         world_size >= 1
-    ), "comm.gather/all_gather must be called from ranks within the given group!"
+    ), "comm.gather/all_gather 必须由给定 group 内的 rank 调用！"
     local_size = torch.tensor(
         [tensor.numel()], dtype=torch.int64, device=tensor.device
     )
@@ -215,8 +188,7 @@ def _pad_to_largest_tensor(tensor, group):
 
     max_size = max(size_list)
 
-    # we pad the tensor because torch all_gather does not support
-    # gathering tensors of different shapes
+    # 这里填充 tensor，因为 torch all_gather 不支持收集不同 shape 的 tensor。
     if local_size != max_size:
         padding = torch.zeros(
             (max_size - local_size,), dtype=torch.uint8, device=tensor.device
@@ -226,16 +198,9 @@ def _pad_to_largest_tensor(tensor, group):
 
 
 def all_gather_unaligned(data, group=None):
-    """
-    Run all_gather on arbitrary picklable data (not necessarily tensors).
+    """跨进程收集长度不同的 Python 对象。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
 
-    Args:
-        data: any picklable object
-        group: a torch process group. By default, will use a group which
-            contains all ranks on gloo backend.
-
-    Returns:
-        list[data]: list of data gathered from each rank
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
     if get_world_size() == 1:
         return [data]
@@ -249,7 +214,7 @@ def all_gather_unaligned(data, group=None):
     size_list, tensor = _pad_to_largest_tensor(tensor, group)
     max_size = max(size_list)
 
-    # receiving Tensor from all ranks
+    # 从所有 rank 接收 Tensor。
     tensor_list = [
         torch.empty((max_size,), dtype=torch.uint8, device=tensor.device)
         for _ in size_list
@@ -265,8 +230,9 @@ def all_gather_unaligned(data, group=None):
 
 
 def init_distributed_training(cfg):
-    """
-    Initialize variables needed for distributed training.
+    """根据配置初始化多机多卡训练环境。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
     if cfg.NUM_GPUS <= 1:
         return
@@ -283,10 +249,9 @@ def init_distributed_training(cfg):
 
 
 def get_local_size() -> int:
-    """
-    Returns:
-        The size of the per-machine process group,
-        i.e. the number of processes per machine.
+    """返回当前机器上的本地进程数。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
     if not dist.is_available():
         return 1
@@ -296,9 +261,9 @@ def get_local_size() -> int:
 
 
 def get_local_rank() -> int:
-    """
-    Returns:
-        The rank of the current process within the local (per-machine) process group.
+    """返回当前进程在本机内的 local rank。 小白阅读时先看函数签名中的参数，再顺着函数体查看张量形状或评估字段如何变化。
+
+    数据流提示：输入参数进入函数后通常会被裁剪、变形、聚合或跨进程同步；返回值会继续交给 数据加载器、模型、评估器或检查点流程。
     """
     if not dist.is_available():
         return 0

@@ -12,19 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""object_detection_evaluation module.
+"""目标检测评估模块。
 
-ObjectDetectionEvaluation is a class which manages ground truth information of a
-object detection dataset, and computes frequently used detection metrics such as
-Precision, Recall, CorLoc of the provided detection results.
-It supports the following operations:
-1) Add ground truth information of images sequentially.
-2) Add detection result of images sequentially.
-3) Evaluate detection metrics on already inserted detection results.
-4) Write evaluation result into a pickle file for future processing or
-   visualization.
+ObjectDetectionEvaluation 用来管理目标检测数据集的真实标注信息，并根据
+提供的检测结果计算常用指标，例如 Precision、Recall、CorLoc。
+它支持以下操作：
+1) 按顺序加入图像的真实标注信息。
+2) 按顺序加入图像的检测结果。
+3) 基于已经插入的检测结果评估检测指标。
+4) 将评估结果写入 pickle 文件，便于后续处理或可视化。
 
-Note: This module operates on numpy boxes and box lists.
+注意：本模块操作的是 numpy 边界框数组和框列表。
 """
 
 from __future__ import (
@@ -42,70 +40,72 @@ from . import label_map_util, metrics, per_image_evaluation, standard_fields
 
 
 class DetectionEvaluator(object):
-    """Interface for object detection evalution classes.
+    """目标检测评估类的接口。
 
-  Example usage of the Evaluator:
-  ------------------------------
-  evaluator = DetectionEvaluator(categories)
+      评估器使用示例：
+      ------------------------------
+      说明：evaluator = DetectionEvaluator(categories)
 
-  # Detections and groundtruth for image 1.
-  evaluator.add_single_groundtruth_image_info(...)
-  evaluator.add_single_detected_image_info(...)
+      # 图像 1 的检测结果和真实标注。
+      说明：evaluator.add_single_groundtruth_image_info(...)
+      说明：evaluator.add_single_detected_image_info(...)
 
-  # Detections and groundtruth for image 2.
-  evaluator.add_single_groundtruth_image_info(...)
-  evaluator.add_single_detected_image_info(...)
+      # 图像 2 的检测结果和真实标注。
+      说明：evaluator.add_single_groundtruth_image_info(...)
+      说明：evaluator.add_single_detected_image_info(...)
 
-  metrics_dict = evaluator.evaluate()
-  """
+      说明：metrics_dict = evaluator.evaluate()
+
+    """
 
     __metaclass__ = ABCMeta
 
     def __init__(self, categories):
-        """Constructor.
+        """保存类别定义，供后续评估时生成每类指标。
 
-    Args:
-      categories: A list of dicts, each of which has the following keys -
-        'id': (required) an integer id uniquely identifying this category.
-        'name': (required) string representing category name e.g., 'cat', 'dog'.
-    """
+            参数：
+              categories: dict 列表，每个 dict 包含以下键：
+                'id': 必需，唯一标识该类别的整数 id。
+                'name': 必需，类别名称字符串，例如 'cat'、'dog'。
+
+        """
         self._categories = categories
 
     @abstractmethod
     def add_single_ground_truth_image_info(self, image_id, groundtruth_dict):
-        """Adds groundtruth for a single image to be used for evaluation.
+        """加入单张图像的真实标注信息，用于后续评估。
 
-    Args:
-      image_id: A unique string/integer identifier for the image.
-      groundtruth_dict: A dictionary of groundtruth numpy arrays required
-        for evaluations.
-    """
+            参数：
+              image_id: 图像的唯一字符串或整数标识。
+              groundtruth_dict: 评估所需的真实标注 numpy array 字典。
+
+        """
         pass
 
     @abstractmethod
     def add_single_detected_image_info(self, image_id, detections_dict):
-        """Adds detections for a single image to be used for evaluation.
+        """加入单张图像的检测结果信息，用于后续评估。
 
-    Args:
-      image_id: A unique string/integer identifier for the image.
-      detections_dict: A dictionary of detection numpy arrays required
-        for evaluation.
-    """
+            参数：
+              image_id: 图像的唯一字符串或整数标识。
+              detections_dict: 评估所需的检测结果 numpy array 字典。
+
+        """
         pass
 
     @abstractmethod
     def evaluate(self):
-        """Evaluates detections and returns a dictionary of metrics."""
+        """评估检测结果，并返回一个指标字典。"""
         pass
 
     @abstractmethod
     def clear(self):
-        """Clears the state to prepare for a fresh evaluation."""
+        """清空内部状态，为一次新的评估做准备。"""
         pass
 
 
 class ObjectDetectionEvaluator(DetectionEvaluator):
-    """A class to evaluate detections."""
+    """用于评估目标检测结果的类。"""
 
     def __init__(
         self,
@@ -116,31 +116,28 @@ class ObjectDetectionEvaluator(DetectionEvaluator):
         use_weighted_mean_ap=False,
         evaluate_masks=False,
     ):
-        """Constructor.
+        """初始化检测评估器及其内部统计对象。
 
-    Args:
-      categories: A list of dicts, each of which has the following keys -
-        'id': (required) an integer id uniquely identifying this category.
-        'name': (required) string representing category name e.g., 'cat', 'dog'.
-      matching_iou_threshold: IOU threshold to use for matching groundtruth
-        boxes to detection boxes.
-      evaluate_corlocs: (optional) boolean which determines if corloc scores
-        are to be returned or not.
-      metric_prefix: (optional) string prefix for metric name; if None, no
-        prefix is used.
-      use_weighted_mean_ap: (optional) boolean which determines if the mean
-        average precision is computed directly from the scores and tp_fp_labels
-        of all classes.
-      evaluate_masks: If False, evaluation will be performed based on boxes.
-        If True, mask evaluation will be performed instead.
+            参数：
+              categories: dict 列表，每个 dict 包含以下键：
+                'id': 必需，唯一标识该类别的整数 id。
+                'name': 必需，类别名称字符串，例如 'cat'、'dog'。
+              matching_iou_threshold: 匹配真实标注框和检测框时使用的
+                IOU 阈值。
+              evaluate_corlocs: 可选，是否返回 corloc 分数。
+              metric_prefix: 可选，指标名称前缀；为 None 时不使用前缀。
+              use_weighted_mean_ap: 可选，是否直接基于所有类别的 scores 和 tp_fp_labels
+                计算平均精度均值。
+              evaluate_masks: 如果为 False，基于框评估；如果为 True，改为评估掩码。
 
-    Raises:
-      ValueError: If the category ids are not 1-indexed.
-    """
+            异常：
+              ValueError: 如果类别 id 不是从 1 开始编号。
+
+        """
         super(ObjectDetectionEvaluator, self).__init__(categories)
         self._num_classes = max([cat["id"] for cat in categories])
         if min(cat["id"] for cat in categories) < 1:
-            raise ValueError("Classes should be 1-indexed.")
+            raise ValueError("类别应从 1 开始编号。")
         self._matching_iou_threshold = matching_iou_threshold
         self._use_weighted_mean_ap = use_weighted_mean_ap
         self._label_id_offset = 1
@@ -156,30 +153,29 @@ class ObjectDetectionEvaluator(DetectionEvaluator):
         self._metric_prefix = (metric_prefix + "_") if metric_prefix else ""
 
     def add_single_ground_truth_image_info(self, image_id, groundtruth_dict):
-        """Adds groundtruth for a single image to be used for evaluation.
+        """加入单张图像的真实标注信息，用于评估。
 
-    Args:
-      image_id: A unique string/integer identifier for the image.
-      groundtruth_dict: A dictionary containing -
-        standard_fields.InputDataFields.groundtruth_boxes: float32 numpy array
-          of shape [num_boxes, 4] containing `num_boxes` groundtruth boxes of
-          the format [ymin, xmin, ymax, xmax] in absolute image coordinates.
-        standard_fields.InputDataFields.groundtruth_classes: integer numpy array
-          of shape [num_boxes] containing 1-indexed groundtruth classes for the
-          boxes.
-        standard_fields.InputDataFields.groundtruth_difficult: Optional length
-          M numpy boolean array denoting whether a ground truth box is a
-          difficult instance or not. This field is optional to support the case
-          that no boxes are difficult.
-        standard_fields.InputDataFields.groundtruth_instance_masks: Optional
-          numpy array of shape [num_boxes, height, width] with values in {0, 1}.
+            参数：
+              image_id: 图像的唯一字符串或整数标识。
+              groundtruth_dict: 包含以下内容的字典：
+                说明：standard_fields.InputDataFields.groundtruth_boxes: float32 numpy array
+                  shape 为 [num_boxes, 4]，包含 `num_boxes` 个真实标注框，
+                  格式为绝对图像坐标下的 [ymin, xmin, ymax, xmax]。
+                说明：standard_fields.InputDataFields.groundtruth_classes: integer numpy array
+                  shape 为 [num_boxes]，包含从 1 开始编号的框类别。
+                说明：standard_fields.InputDataFields.groundtruth_difficult: Optional length
+                  M 的 numpy boolean array，表示真实标注框是否为 difficult
+                  实例。该字段是可选的，用于支持没有 difficult 框的情况。
+                说明：standard_fields.InputDataFields.groundtruth_instance_masks: Optional
+                  shape 为 [num_boxes, height, width] 的 numpy array，取值在 {0, 1}。
 
-    Raises:
-      ValueError: On adding groundtruth for an image more than once. Will also
-        raise error if instance masks are not in groundtruth dictionary.
-    """
+            异常：
+              ValueError: 如果同一图像重复加入真实标注；如果评估掩码但字典中
+                没有实例掩码，也会报错。
+
+        """
         if image_id in self._image_ids:
-            raise ValueError("Image with id {} already added.".format(image_id))
+            raise ValueError("id 为 {} 的图像已添加。".format(image_id))
 
         groundtruth_classes = (
             groundtruth_dict[
@@ -187,9 +183,8 @@ class ObjectDetectionEvaluator(DetectionEvaluator):
             ]
             - self._label_id_offset
         )
-        # If the key is not present in the groundtruth_dict or the array is empty
-        # (unless there are no annotations for the groundtruth on this image)
-        # use values from the dictionary or insert None otherwise.
+        # 如果 key 不在 groundtruth_dict 中，或数组为空（除非该图像确实没有
+        # 真实标注），则优先使用字典中的值，否则填入 None。
         if standard_fields.InputDataFields.groundtruth_difficult in groundtruth_dict.keys() and (
             groundtruth_dict[
                 standard_fields.InputDataFields.groundtruth_difficult
@@ -203,7 +198,7 @@ class ObjectDetectionEvaluator(DetectionEvaluator):
             groundtruth_difficult = None
             if not len(self._image_ids) % 1000:
                 logging.warn(
-                    "image %s does not have groundtruth difficult flag specified",
+                    "图像 %s 未指定真实标注 difficult 标记",
                     image_id,
                 )
         groundtruth_masks = None
@@ -213,7 +208,7 @@ class ObjectDetectionEvaluator(DetectionEvaluator):
                 not in groundtruth_dict
             ):
                 raise ValueError(
-                    "Instance masks not in groundtruth dictionary."
+                    "真实标注字典中没有实例掩码。"
                 )
             groundtruth_masks = groundtruth_dict[
                 standard_fields.InputDataFields.groundtruth_instance_masks
@@ -230,26 +225,26 @@ class ObjectDetectionEvaluator(DetectionEvaluator):
         self._image_ids.update([image_id])
 
     def add_single_detected_image_info(self, image_id, detections_dict):
-        """Adds detections for a single image to be used for evaluation.
+        """加入单张图像的检测结果信息，用于评估。
 
-    Args:
-      image_id: A unique string/integer identifier for the image.
-      detections_dict: A dictionary containing -
-        standard_fields.DetectionResultFields.detection_boxes: float32 numpy
-          array of shape [num_boxes, 4] containing `num_boxes` detection boxes
-          of the format [ymin, xmin, ymax, xmax] in absolute image coordinates.
-        standard_fields.DetectionResultFields.detection_scores: float32 numpy
-          array of shape [num_boxes] containing detection scores for the boxes.
-        standard_fields.DetectionResultFields.detection_classes: integer numpy
-          array of shape [num_boxes] containing 1-indexed detection classes for
-          the boxes.
-        standard_fields.DetectionResultFields.detection_masks: uint8 numpy
-          array of shape [num_boxes, height, width] containing `num_boxes` masks
-          of values ranging between 0 and 1.
+            参数：
+              image_id: 图像的唯一字符串或整数标识。
+              detections_dict: 包含以下内容的字典：
+                说明：standard_fields.DetectionResultFields.detection_boxes: float32 numpy
+                  array，shape 为 [num_boxes, 4]，包含 `num_boxes` 个检测框，
+                  格式为绝对图像坐标下的 [ymin, xmin, ymax, xmax]。
+                说明：standard_fields.DetectionResultFields.detection_scores: float32 numpy
+                  array，shape 为 [num_boxes]，包含每个框的检测分数。
+                说明：standard_fields.DetectionResultFields.detection_classes: integer numpy
+                  array，shape 为 [num_boxes]，包含从 1 开始编号的检测类别。
+                说明：standard_fields.DetectionResultFields.detection_masks: uint8 numpy
+                  array，shape 为 [num_boxes, height, width]，包含 `num_boxes` 个取值在
+                  0 到 1 之间的掩码。
 
-    Raises:
-      ValueError: If detection masks are not in detections dictionary.
-    """
+            异常：
+              ValueError: 如果需要评估掩码但 detections 字典中没有检测掩码。
+
+        """
         detection_classes = (
             detections_dict[
                 standard_fields.DetectionResultFields.detection_classes
@@ -263,7 +258,7 @@ class ObjectDetectionEvaluator(DetectionEvaluator):
                 not in detections_dict
             ):
                 raise ValueError(
-                    "Detection masks not in detections dictionary."
+                    "检测结果字典中没有检测掩码。"
                 )
             detection_masks = detections_dict[
                 standard_fields.DetectionResultFields.detection_masks
@@ -281,18 +276,19 @@ class ObjectDetectionEvaluator(DetectionEvaluator):
         )
 
     def evaluate(self):
-        """Compute evaluation result.
+        """计算评估结果。
 
-    Returns:
-      A dictionary of metrics with the following fields -
+            返回：
+              包含以下字段的指标字典：
 
-      1. summary_metrics:
-        'Precision/mAP@<matching_iou_threshold>IOU': mean average precision at
-        the specified IOU threshold.
+              说明：1. summary_metrics:
+                'Precision/mAP@<matching_iou_threshold>IOU': 指定 IOU 阈值下的
+                说明：平均精度均值。
 
-      2. per_category_ap: category specific results with keys of the form
-        'PerformanceByCategory/mAP@<matching_iou_threshold>IOU/category'.
-    """
+              2. per_category_ap: 每个类别的结果，key 形式为
+                说明：'PerformanceByCategory/mAP@<matching_iou_threshold>IOU/category'.
+
+        """
         (
             per_class_ap,
             mean_ap,
@@ -326,7 +322,7 @@ class ObjectDetectionEvaluator(DetectionEvaluator):
                 )
                 pascal_metrics[display_name] = per_class_ap[idx]
 
-                # Optionally add CorLoc metrics.classes
+                # 可选地加入 CorLoc 类别指标。
                 if self._evaluate_corlocs:
                     display_name = (
                         self._metric_prefix
@@ -340,7 +336,7 @@ class ObjectDetectionEvaluator(DetectionEvaluator):
         return pascal_metrics
 
     def clear(self):
-        """Clears the state to prepare for a fresh evaluation."""
+        """清空内部状态，为一次新的评估做准备。"""
         self._evaluation = ObjectDetectionEvaluation(
             num_groundtruth_classes=self._num_classes,
             matching_iou_threshold=self._matching_iou_threshold,
@@ -351,9 +347,10 @@ class ObjectDetectionEvaluator(DetectionEvaluator):
 
 
 class PascalDetectionEvaluator(ObjectDetectionEvaluator):
-    """A class to evaluate detections using PASCAL metrics."""
+    """使用 PASCAL 指标评估检测结果的类。"""
 
     def __init__(self, categories, matching_iou_threshold=0.5):
+        """创建使用 PASCAL Boxes 指标的检测评估器。"""
         super(PascalDetectionEvaluator, self).__init__(
             categories,
             matching_iou_threshold=matching_iou_threshold,
@@ -364,20 +361,18 @@ class PascalDetectionEvaluator(ObjectDetectionEvaluator):
 
 
 class WeightedPascalDetectionEvaluator(ObjectDetectionEvaluator):
-    """A class to evaluate detections using weighted PASCAL metrics.
+    """使用加权 PASCAL 指标评估检测结果的类。
 
-  Weighted PASCAL metrics computes the mean average precision as the average
-  precision given the scores and tp_fp_labels of all classes. In comparison,
-  PASCAL metrics computes the mean average precision as the mean of the
-  per-class average precisions.
+  加权 PASCAL 指标会把所有类别的 scores 和 tp_fp_labels 放在一起计算
+  平均精度，并将它作为平均精度均值。相比之下，PASCAL 指标
+  会把每个类别的平均精度再取平均。
 
-  This definition is very similar to the mean of the per-class average
-  precisions weighted by class frequency. However, they are typically not the
-  same as the average precision is not a linear function of the scores and
-  tp_fp_labels.
+  这个定义很接近“按类别频率加权的每类平均精度均值”。但由于
+  平均精度不是 scores 和 tp_fp_labels 的线性函数，两者通常并不相同。
   """
 
     def __init__(self, categories, matching_iou_threshold=0.5):
+        """创建使用加权 PASCAL Boxes 指标的检测评估器。"""
         super(WeightedPascalDetectionEvaluator, self).__init__(
             categories,
             matching_iou_threshold=matching_iou_threshold,
@@ -388,9 +383,10 @@ class WeightedPascalDetectionEvaluator(ObjectDetectionEvaluator):
 
 
 class PascalInstanceSegmentationEvaluator(ObjectDetectionEvaluator):
-    """A class to evaluate instance masks using PASCAL metrics."""
+    """使用 PASCAL 指标评估实例掩码的类。"""
 
     def __init__(self, categories, matching_iou_threshold=0.5):
+        """创建使用 PASCAL Masks 指标的实例分割评估器。"""
         super(PascalInstanceSegmentationEvaluator, self).__init__(
             categories,
             matching_iou_threshold=matching_iou_threshold,
@@ -402,20 +398,18 @@ class PascalInstanceSegmentationEvaluator(ObjectDetectionEvaluator):
 
 
 class WeightedPascalInstanceSegmentationEvaluator(ObjectDetectionEvaluator):
-    """A class to evaluate instance masks using weighted PASCAL metrics.
+    """使用加权 PASCAL 指标评估实例掩码的类。
 
-  Weighted PASCAL metrics computes the mean average precision as the average
-  precision given the scores and tp_fp_labels of all classes. In comparison,
-  PASCAL metrics computes the mean average precision as the mean of the
-  per-class average precisions.
+  加权 PASCAL 指标会把所有类别的 scores 和 tp_fp_labels 放在一起计算
+  平均精度，并将它作为平均精度均值。相比之下，PASCAL 指标
+  会把每个类别的平均精度再取平均。
 
-  This definition is very similar to the mean of the per-class average
-  precisions weighted by class frequency. However, they are typically not the
-  same as the average precision is not a linear function of the scores and
-  tp_fp_labels.
+  这个定义很接近“按类别频率加权的每类平均精度均值”。但由于
+  平均精度不是 scores 和 tp_fp_labels 的线性函数，两者通常并不相同。
   """
 
     def __init__(self, categories, matching_iou_threshold=0.5):
+        """创建使用加权 PASCAL Masks 指标的实例分割评估器。"""
         super(WeightedPascalInstanceSegmentationEvaluator, self).__init__(
             categories,
             matching_iou_threshold=matching_iou_threshold,
@@ -427,25 +421,25 @@ class WeightedPascalInstanceSegmentationEvaluator(ObjectDetectionEvaluator):
 
 
 class OpenImagesDetectionEvaluator(ObjectDetectionEvaluator):
-    """A class to evaluate detections using Open Images V2 metrics.
+    """使用 Open Images V2 指标评估检测结果的类。
 
-    Open Images V2 introduce group_of type of bounding boxes and this metric
-    handles those boxes appropriately.
+    Open Images V2 引入了 group_of 类型的边界框，该指标会正确处理这些框。
   """
 
     def __init__(
         self, categories, matching_iou_threshold=0.5, evaluate_corlocs=False
     ):
-        """Constructor.
+        """初始化 Open Images V2 检测评估器。
 
-    Args:
-      categories: A list of dicts, each of which has the following keys -
-        'id': (required) an integer id uniquely identifying this category.
-        'name': (required) string representing category name e.g., 'cat', 'dog'.
-      matching_iou_threshold: IOU threshold to use for matching groundtruth
-        boxes to detection boxes.
-      evaluate_corlocs: if True, additionally evaluates and returns CorLoc.
-    """
+            参数：
+              categories: dict 列表，每个 dict 包含以下键：
+                'id': 必需，唯一标识该类别的整数 id。
+                'name': 必需，类别名称字符串，例如 'cat'、'dog'。
+              matching_iou_threshold: 匹配真实标注框和检测框时使用的
+                IOU 阈值。
+              evaluate_corlocs: 如果为 True，额外评估并返回 CorLoc。
+
+        """
         super(OpenImagesDetectionEvaluator, self).__init__(
             categories,
             matching_iou_threshold,
@@ -454,26 +448,25 @@ class OpenImagesDetectionEvaluator(ObjectDetectionEvaluator):
         )
 
     def add_single_ground_truth_image_info(self, image_id, groundtruth_dict):
-        """Adds groundtruth for a single image to be used for evaluation.
+        """加入单张图像的真实标注信息，用于 Open Images 评估。
 
-    Args:
-      image_id: A unique string/integer identifier for the image.
-      groundtruth_dict: A dictionary containing -
-        standard_fields.InputDataFields.groundtruth_boxes: float32 numpy array
-          of shape [num_boxes, 4] containing `num_boxes` groundtruth boxes of
-          the format [ymin, xmin, ymax, xmax] in absolute image coordinates.
-        standard_fields.InputDataFields.groundtruth_classes: integer numpy array
-          of shape [num_boxes] containing 1-indexed groundtruth classes for the
-          boxes.
-        standard_fields.InputDataFields.groundtruth_group_of: Optional length
-          M numpy boolean array denoting whether a groundtruth box contains a
-          group of instances.
+            参数：
+              image_id: 图像的唯一字符串或整数标识。
+              groundtruth_dict: 包含以下内容的字典：
+                说明：standard_fields.InputDataFields.groundtruth_boxes: float32 numpy array
+                  shape 为 [num_boxes, 4]，包含 `num_boxes` 个真实标注框，
+                  格式为绝对图像坐标下的 [ymin, xmin, ymax, xmax]。
+                说明：standard_fields.InputDataFields.groundtruth_classes: integer numpy array
+                  shape 为 [num_boxes]，包含从 1 开始编号的框类别。
+                说明：standard_fields.InputDataFields.groundtruth_group_of: Optional length
+                  M 的 numpy boolean array，表示真实标注框是否包含一组实例。
 
-    Raises:
-      ValueError: On adding groundtruth for an image more than once.
-    """
+            异常：
+              ValueError: 如果同一图像重复加入真实标注。
+
+        """
         if image_id in self._image_ids:
-            raise ValueError("Image with id {} already added.".format(image_id))
+            raise ValueError("id 为 {} 的图像已添加。".format(image_id))
 
         groundtruth_classes = (
             groundtruth_dict[
@@ -481,9 +474,8 @@ class OpenImagesDetectionEvaluator(ObjectDetectionEvaluator):
             ]
             - self._label_id_offset
         )
-        # If the key is not present in the groundtruth_dict or the array is empty
-        # (unless there are no annotations for the groundtruth on this image)
-        # use values from the dictionary or insert None otherwise.
+        # 如果 key 不在 groundtruth_dict 中，或数组为空（除非该图像确实没有
+        # 真实标注），则优先使用字典中的值，否则填入 None。
         if standard_fields.InputDataFields.groundtruth_group_of in groundtruth_dict.keys() and (
             groundtruth_dict[
                 standard_fields.InputDataFields.groundtruth_group_of
@@ -497,7 +489,7 @@ class OpenImagesDetectionEvaluator(ObjectDetectionEvaluator):
             groundtruth_group_of = None
             if not len(self._image_ids) % 1000:
                 logging.warn(
-                    "image %s does not have groundtruth group_of flag specified",
+                    "图像 %s 未指定真实标注 group_of 标记",
                     image_id,
                 )
         self._evaluation.add_single_ground_truth_image_info(
@@ -524,7 +516,7 @@ ObjectDetectionEvalMetrics = collections.namedtuple(
 
 
 class ObjectDetectionEvaluation(object):
-    """Internal implementation of Pascal object detection metrics."""
+    """PASCAL 目标检测指标的内部实现。"""
 
     def __init__(
         self,
@@ -535,9 +527,10 @@ class ObjectDetectionEvaluation(object):
         use_weighted_mean_ap=False,
         label_id_offset=0,
     ):
+        """创建内部评估状态，并准备累计每张图像的统计量。"""
         if num_groundtruth_classes < 1:
             raise ValueError(
-                "Need at least 1 groundtruth class for evaluation."
+                "评估至少需要 1 个真实标注类别。"
             )
 
         self.per_image_eval = per_image_evaluation.PerImageEvaluation(
@@ -559,6 +552,7 @@ class ObjectDetectionEvaluation(object):
         self._initialize_detections()
 
     def _initialize_detections(self):
+        """初始化或重置所有检测结果相关的累计统计容器。"""
         self.detection_keys = set()
         self.scores_per_class = [[] for _ in range(self.num_class)]
         self.tp_fp_labels_per_class = [[] for _ in range(self.num_class)]
@@ -570,6 +564,7 @@ class ObjectDetectionEvaluation(object):
         self.corloc_per_class = np.ones(self.num_class, dtype=float)
 
     def clear_detections(self):
+        """只清空检测结果，保留已经加入的真实标注信息。"""
         self._initialize_detections()
 
     def add_single_ground_truth_image_info(
@@ -581,28 +576,28 @@ class ObjectDetectionEvaluation(object):
         groundtruth_is_group_of_list=None,
         groundtruth_masks=None,
     ):
-        """Adds groundtruth for a single image to be used for evaluation.
+        """加入单张图像的真实标注信息，用于评估。
 
-    Args:
-      image_key: A unique string/integer identifier for the image.
-      groundtruth_boxes: float32 numpy array of shape [num_boxes, 4]
-        containing `num_boxes` groundtruth boxes of the format
-        [ymin, xmin, ymax, xmax] in absolute image coordinates.
-      groundtruth_class_labels: integer numpy array of shape [num_boxes]
-        containing 0-indexed groundtruth classes for the boxes.
-      groundtruth_is_difficult_list: A length M numpy boolean array denoting
-        whether a ground truth box is a difficult instance or not. To support
-        the case that no boxes are difficult, it is by default set as None.
-      groundtruth_is_group_of_list: A length M numpy boolean array denoting
-          whether a ground truth box is a group-of box or not. To support
-          the case that no boxes are groups-of, it is by default set as None.
-      groundtruth_masks: uint8 numpy array of shape
-        [num_boxes, height, width] containing `num_boxes` groundtruth masks.
-        The mask values range from 0 to 1.
-    """
+            参数：
+              image_key: 图像的唯一字符串或整数标识。
+              groundtruth_boxes: float32 numpy array，shape 为 [num_boxes, 4]，
+                包含 `num_boxes` 个真实标注框，格式为绝对图像坐标下的
+                说明：[ymin, xmin, ymax, xmax]。
+              groundtruth_class_labels: integer numpy array，shape 为 [num_boxes]，
+                包含从 0 开始编号的框类别。
+              groundtruth_is_difficult_list: 长度为 M 的 numpy boolean array，表示
+                真实标注框是否为 difficult 实例。为支持没有 difficult 框的
+                情况，默认设为 None。
+              groundtruth_is_group_of_list: 长度为 M 的 numpy boolean array，表示
+                  真实标注框是否为 group-of 框。为支持没有 group-of 框的情况，
+                  默认设为 None。
+              groundtruth_masks: uint8 numpy array，shape 为 [num_boxes, height, width]，
+                包含 `num_boxes` 个真实标注掩码，掩码取值范围为 0 到 1。
+
+        """
         if image_key in self.groundtruth_boxes:
             logging.warn(
-                "image %s has already been added to the ground truth database.",
+                "图像 %s 已经加入真实标注数据库。",
                 image_key,
             )
             return
@@ -637,31 +632,30 @@ class ObjectDetectionEvaluation(object):
         detected_class_labels,
         detected_masks=None,
     ):
-        """Adds detections for a single image to be used for evaluation.
+        """加入单张图像的检测结果信息，用于评估。
 
-    Args:
-      image_key: A unique string/integer identifier for the image.
-      detected_boxes: float32 numpy array of shape [num_boxes, 4]
-        containing `num_boxes` detection boxes of the format
-        [ymin, xmin, ymax, xmax] in absolute image coordinates.
-      detected_scores: float32 numpy array of shape [num_boxes] containing
-        detection scores for the boxes.
-      detected_class_labels: integer numpy array of shape [num_boxes] containing
-        0-indexed detection classes for the boxes.
-      detected_masks: np.uint8 numpy array of shape [num_boxes, height, width]
-        containing `num_boxes` detection masks with values ranging
-        between 0 and 1.
+            参数：
+              image_key: 图像的唯一字符串或整数标识。
+              detected_boxes: float32 numpy array，shape 为 [num_boxes, 4]，
+                包含 `num_boxes` 个检测框，格式为绝对图像坐标下的
+                说明：[ymin, xmin, ymax, xmax]。
+              detected_scores: float32 numpy array，shape 为 [num_boxes]，包含每个框的
+                说明：检测分数。
+              detected_class_labels: integer numpy array，shape 为 [num_boxes]，包含从 0
+                开始编号的检测类别。
+              detected_masks: np.uint8 numpy array，shape 为 [num_boxes, height, width]，
+                包含 `num_boxes` 个检测掩码，取值范围为 0 到 1。
 
-    Raises:
-      ValueError: if the number of boxes, scores and class labels differ in
-        length.
-    """
+            异常：
+              ValueError: 如果边界框、分数和类别标签的数量不一致。
+
+        """
         if len(detected_boxes) != len(detected_scores) or len(
             detected_boxes
         ) != len(detected_class_labels):
             raise ValueError(
-                "detected_boxes, detected_scores and "
-                "detected_class_labels should all have same lengths. Got"
+                "detected_boxes、detected_scores 和 "
+                "detected_class_labels 的长度必须一致。实际为"
                 "[%d, %d, %d]" % len(detected_boxes),
                 len(detected_scores),
                 len(detected_class_labels),
@@ -669,7 +663,7 @@ class ObjectDetectionEvaluation(object):
 
         if image_key in self.detection_keys:
             logging.warn(
-                "image %s has already been added to the detection result database",
+                "图像 %s 已经加入检测结果数据库",
                 image_key,
             )
             return
@@ -678,8 +672,8 @@ class ObjectDetectionEvaluation(object):
         if image_key in self.groundtruth_boxes:
             groundtruth_boxes = self.groundtruth_boxes[image_key]
             groundtruth_class_labels = self.groundtruth_class_labels[image_key]
-            # Masks are popped instead of look up. The reason is that we do not want
-            # to keep all masks in memory which can cause memory overflow.
+            # 这里弹出掩码而不是只查询，因为不希望把所有掩码都留在内存中，
+            # 否则可能导致内存溢出。
             groundtruth_masks = self.groundtruth_masks.pop(image_key)
             groundtruth_is_difficult_list = self.groundtruth_is_difficult_list[
                 image_key
@@ -722,21 +716,21 @@ class ObjectDetectionEvaluation(object):
         groundtruth_is_difficult_list,
         groundtruth_is_group_of_list,
     ):
-        """Update grouth truth statitistics.
+        """更新真实标注统计信息。
 
-    1. Difficult boxes are ignored when counting the number of ground truth
-    instances as done in Pascal VOC devkit.
-    2. Difficult boxes are treated as normal boxes when computing CorLoc related
-    statitistics.
+            1. 统计真实标注实例数量时会忽略 difficult 框，这与 Pascal VOC
+            devkit 的做法一致。
+            2. 计算 CorLoc 相关统计时，会把 difficult 框当作普通框处理。
 
-    Args:
-      groundtruth_class_labels: An integer numpy array of length M,
-          representing M class labels of object instances in ground truth
-      groundtruth_is_difficult_list: A boolean numpy array of length M denoting
-          whether a ground truth box is a difficult instance or not
-      groundtruth_is_group_of_list: A boolean numpy array of length M denoting
-          whether a ground truth box is a group-of box or not
-    """
+            参数：
+              groundtruth_class_labels: 长度为 M 的 integer numpy array，表示真实标注
+                  中 M 个目标实例的类别标签。
+              groundtruth_is_difficult_list: 长度为 M 的 boolean numpy array，表示
+                  真实标注框是否为 difficult 实例。
+              groundtruth_is_group_of_list: 长度为 M 的 boolean numpy array，表示
+                  真实标注框是否为 group-of 框。
+
+        """
         for class_index in range(self.num_class):
             num_gt_instances = np.sum(
                 groundtruth_class_labels[
@@ -750,22 +744,21 @@ class ObjectDetectionEvaluation(object):
                 self.num_gt_imgs_per_class[class_index] += 1
 
     def evaluate(self):
-        """Compute evaluation result.
+        """计算当前累计数据上的评估结果。
 
-    Returns:
-      A named tuple with the following fields -
-        average_precision: float numpy array of average precision for
-            each class.
-        mean_ap: mean average precision of all classes, float scalar
-        precisions: List of precisions, each precision is a float numpy
-            array
-        recalls: List of recalls, each recall is a float numpy array
-        corloc: numpy float array
-        mean_corloc: Mean CorLoc score for each class, float scalar
-    """
+            返回：
+              包含以下字段的 named tuple：
+                average_precision: float numpy array，每个类别的平均精度。
+                mean_ap: 所有类别的平均精度均值，float scalar。
+                precisions: precision 列表，每个 precision 是 float numpy array。
+                recalls: recall 列表，每个 recall 是 float numpy array。
+                说明：corloc: numpy float array。
+                mean_corloc: 每个类别 CorLoc 分数的均值，float scalar。
+
+        """
         if (self.num_gt_instances_per_class == 0).any():
             logging.info(
-                "The following classes have no ground truth examples: %s",
+                "以下类别没有真实标注样本：%s",
                 np.squeeze(np.argwhere(self.num_gt_instances_per_class == 0))
                 + self.label_id_offset,
             )

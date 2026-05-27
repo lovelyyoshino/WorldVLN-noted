@@ -1,6 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
-"""Multiprocessing helpers."""
+"""多进程辅助函数。"""
 
 import torch
 
@@ -17,31 +17,24 @@ def run(
     output_queue=None,
 ):
     """
-    Runs a function from a child process.
-    Args:
-        local_rank (int): rank of the current process on the current machine.
-        num_proc (int): number of processes per machine.
-        func (function): function to execute on each of the process.
-        init_method (string): method to initialize the distributed training.
-            TCP initialization: equiring a network address reachable from all
-            processes followed by the port.
-            Shared file-system initialization: makes use of a file system that
-            is shared and visible from all machines. The URL should start with
-            file:// and contain a path to a non-existent file on a shared file
-            system.
-        shard_id (int): the rank of the current machine.
-        num_shards (int): number of overall machines for the distributed
-            training job.
-        backend (string): three distributed backends ('nccl', 'gloo', 'mpi') are
-            supports, each with different capabilities. Details can be found
-            here:
-            https://pytorch.org/docs/stable/distributed.html
-        cfg (CfgNode): configs. Details can be found in
-            slowfast/config/defaults.py
-        output_queue (queue): can optionally be used to return values from the
-            master process.
+    在子进程中运行目标函数。
+
+    参数：
+        local_rank (int): 当前进程在本机上的 rank。
+        num_proc (int): 每台机器启动的进程数。
+        func (function): 每个进程需要执行的函数。
+        init_method (string): 分布式初始化方法。
+            TCP 初始化要求所有进程都能访问同一个网络地址和端口；
+            共享文件系统初始化要求所有机器都能看到同一个共享路径，且 URL 需以
+            `file://` 开头并指向一个不存在的文件。
+        shard_id (int): 当前机器的 rank。
+        num_shards (int): 分布式训练的机器总数。
+        backend (string): 分布式后端，可选 `nccl`、`gloo`、`mpi`，
+            细节见 https://pytorch.org/docs/stable/distributed.html
+        cfg (CfgNode): 配置对象，细节见 `slowfast/config/defaults.py`。
+        output_queue (queue): 可选，用于从 master 进程回传结果。
     """
-    # Initialize the process group.
+    # 初始化进程组。
     world_size = num_proc * num_shards
     rank = shard_id * num_proc + local_rank
 
