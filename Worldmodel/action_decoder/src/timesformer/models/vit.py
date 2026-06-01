@@ -2,6 +2,32 @@
 # Copyright 2020 Ross Wightman
 # 修改过的模型定义。
 
+"""TimesFormer Vision Transformer 主体。
+
+中文导读：
+    本文件实现 WorldVLN 动作解码器使用的 TimeSformer 主干。它在标准 ViT 的基础上把
+    每个 Transformer block 拆成 “divided space-time attention”：先对每个空间位置内
+    沿时间 T 做 self-attention，再对每个时间步内沿 N 个空间 token 做 self-attention，
+    最后通过 MLP 残差更新 cls + patch token。
+
+    Divided space-time attention 公式：
+        公式：先做时间 self-attention（每个 spatial 位置内沿 T），再做空间 self-attention
+        （每个时间步内沿 N）。
+        公式：x_t = x + DropPath( temporal_attn( norm(x) ) )         # 时间分支
+        公式：x_s = x_t + DropPath( spatial_attn( norm(x_t) ) )      # 空间分支
+        公式：x_o = x_s + DropPath( mlp( norm(x_s) ) )               # MLP 残差
+
+    DropPath 公式：
+        公式：训练时 mask ~ Bernoulli(keep_prob)，
+              x_out = x * mask / keep_prob；评估时直接返回 x。
+
+    本文件提供三种入口：
+        - ``forward(x)``：完整前向，输入原始视频 ``(B,C,T,H,W)``，输出 logits。
+        - ``forward_features(x)``：完整前向，但只返回 cls embedding，未过 head。
+        - ``forward_features_from_patch_tokens(tokens, B, T, W)``：跳过 PatchEmbed，
+          直接接收外部 patch token（典型用法见 ``Vae96ToTSformerEmbedAdapter``）。
+"""
+
 import torch
 import torch.nn as nn
 from functools import partial
@@ -42,11 +68,22 @@ default_cfgs = {
 class Mlp(nn.Module):
     """
     Transformer block 中的两层前馈网络。
+
+    结构为 ``Linear(in -> hidden) -> GELU -> Dropout -> Linear(hidden -> out) -> Dropout``，
+    残差连接在外层 ``Block`` 中实现。
     """
 
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
         """
         初始化 MLP 的两个 Linear 层、激活函数和 dropout。
+
+        参数：
+            in_features (int): 输入维度 D。
+            hidden_features (int): 中间维度，默认与 ``in_features`` 一致；
+                TimesFormer 默认 ``4 * D``。
+            out_features (int): 输出维度，默认与 ``in_features`` 一致。
+            act_layer (Callable): 激活函数，默认 ``nn.GELU``。
+            drop (float): dropout 概率。
         """
         super().__init__()
         out_features = out_features or in_features
@@ -59,6 +96,11 @@ class Mlp(nn.Module):
     def forward(self, x):
         """
         执行 Linear、激活、dropout、Linear、dropout 的前向计算。
+
+        参数：
+            x (Tensor): 形状 ``(B, N, D)`` 的 token 序列。
+        返回：
+            Tensor: 与输入同形状的 token。
         """
         x = self.fc1(x)
         x = self.act(x)
@@ -70,11 +112,27 @@ class Mlp(nn.Module):
 class Attention(nn.Module):
     """
     多头自注意力模块，可选择是否在内部生成 q、k、v。
+
+    公式：q, k, v = split( Linear_qkv(x) )，每个形状为 ``(B, heads, N, D/heads)``。
+    公式：attn = softmax( q @ k^T * scale )，再做 attn dropout。
+    公式：out = (attn @ v).reshape(B, N, D)，再过 ``proj``、``proj_drop``。
+
+    其中 ``scale = (D/heads)^(-0.5)``，对应论文中 ``1/sqrt(d_k)``。
+    ``with_qkv=False`` 时假设外部已生成 q=k=v=x（divided space-time 不会用到这条路径）。
     """
 
     def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., with_qkv=True):
         """
         初始化多头注意力的 qkv 投影、输出投影和 dropout。
+
+        参数：
+            dim (int): token 维度 D。
+            num_heads (int): 多头数。
+            qkv_bias (bool): qkv Linear 是否带 bias。
+            qk_scale (float|None): q-k 点积缩放因子；为 None 时使用 ``head_dim**-0.5``。
+            attn_drop (float): attention 矩阵 dropout 概率。
+            proj_drop (float): 输出投影 dropout 概率。
+            with_qkv (bool): 是否在模块内部生成 q/k/v；False 时假设输入已为 q=k=v。
         """
         super().__init__()
         self.num_heads = num_heads
@@ -90,6 +148,12 @@ class Attention(nn.Module):
     def forward(self, x):
         """
         对输入 token 序列执行多头自注意力。
+
+        参数：
+            x (Tensor): 形状 ``(B, N, D)``。divided space-time 中 ``B`` 会被外层
+                重排成 ``(B*H*W)`` 或 ``(B*T)`` 来分别承担时间/空间注意力。
+        返回：
+            Tensor: 与输入同形状 ``(B, N, D)``。
         """
         B, N, C = x.shape
         if self.with_qkv:
@@ -99,10 +163,12 @@ class Attention(nn.Module):
            qkv = x.reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
            q, k, v  = qkv, qkv, qkv
 
+        # 公式：attn = softmax( q @ k^T * scale )，scale = head_dim^(-0.5)。
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
+        # 公式：out = (attn @ v).reshape(B, N, D)。
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
         if self.with_qkv:
            x = self.proj(x)
@@ -112,12 +178,32 @@ class Attention(nn.Module):
 class Block(nn.Module):
     """
     TimeSformer 的 Transformer block，支持空间、时间或联合注意力。
+
+    Divided space-time attention 公式：
+        公式：先做时间 self-attention（每个 spatial 位置内沿 T），再做空间 self-attention
+        （每个时间步内沿 N）。
+        公式：x_t = x + DropPath( temporal_fc( temporal_attn( norm(x) ) ) )
+        公式：x_s = x_t + DropPath( spatial_attn( norm(x_t with cls) ) )
+        公式：x_o = x_s + DropPath( mlp( norm(x_s) ) )
+
+    ``space_only`` / ``joint_space_time`` 退化为标准 ViT block，cls token 与 patch
+    token 一起做完整 self-attention。
     """
 
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0.1, act_layer=nn.GELU, norm_layer=nn.LayerNorm, attention_type='divided_space_time'):
         """
         初始化注意力、MLP、归一化和可选的分离时空注意力分支。
+
+        参数：
+            dim (int): token 维度 D。
+            num_heads (int): 多头数。
+            mlp_ratio (float): MLP hidden_dim 相对 dim 的倍率。
+            qkv_bias / qk_scale / drop / attn_drop: 透传给 :class:`Attention`。
+            drop_path (float): 残差 DropPath 概率。
+            act_layer / norm_layer: 激活与归一化层类型。
+            attention_type (str): ``'space_only'`` / ``'joint_space_time'`` /
+                ``'divided_space_time'``。WorldVLN 标准为最后一种。
         """
         super().__init__()
         self.attention_type = attention_type
@@ -143,7 +229,16 @@ class Block(nn.Module):
 
     def forward(self, x, B, T, W):
         """
-        根据 attention_type 对视频 token 执行一个 Transformer block。
+        根据 ``attention_type`` 对视频 token 执行一个 Transformer block。
+
+        参数：
+            x (Tensor): 形状 ``(B, 1+N*T, D)`` 的 token 序列，第 0 列是全局 cls token，
+                后续 ``N*T`` 列按 ``(h, w, t)`` 的 raster 顺序排列空间-时间 token。
+            B (int): batch size（视频数量）。
+            T (int): 时间帧数。
+            W (int): 空间 patch 网格宽度（H_patch 由 ``num_spatial_tokens // W`` 推得）。
+        返回：
+            Tensor: 与输入同形状的更新后 token。
         """
         num_spatial_tokens = (x.size(1) - 1) // T
         H = num_spatial_tokens // W
@@ -154,18 +249,22 @@ class Block(nn.Module):
             return x
         elif self.attention_type == 'divided_space_time':
             ## 时间注意力。
+            # 公式：把 (b, h*w*t, m) 重排成 (b*h*w, t, m)，每个 spatial 位置内沿 t 做 self-attention。
             xt = x[:,1:,:]
             xt = rearrange(xt, 'b (h w t) m -> (b h w) t m',b=B,h=H,w=W,t=T)
             res_temporal = self.drop_path(self.temporal_attn(self.temporal_norm1(xt)))
             res_temporal = rearrange(res_temporal, '(b h w) t m -> b (h w t) m',b=B,h=H,w=W,t=T)
             res_temporal = self.temporal_fc(res_temporal)
+            # 公式：x_t = x_patch + DropPath( temporal_fc( temporal_attn( norm(x_patch) ) ) )。
             xt = x[:,1:,:] + res_temporal
 
             ## 空间注意力。
+            # 把 cls token 复制 T 份，每一帧拼一个 cls，便于在每个时间步内沿 N 做 self-attention。
             init_cls_token = x[:,0,:].unsqueeze(1)
             cls_token = init_cls_token.repeat(1, T, 1)
             cls_token = rearrange(cls_token, 'b t m -> (b t) m',b=B,t=T).unsqueeze(1)
             xs = xt
+            # 公式：把 (b, h*w*t, m) 重排成 (b*t, h*w, m)，每个时间步内沿 N=h*w 做 self-attention。
             xs = rearrange(xs, 'b (h w t) m -> (b t) (h w) m',b=B,h=H,w=W,t=T)
             xs = torch.cat((cls_token, xs), 1)
             res_spatial = self.drop_path(self.attn(self.norm1(xs)))
@@ -180,6 +279,7 @@ class Block(nn.Module):
             x = xt
 
             # 中文说明：# MLP。
+            # 公式：x = [cls; x_t] + [cls_avg; spatial_attn(...)]，再 + DropPath( mlp( norm(x) ) )。
             x = torch.cat((init_cls_token, x), 1) + torch.cat((cls_token, res), 1)
             x = x + self.drop_path(self.mlp(self.norm2(x)))
             return x
@@ -187,10 +287,22 @@ class Block(nn.Module):
 class PatchEmbed(nn.Module):
     """
     将视频帧图像切成 patch，并投影成 token embedding。
+
+    形状公式：
+        公式：(B, C, T, H, W) -> (B*T, C, H, W)                  # 时间维并入 batch
+        公式：Conv2d(kernel=patch_size, stride=patch_size) ->     # 切 patch + 线性投影
+              (B*T, embed_dim, H/P, W/P)
+        公式：flatten(2).transpose(1, 2) -> (B*T, N, embed_dim)   # N = (H/P)*(W/P)
     """
     def __init__(self, img_size=(224, 224), patch_size=16, in_chans=3, embed_dim=768):
         """
         初始化 patch 大小、patch 数量和 Conv2d 投影层。
+
+        参数：
+            img_size (Tuple[int,int]): ``(H, W)``，TimesFormer-WorldVLN 用 (192,640)。
+            patch_size (int): patch 边长，stride 与之相同。
+            in_chans (int): 输入通道数；RGB 帧为 3。
+            embed_dim (int): 输出 token 维度 D。
         """
         super().__init__()
         # 如果需要支持标量 img_size，可以用 to_2tuple 转成二维大小。
@@ -204,7 +316,13 @@ class PatchEmbed(nn.Module):
 
     def forward(self, x):
         """
-        将 (B, C, T, H, W) 视频输入转成每帧 patch token。
+        将 ``(B, C, T, H, W)`` 视频输入转成每帧 patch token。
+
+        参数：
+            x (Tensor): ``(B, C, T, H, W)`` 视频。
+        返回：
+            Tuple[Tensor, int, int]: ``(tokens, T, W_patch)``，``tokens`` 形状
+            ``(B*T, N, embed_dim)``，``W_patch = W / patch_size``。
         """
         B, C, T, H, W = x.shape
         x = rearrange(x, 'b c t h w -> (b t) c h w')
@@ -217,12 +335,49 @@ class PatchEmbed(nn.Module):
 class VisionTransformer(nn.Module):
     """
     TimeSformer 使用的 Vision Transformer 主体网络。
+
+    主要组件：
+        ``patch_embed``  : :class:`PatchEmbed`，把视频帧切成 ``(B*T, N, D)`` token。
+        ``cls_token``    : ``(1, 1, D)`` 全局分类 token。
+        ``pos_embed``    : ``(1, 1+num_patches, D)``，按训练分辨率初始化；推理时若网格
+                           不匹配会做最近邻 resize。
+        ``time_embed``   : ``(1, num_frames, D)``，仅在 ``divided_space_time`` /
+                           ``joint_space_time`` 下使用，按帧附加。
+        ``blocks``       : ``depth`` 层 :class:`Block`，可配置 divided / joint / space-only。
+        ``norm``         : 输出前的 LayerNorm。
+        ``head``         : Linear 分类头，把 cls embedding 投影到 ``num_classes`` 维。
+
+    本类提供三个前向入口：
+        - :meth:`forward` ：完整视频 -> logits，训练时主入口。
+        - :meth:`forward_features` ：完整视频 -> cls embedding（未过 head）。
+        - :meth:`forward_features_from_patch_tokens` ：跳过 PatchEmbed，从外部
+          patch token 出发跑后续 pipeline，供 ``Vae96ToTSformerEmbedAdapter`` 使用。
+
+    Divided space-time attention 公式：
+        公式：先做时间 self-attention（每个 spatial 位置内沿 T），再做空间 self-attention
+        （每个时间步内沿 N）。详见 :class:`Block` docstring。
     """
     def __init__(self, img_size=(224, 224), patch_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
                  drop_path_rate=0.1, hybrid_backbone=None, norm_layer=nn.LayerNorm, num_frames=8, attention_type='divided_space_time', dropout=0.):
         """
         初始化 patch embedding、位置/时间 embedding、Transformer blocks 和分类头。
+
+        参数：
+            img_size (Tuple[int,int]): ``(H, W)`` 输入分辨率，WorldVLN 用 (192,640)。
+            patch_size (int): patch 边长，标准 16。
+            in_chans (int): 输入通道；RGB 为 3。
+            num_classes (int): 分类/回归输出维度。WorldVLN 用 18 = 6D delta * 3 帧。
+            embed_dim (int): token 维度 D，标准 384（也支持 192/768/1024）。
+            depth (int): Transformer block 层数。
+            num_heads (int): 多头注意力头数。
+            mlp_ratio (float): MLP hidden 相对 D 的倍率，标准 4。
+            qkv_bias / qk_scale / drop_rate / attn_drop_rate / drop_path_rate:
+                透传给 :class:`Attention` 与 :class:`Block`，``drop_path_rate``
+                会按 stochastic depth 等差衰减分配到各层。
+            num_frames (int): 训练 ``time_embed`` 的帧数；推理时帧数不一致会自动 resize。
+            attention_type (str): 见 :class:`Block`。
+            dropout (float): 顶层 dropout（很少使用）。
         """
         super().__init__()
         self.attention_type = attention_type
@@ -304,6 +459,16 @@ class VisionTransformer(nn.Module):
     def forward_features(self, x):
         """
         从原始视频张量提取 CLS token 特征，尚不经过分类头。
+
+        与 :meth:`forward_features_from_patch_tokens` 的区别：本方法接收 RGB 视频
+        ``(B, C, T, H, W)``，内部用 :class:`PatchEmbed` 把图像切成 patch；
+        ``forward_features_from_patch_tokens`` 则跳过 PatchEmbed，从外部提供的
+        patch token 出发，专为 Adapter 链路设计。
+
+        参数：
+            x (Tensor): ``(B, C, T, H, W)`` 视频。
+        返回：
+            Tensor: ``(B, D)`` 的 cls embedding。
         """
         B = x.shape[0]
         x, T, W = self.patch_embed(x)
@@ -365,6 +530,12 @@ class VisionTransformer(nn.Module):
         """
                 从预先计算好的 patch tokens 提取 TimeSformer 特征，跳过 PatchEmbed。
 
+                与 :meth:`forward_features` 的区别：本方法不再调用 ``PatchEmbed``，调用方
+                需要自行把视频/隐空间特征压成 patch token。这是 WorldVLN
+                ``Vae96ToTSformerEmbedAdapter`` 的入口：先用 Adapter 把
+                ``(B, 96, T, 256, 256)`` -> ``(B*T, 480, 384)`` 的 token，再调用本方法
+                跑完整的 divided space-time 注意力。
+
                 参数：
                     patch_tokens: 形状为 (B*T, N, D) 的 Tensor，其中：
                       - N = (H/P)*(W/P)，表示每帧的空间 patch 数。
@@ -425,6 +596,16 @@ class VisionTransformer(nn.Module):
     def forward(self, x):
         """
         提取视频特征并送入分类头，得到类别 logits。
+
+        相当于 ``head(forward_features(x))``，是训练/评估时的主入口。
+        如果训练流水线先经过 ``Vae96ToTSformerEmbedAdapter``，请改用
+        :meth:`forward_features_from_patch_tokens` + 自定义 head。
+
+        参数：
+            x (Tensor): ``(B, C, T, H, W)`` 视频。
+        返回：
+            Tensor: ``(B, num_classes)``；WorldVLN 中 ``num_classes=18`` 表示
+            3 帧 6D delta 动作的拼接。
         """
         x = self.forward_features(x)
         x = self.head(x)

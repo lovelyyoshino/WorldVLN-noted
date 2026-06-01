@@ -1,6 +1,21 @@
 # Copyright 2020 Ross Wightman
 # ViT 相关的通用工具函数。
 
+"""Vision Transformer 通用工具函数。
+
+中文导读：
+    从 Ross Wightman 的 ``timm`` 项目移植而来，主要提供：
+        - ``trunc_normal_``：截断正态分布的原地权重初始化，用于 ``cls_token`` /
+          ``pos_embed`` / Linear 层；公式：从 N(mean, std^2) 中采样，落在
+          ``[a, b]`` 之外则重采样。
+        - ``DropPath`` / ``drop_path``：按样本 stochastic depth；公式：
+          ``x_out = x * mask / keep_prob``，``mask ~ Bernoulli(keep_prob)``。
+          推理时直接返回 ``x``，等价于 ``Identity``。
+        - ``to_2tuple``：把标量扩成二元 tuple，便于 patch_size、img_size 等参数兼容。
+        - ``IMAGENET_DEFAULT_MEAN/STD`` 等常量：ImageNet 归一化参数，用于上游
+          ViT 预训练权重对齐。
+"""
+
 import torch
 import torch.nn as nn
 from functools import partial

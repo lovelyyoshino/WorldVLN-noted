@@ -751,6 +751,131 @@ p(z_{t+1:t+K} | z_{\le t}, instruction) -> D_phi(z_{t+1:t+K}) -> actions
 
 ## 7. 训练路线
 
+> 在跳进每一阶段的细节之前，强烈建议先扫一眼下面这张「三阶段速览」。
+> 很多人第一次会把 *Stage 1 / Stage A / Stage B / GRPO* 弄混，因为「Stage 1 vs Stage 2」是「世界模型 vs 动作解码器」的大阶段划分，
+> 而「Stage A vs Stage B」是 Stage 2 内部的两步。它们是**两个独立维度**，不是同一条线性流程的四段。
+
+### 7.0 三阶段速览：到底在监督什么？
+
+把整条训练流水线按「**输入 → 监督信号 → 监督什么 → 产出**」摊开，你会发现这其实是 4 套独立训练，每一套都有自己的 GT 和 loss 形式：
+
+```text
+Stage 1（世界模型监督训练）
+   输入：自然语言指令 + 真实视频 latent（teacher-forcing）
+   监督：CrossEntropy on next-token / next-bit
+   GT  ：video VAE BSQ / LFQ 量化器输出的真实 bit code
+   产出：InfinityStar transformer checkpoint
+
+Stage 2 = Stage A + Stage B + GRPO
+   ┌─ Stage A（Adapter 蒸馏）
+   │     输入：真实 RGB 帧 + 同段 latent
+   │     监督：让 student token 对齐 teacher token
+   │     GT  ：frozen TimesFormer 看真实 RGB 得到的 teacher 分布
+   │     产出：Adapter checkpoint
+   │
+   ├─ Stage B（latent → 动作监督）
+   │     输入：z_ext (latent) + 专家轨迹 JSON
+   │     监督：MSE 预测相邻帧 6D delta
+   │     GT  ：专家轨迹相邻帧的 [dz,dy,dx,tx,ty,tz]（rad+m，再做归一化）
+   │     产出：stage2_latent2action_combined checkpoint
+   │
+   └─ GRPO（强化学习微调）
+         输入：rollout 轨迹 + reward + old_logprob
+         监督：策略梯度（GRPO/PPO 风格的 ratio·advantage）
+         GT  ：reward（动作 MSE + 任务进度 + CE shaping），不是 token 标签
+         实际更新：Stage 1 的世界模型权重（动作头通常冻结或低 lr）
+```
+
+**核心区别一句话：**
+
+- **Stage 1** 教模型「看图说下一帧」——和动作完全无关，是一个可控视频生成式的世界模型。
+- **Stage A** 教 Adapter「翻译」——不学动作，只让 latent 路径出来的 token 在 TimesFormer 眼里和真实 RGB 路径出来的 token「长一样」。
+- **Stage B** 才是「动作监督」——把 Stage 1 的 latent + Stage A 的对齐 token 翻译成具体 6D 动作。
+- **GRPO** 把世界模型从「会模仿真实视频」升级成「会生成能解出好动作的 latent」。监督信号从 token 标签换成了 reward。
+
+#### 7.0.1 监督信号对照表
+
+| 维度 | **Stage 1** | **Stage A** | **Stage B** | **GRPO** |
+|---|---|---|---|---|
+| **训练对象（哪个权重在更新）** | InfinityStar transformer | Adapter | TimesFormer + Adapter | InfinityStar transformer（再训） |
+| **监督信号本质** | 下一 bit code 概率 | teacher token 分布 | 专家动作 delta | rollout reward |
+| **Loss 类型** | CrossEntropy (label_smooth) | `cos + MSE + mean + std` 复合 | 加权 MSE（旋转/水平/垂直分组） | 策略梯度 (ratio·advantage) |
+| **GT 来源** | video VAE 量化 bit code | frozen TSformer 看真实 RGB | 专家轨迹 JSON | 模拟器 + reward 函数 |
+| **是否需要动作标签** | ❌ | ❌ | ✅ | ❌（用 reward 代替） |
+| **是否需要真实 RGB 帧** | 仅训练阶段编码用 | ✅（teacher 分支） | latent 即可 | ❌（rollout 自采样） |
+| **是否需要专家轨迹** | ❌ | ❌ | ✅ | reward 计算时可作参考 |
+| **教会模型什么能力** | 给定指令和历史，想象未来 latent | 让 latent token ≈ RGB token | 把 latent 翻成 6D 动作 | 让 latent 翻出的动作真的能完成任务 |
+| **入口脚本** | `train/train.py` | `train_stageA_ddp.py` | `train_stageB_ddp.py` | `action_aware_grpo/scripts/run_stageb_partialfreeze.sh` |
+| **关键 loss 文件:行号** | `Worldmodel/runtime/infinity/trainer/sft_trainer.py:131` | `train/action_decoder/tools/train_stageA_ddp.py:76` | `train/action_decoder/tools/train_stageB_ddp.py:459` | `Worldmodel/runtime/tools/GRPO/reward_uavflow.py:131` + sft_trainer.py:506 |
+
+#### 7.0.2 数据/标签到底长什么样
+
+很多人对「监督什么」感到模糊，是因为没搞清楚每一阶段**真正喂给 loss 函数的张量**是什么。下面把 4 个阶段的"loss 输入"列清楚：
+
+```text
+Stage 1
+    pred  : transformer 输出的 logits  shape (B, L, V)，V = codebook 规模
+    target: video VAE 量化得到的 bit code 索引 shape (B, L)
+    loss  : CrossEntropy(pred, target)  按 scale 可加权
+
+Stage A
+    student_tokens: (B*T, N=480, D=384)  ← latent → VAE hook → Adapter
+    teacher_tokens: (B*T, N=480, D=384)  ← 真实 RGB → frozen TimesFormer.patch_embed
+    loss = w_cos*L_cos + w_mse*L_mse + w_mean*L_mean + w_std*L_std
+
+Stage B
+    pred  : (B, K, 18)   ← TimesFormer 4 帧滑窗对每个窗口输出 3 个相邻帧 6D delta
+    target: (B, K, 18)   ← 专家轨迹相邻帧 delta，先 _normalize_delta_bt6() 标准化
+    loss = w_rot*MSE_rot + w_xy*MSE_xy + w_z*MSE_z
+
+GRPO
+    new_logprob: 当前策略对 rollout 时采样到的 token 重新打分
+    old_logprob: rollout 时刻冻结的旧策略概率
+    advantage  : 组内 LOO/rank 优势（公式见 §2.2 GRPO 行）
+    loss = -E[ exp(new_logprob - old_logprob) * advantage ]
+    （可选 + KL 约束 / + aux SFT 项；trace_replay 模式下默认 PG-only）
+```
+
+#### 7.0.3 一图流：四阶段如何串成训练流水线
+
+```text
+              ┌─── Stage 1：教世界模型「想象」────────────┐
+              │ 输入：文本 + 真实视频 latent              │
+              │ 监督：CE on next bit code                  │
+              └────────────────────┬───────────────────────┘
+                                   │ 产出 InfinityStar ckpt
+                                   ▼
+              ┌─── Stage A：教 Adapter「翻译」───────────┐
+              │ 输入：同段 RGB + latent                   │
+              │ 监督：student token ≈ teacher token       │
+              └────────────────────┬───────────────────────┘
+                                   │ 产出 Adapter ckpt
+                                   ▼
+              ┌─── Stage B：教动作头「执行」─────────────┐
+              │ 输入：latent + 专家轨迹                   │
+              │ 监督：MSE on 6D delta                      │
+              └────────────────────┬───────────────────────┘
+                                   │ 产出 stage2_combined ckpt
+                                   ▼
+              ┌─── GRPO：让想象出的未来「能完成任务」────┐
+              │ 输入：rollout + reward + old_logprob      │
+              │ 监督：策略梯度（组内相对优势）            │
+              │ 实际更新：Stage 1 的世界模型权重          │
+              └────────────────────────────────────────────┘
+```
+
+#### 7.0.4 容易踩的坑
+
+1. **"Stage 1 训完动作就会了？"**——不会。Stage 1 完全不监督动作，它只是个会按指令生成视频 latent 的世界模型。要拿到动作能力必须再走 Stage A + Stage B。
+2. **"Stage A 不是已经在监督动作了吗？"**——不是。Stage A 只对齐 token 分布，不看任何动作标签。它的存在是为了让 Stage B 能复用 TSformer-VO 的预训练动作能力。
+3. **"GRPO 训练的是动作头？"**——一般不是。GRPO 主要把世界模型当成策略来 fine-tune；动作解码器在 GRPO 阶段通常被冻结或给极低学习率，因为它只是「latent → 动作」的翻译器，不是策略本体。
+4. **"Stage B 的 loss 直接是 m / rad 吗？"**——不是。专家 delta 会先经 `_normalize_delta_bt6()` 用训练集的 mean/std 归一化，再和模型输出比对。推理时反向操作（先反归一化，再做单位换算到 cm/deg）。详见 §7.1。
+5. **"GRPO 的 reward 是单一标量？"**——不是。它是 `λ_act·r_act + λ_task·r_task + λ_ce·r_ce` 的复合 reward，每一项再各自有自己的子结构（动作 MSE 分 xyz/yaw/all6；任务 reward 分 dense/success；CE shaping 用 reference policy）。详见 §2.2 GRPO 行。
+
+读完上面这一节，你应该可以闭着眼回答："这一阶段的 loss 在比对什么张量？为什么需要这一阶段？"。然后再往下看 7.1+ 的具体实现。
+
+---
+
 Stage 1：监督训练世界模型
 
 - 入口：`train/scripts/train_from_base.sh`
@@ -820,6 +945,168 @@ VAE decoder 中间特征 -> Adapter -> TimesFormer token 空间
 ```
 
 这一步对齐后，Stage B 才能把同一套 latent token 接到动作头上训练。
+
+Stage A 教师-学生优化训练细读：
+
+一句话：这里不是在重新训练 VAE，也不是让 VAE 重建 RGB；这里训练的是 `Vae96ToTSformerEmbedAdapter`。Teacher 给出目标 token，student 用 latent 经过冻结 VAE 的中间特征生成 token，然后只让 Adapter 向 teacher token 靠近。这个设计的目的，是把“世界模型会输出的 latent”接到“原 TimesFormer 动作头熟悉的 patch token 空间”。
+
+```text
+teacher:
+  真实 RGB PNG
+    -> resize / ToTensor / KITTI mean-std normalize
+    -> frozen TimesFormer.patch_embed
+    -> tok_t
+
+student:
+  z_ext 或 z_sub
+    -> frozen InfinityStar VAE.decode
+    -> hook decoder 最后一个 up block feature
+    -> trainable Adapter
+    -> tok_s
+
+optimize:
+  loss(tok_s, tok_t) -> backward -> update Adapter only
+```
+
+先看三个角色：
+
+- Teacher 是冻结的 TimesFormer。`main()` 里先 `build_tsformer()`、`load_tsformer()`，然后 `eval()` 并对所有参数 `requires_grad_(False)`。它不学习，只把真实 RGB 帧转成稳定的 `tok_t` 目标。
+
+- Student 的可训练部分只有 Adapter。`Vae96ToTSformerEmbedAdapter` 接收 VAE decoder 中间 feature，输出 TimesFormer 风格 token。`AdamW` 的参数只来自 Adapter；DDP 情况下取 `adapter.module.parameters()`。
+
+- VAE 是冻结特征抽取器。代码通过 `_VaeDecodeOnly.forward()` 调 `vae.decode(z_ext)`，但最终 RGB 输出会被丢弃，真正使用的是 `vae.decoder.up_blocks[-1]` 的 hook feature。
+
+为什么冻结 VAE 还要 decode：Stage B 和推理阶段拿到的是世界模型预测出的 latent，不是真实 RGB。如果直接拿 RGB 训练动作头，Stage B 仍然依赖 `TimesFormer.patch_embed(RGB)`，就绕不开真实图像。Stage A 做的是中间桥接：
+
+```text
+world model latent
+  -> frozen VAE decoder hidden feature
+  -> Adapter
+  -> TimesFormer-compatible tokens
+```
+
+这样 Stage B 才能在没有真实 RGB patch_embed 的情况下，复用 TimesFormer 风格的 token 表征继续学习动作。
+
+数据侧的对齐方式：
+
+- `LatentTrajManifestDataset(load_frames=True)` 同时取 `z_ext` 和 `frames_rgb`。`z_ext` 走 student 分支，`frames_rgb` 走 teacher 分支。
+
+- Teacher 的 PNG 帧会通过 `_build_png_transform()` 统一成 `(3,T,192,640)`，并使用 KITTI mean/std normalize，保证 teacher 分支输入分布匹配 TimesFormer 训练时的图像统计。
+
+- `collate_mode=per_sample` 是默认稳妥模式。它不强行把变长样本拼成一个大 batch，而是把每个样本单独放进 `samples` 列表；坏样本、缺帧样本、过短 latent 可以被单独跳过，不会拖垮整个 batch。
+
+- `collate_mode=crop` 会把 batch 内 latent 和 RGB 都裁到公共最短长度再拼 batch，吞吐更好，但对数据长度一致性要求更高。
+
+- video VAE 的时间关系近似是 `T_frames = 4*(T_lat-1)+1`。所以 `latent_chunk_len=3` 对应 9 帧 teacher，`latent_chunk_len=5` 对应 17 帧 teacher。这不是动作窗口长度，而是 latent 时间步 decode 后对应的 RGB 帧数。
+
+- 当 `latent_use_full=True` 时，代码直接使用整条 latent 序列，`expected_T=None`，teacher 也使用整段 RGB。这个最直观，覆盖最完整，但显存最高。
+
+- 当关闭 `latent_use_full` 时，代码会构造 `z_sub_list`。如果 `latent_cover_all=True`，按 `latent_stride` 枚举所有 latent 窗口；否则每条样本只取一个窗口，`latent_chunk_random=True` 时随机起点，关闭时固定从 0 开始。
+
+- 对非 0 起点窗口，teacher 帧起点用 `f0 = 4*st_lat - 3` 近似对齐。这是在匹配 video VAE 前缀累计帧数和 latent 边界重叠关系，不是简单的 `4*st_lat`。
+
+`_decode_teacher_student_tokens()` 是这段优化的关键函数：
+
+- 它先注册 `vae.decoder.up_blocks[-1].register_forward_hook(hook)`。hook 只负责把最后一个 up block 的 5D feature 收集起来，形状类似 `(B,96,T_dec,H_feat,W_feat)`。
+
+- VAE decode 放在 `torch.no_grad()` 和 AMP 里运行。这样不会为冻结 VAE 保存反传图，显存压力会小很多。
+
+- hook 里保存的是 `hs.detach()`。这一步很关键：VAE feature 只是 Adapter 的输入，不应该继续连着 VAE decoder 的计算图。
+
+- Adapter 不能放在 VAE 的 `no_grad()` 作用域里执行。正确做法是先用 hook 拿到 detached feature，再在启用梯度的上下文中跑 Adapter；否则 loss 可能没有连到 Adapter，`AdamW` 的 optimizer state 会一直为空。
+
+- Adapter 前向按时间维用 `adapter_frames_chunk` 切块。Adapter 内部没有跨时间混合，所以把 `(B,96,T,H,W)` 拆成几段再拼回 `(B,T,N,D)`，数学结果等价，但反传要保留的激活更少。
+
+- `adapter_use_checkpoint=True` 时，Adapter 前向用 `torch.utils.checkpoint(..., use_reentrant=False)`。这里必须用 non-reentrant，因为输入 feature 已经 detach，不需要输入梯度；默认 reentrant checkpoint 可能因为输入都不带 grad 而不建图，导致 loss 没有 `grad_fn`。
+
+- Teacher token 用 `tsformer.patch_embed(frames_teacher)` 得到，并在 `torch.no_grad()` 下运行。Teacher 和 student 最后都整理成 `(B,T,N=480,D=384)`，若帧数不一致，就按较短的 `T` 截齐后算 loss。
+
+一个 optimizer step 内部可以按这条链路理解：
+
+```text
+DataLoader batch
+  -> optimizer.zero_grad(set_to_none=True)
+  -> 遍历 batch 里的每个 sample
+  -> 为 sample 选择一个或多个 latent window: z_sub
+  -> 根据 st_lat 裁 teacher RGB: fr_sub
+  -> _decode_teacher_student_tokens(z_sub, fr_sub)
+  -> compute_distill_loss(tok_s, tok_t)
+  -> scaler.scale(loss_i).backward()
+  -> 多个 window 的梯度按 backward_count 求平均
+  -> grad clip
+  -> scaler.step(optimizer)
+  -> scaler.update()
+```
+
+这里最重要的优化是“即时 backward”。代码不是先把一个 batch 里所有 sample/window 的 loss 全部累起来，再一次 backward；而是每得到一个有效 `loss_i` 就立刻 `backward()`。这样可以尽早释放当前窗口的 Adapter 计算图，避免完整 batch、完整视频、多个窗口的图全部堆在显存里。
+
+为什么要除以 `backward_count`：如果 `latent_cover_all=True`，一条样本可能产生多个 latent window。如果不把梯度除以窗口数，那么窗口越多，等效学习率越大；训练效果会被采样策略影响。代码在同一个 optimizer step 内多次 backward 后，把所有 Adapter 参数梯度除以 `backward_count`，让“枚举多个窗口”更接近“对多个窗口取平均 loss”。
+
+为什么有 DDP-safe zero backward：分布式训练里，各 rank 需要保持相同的 backward/step 节奏。如果某个 rank 因为坏样本、缺帧、VAE decode 空输出导致没有任何有效 loss，它也必须参与一次 backward。代码用可训练参数求和再乘 0，构造一个带图的零 loss：
+
+```text
+loss_batch = sum(trainable_params) * 0.0
+```
+
+这个 loss 不改变梯度数值，但能让 DDP 的通信和 optimizer step 结构保持一致，避免某些 rank 在等待梯度同步时卡住。
+
+loss 设计：
+
+```text
+L_total = w_cos*L_cos + w_mse*L_mse + w_mean*L_mean + w_std*L_std
+```
+
+- `L_cos = mean(1 - cos(student, teacher))`，先让 token 方向对齐。对蒸馏来说，方向通常比绝对数值更稳定。
+
+- `L_mse = mean((student - teacher)^2)`，让逐元素数值也贴近 teacher。它对尺度更敏感，前期权重太大可能让训练不稳定。
+
+- `L_mean` 对齐整批 token 每个维度的均值，约束 student token 的分布中心。
+
+- `L_std` 对齐整批 token 每个维度的标准差，约束 student token 的分布宽窄。
+
+默认 loss schedule 是 `piecewise_linear`：前若干 epoch 保持起始权重，之后线性切到结束权重。默认意图是前期 `cosine` 权重大、`MSE` 权重小，先学“方向像不像”；后期逐步降低 `cosine`、提高 `MSE`，再学“数值准不准”。这比一开始就强压 MSE 更稳。
+
+显存和吞吐相关参数可以这样读：
+
+- `global_batch_size` 会按 DDP `world_size` 自动换算每卡 `batch_size`，避免启动脚本里手动算错。
+
+- `adapter_frames_chunk` 越小越省显存，但 Adapter 前向循环次数更多，速度更慢。
+
+- `adapter_use_checkpoint` 省显存但会重算 Adapter 前向，训练变慢；当视频长、batch 大或显存紧张时通常值得开。
+
+- `latent_use_full=True` 覆盖最完整但显存最高；关闭后用 `latent_chunk_len`、`latent_cover_all`、`latent_stride`、`latent_max_windows` 控制覆盖率和显存。
+
+- `vae_disable_slicing`、`vae_disable_tiling` 主要用于排查 VAE 行为。禁用后行为更直观，但显存更高。
+
+- `vae_num_sample_frames_batch_size` 用来覆盖 VAE 内部一次处理多少帧，可用于调 VAE decode 的峰值显存。
+
+- `amp`、`GradScaler` 和 `grad_clip` 是数值稳定和显存吞吐优化。AMP 降低显存和加速，`grad_clip` 防止蒸馏早期梯度尖峰。
+
+checkpoint 和导出逻辑：
+
+- 常规保存文件是 `stage1_adapter_e{epoch}.pt` 和 `stage1_adapter_last.pt`，里面有 `adapter_state_dict`、`optimizer_state_dict`、`scaler_state_dict`、`args`、`global_step`。
+
+- `export_combined=True` 时，会额外导出 `infinitystar_up3_plus_adapter_latent2tokens.pt`，里面打包 `vae_state_dict` 和 `adapter_state_dict`。这个文件是给 Stage B 用的：Stage B 可以直接拿“VAE + Adapter”作为 latent 到 TimesFormer token 的前端。
+
+读源码时建议按这个顺序跳：
+
+- `compute_distill_loss()`：先看 student/teacher token 到底怎么被约束。
+
+- `_loss_weights_for_epoch()`：看 `cosine` 和 `MSE` 的 epoch 级权重调度。
+
+- `_build_png_transform()`：看 teacher RGB 如何变成 TimesFormer 熟悉的输入分布。
+
+- `collate_fn()`：看坏样本、变长 latent、缺帧样本如何被处理。
+
+- `main()` 的 teacher/student/VAE 初始化段：确认 TimesFormer 和 VAE 冻结，只有 Adapter 进 optimizer。
+
+- `_decode_teacher_student_tokens()`：重点看 no-grad VAE decode、hook、detach、Adapter 分块、checkpoint 和 student/teacher 对齐。
+
+- `main()` 的 sample/window 训练循环：看 latent 窗口怎么选、teacher 帧怎么裁、为什么每个 window 立刻 backward。
+
+- checkpoint/export 段：看 Stage A 产物如何交给 Stage B。
+
+这套优化训练的核心取舍是：用冻结 VAE 和冻结 TimesFormer 保持目标空间稳定，只训练轻量 Adapter；用 hook、detach、no-grad、时间切块、checkpoint、即时 backward 把显存压下来；用 loss schedule 从方向对齐过渡到数值对齐，让 Adapter 逐步学成可给 Stage B 使用的 latent-to-token 前端。
 
 Stage B：latent 到动作训练
 

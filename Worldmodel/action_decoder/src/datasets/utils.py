@@ -1,24 +1,43 @@
+"""Euler 角与旋转矩阵之间的转换工具。
+
+中文导读：
+    本模块提供 ``rotation_to_euler`` 和 ``euler_to_rotation`` 两个函数，用于在
+    3x3 旋转矩阵与 ZYX Euler 角之间互转。WorldVLN 动作标签使用 6D 表示
+    ``[dx, dy, dz, droll, dyaw, dpitch]``，其中旋转部分需要这两个函数做坐标变换。
+
+    核心公式（ZYX 顺序）：
+        公式：ZYX Euler -> R = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+        公式：R -> ZYX：yaw = atan2(R[1,0], R[0,0])，pitch = asin(-R[2,0])，
+              roll = atan2(R[2,1], R[2,2])
+
+    注意：当 cos(pitch) 接近 0 时（万向锁），上述公式退化为不稳定形式，
+    代码中使用 ``cy_thresh`` 做数值保护。
+"""
+
 import numpy as np
 import functools
 
 
 def rotation_to_euler(M, cy_thresh=None, seq='zyx'):
     """
+        从 3x3 旋转矩阵中提取 ZYX Euler 角。
+
+        公式：R -> ZYX：z(yaw) = atan2(-R[0,1], R[0,0])，
+              y(pitch) = asin(R[0,2])，x(roll) = atan2(-R[1,2], R[2,2])。
+        公式：当 cos(y) 接近 0（万向锁）时退化为 z = atan2(R[1,0], R[1,1])，x = 0。
+
+        参数：
+            M (array-like): 形状 ``(3, 3)`` 的旋转矩阵。
+            cy_thresh (float|None): cos(y) 的数值阈值；低于此值时使用退化公式。
+                为 None 时根据输入 dtype 的 eps*4 自动设定。
+            seq (str): 旋转顺序，``'zyx'`` 或 ``'xyz'``。
+        返回：
+            List[float]: ``[z, y, x]``，分别为绕 z/y/x 轴的旋转角（弧度）。
+
         参考来源：http://afni.nimh.nih.gov/pub/dist/src/pkundu/meica.libs/nibabel/eulerangles.py
-        说明：从 3x3 矩阵中求出 Euler 角向量。
         说明：使用上文约定的旋转顺序。
-        说明：参数
-        ----------
-        公式/形状说明：M : array-like, shape (3,3)
-        说明：cy_thresh : None 或标量，可选。
-        说明：低于该阈值时，不再用直接 arctan 方式估计 x 轴旋转；
+        说明：cy_thresh 低于该阈值时，不再用直接 arctan 方式估计 x 轴旋转；
         说明：如果为 None（默认），则根据输入精度估计。
-        说明：返回值
-        -------
-        说明：z : scalar
-        说明：y : scalar
-        说明：x : scalar
-        说明：分别表示绕 z、y、x 轴的旋转角，单位为弧度。
         说明：备注
         -----
         说明：如果没有数值误差，该例程可由 Sympy 中先 z、再 y、再 x 的旋转矩阵表达式推导：
@@ -40,7 +59,7 @@ def rotation_to_euler(M, cy_thresh=None, seq='zyx'):
         说明：Paul Heckbert（编辑），Academic Press，1994，ISBN: 0123361559。
         说明：具体来自 Ken Shoemake 的 EulerAngles.c，用于处理 cos(y) 接近 0 的情况。
         说明：参见：http://www.graphicsgems.org/
-        说明：网站声明该代码“可不受限制地使用”。
+        说明：网站声明该代码"可不受限制地使用"。
 
     """
     M = np.asarray(M)
@@ -80,20 +99,25 @@ def rotation_to_euler(M, cy_thresh=None, seq='zyx'):
 
 
 def euler_to_rotation(z=0, y=0, x=0, isRadian=True, seq='zyx'):
-    """ 返回说明：返回绕 z、y、x 轴旋转的矩阵。
+    """ 由 ZYX 顺序的 Euler 角生成 3x3 旋转矩阵。
+
+        公式：ZYX Euler -> R = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+              = euler2mat(z=yaw) @ euler2mat(y=pitch) @ euler2mat(x=roll)。
+        公式：单轴矩阵：
+              Rz(z) = [[cos z, -sin z, 0], [sin z, cos z, 0], [0, 0, 1]]
+              Ry(y) = [[cos y, 0, sin y], [0, 1, 0], [-sin y, 0, cos y]]
+              Rx(x) = [[1, 0, 0], [0, cos x, -sin x], [0, sin x, cos x]]
+
+        参数：
+            z (float): 绕 z 轴的旋转角（最先施加）。
+            y (float): 绕 y 轴的旋转角。
+            x (float): 绕 x 轴的旋转角（最后施加）。
+            isRadian (bool): 是否以弧度输入；为 False 时按角度处理。
+            seq (str): 旋转顺序，``'zyx'`` 或 ``'xyz'``。
+        返回：
+            np.ndarray: 形状 ``(3, 3)`` 的旋转矩阵。
+
         说明：使用上文先 z、再 y、再 x 的约定。
-        说明：参数
-        ----------
-        说明：z : scalar
-             说明：绕 z 轴的旋转角，单位为弧度（最先执行）。
-        说明：y : scalar
-             说明：绕 y 轴的旋转角，单位为弧度。
-        说明：x : scalar
-             说明：绕 x 轴的旋转角，单位为弧度（最后执行）。
-        说明：返回值
-        -------
-        公式/形状说明：M : array shape (3,3)
-             说明：与给定角度表示相同旋转的旋转矩阵。
         说明：示例
         --------
         公式/形状说明：>>> zrot = 1.3 # radians

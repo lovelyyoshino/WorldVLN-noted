@@ -1043,6 +1043,55 @@ def main():
     # 不管单个 optimizer step 里有多少次 backward，都能保证梯度平均正确。
     # 这也是本文件最容易看混的一段：TimesFormer 的“窗口级前向”与 Adapter/VAE 的
     # “整段 token 级反向”被拆成了两段，再在 step 前统一做梯度同步。
+    #
+    # ------------------------------------------------------------------
+    # 通俗版（“班长收作业”的比喻）：
+    # ------------------------------------------------------------------
+    # DDP 就像一个自动批改的“班长”，它的同步机制依赖两个固定假设：
+    #   1) 班长只在大门口收作业：DDP 的梯度同步 hook 注册在 model.forward() 上，
+    #      每次调用 model(x)，hook 才知道“这次前向用了哪些参数”，反向时才会
+    #      把多卡上对应参数的梯度做 all-reduce 平均。
+    #   2) 一次发卷、一次收卷：DDP 默认一个 step 里 forward 一次、backward 一次。
+    #
+    # 但本文件两条都违反了：
+    #
+    # 问题 1：TSformer 走了“后门”
+    #   TSformer 的前向不是 tsformer(x)，而是 m.forward_features_from_patch_tokens(...)
+    #   （见下方训练循环）。相当于学生绕过班长的桌子，从后窗爬进教室做题：
+    #     - 题做了（梯度算了）
+    #     - 班长没看见（DDP forward hook 没触发）
+    #     - 结果：N 张卡各练各的，参数会慢慢漂移成 N 个不同模型
+    #   最坑的是：它不会报错。loss 也在下降，但多卡间的模型其实已经不一致。
+    #   这就是上面说的“梯度同步静默失效”。
+    #
+    # 问题 2：Adapter 一节课交了好几次作业
+    #   per_sample 模式下，一个 DataLoader batch 可能装着多条不等长的轨迹，
+    #   循环里逐条样本独立跑 VAE -> Adapter -> TSformer -> backward。
+    #   也就是说一个 optimizer step 内会调用多次 backward。
+    #   如果把 Adapter 交给 DDP：
+    #     - 第 1 次 backward 触发一次 all-reduce
+    #     - 第 2 次 backward 又触发一次 all-reduce（把已经平均过的梯度再平均，
+    #       或者直接报 "Expected to mark a variable ready only once"）
+    #     - 第 3 次……同上
+    #   梯度被反复平均，等价于学习率被悄悄缩成原来的 1/N。
+    #
+    # 解法：自己当班长
+    #   干脆不让 DDP 管 tsformer 和 adapter，改成：
+    #   “下课铃响之前（optimizer.step() 之前），不管你今天做了几道题（多少次 backward），
+    #    把每个人草稿纸上累积的答案（p.grad）拿出来，统一对一次答案就完事了。”
+    #   对应下面 _allreduce_grads(optimizer.param_groups) 这一行：
+    #     - 手动对每个可训练参数的 p.grad 做一次 all_reduce(SUM) + 除以 world_size
+    #     - 不依赖 forward 路径，不依赖 backward 次数
+    #     - 一个 step 同步一次，干净
+    #
+    # 为什么说“最容易看混”：因为前向和反向被故意拆成了两段
+    #   - 窗口级前向/反向：TSformer 对若干个 4 帧窗口跑 forward+backward，
+    #     梯度只打到 patch_tokens 这个“中间缓存”上。
+    #   - 整段 token 级反向：把窗口梯度按时间轴 scatter_add 回完整 token 序列，
+    #     再一次性 tokens_btnd.backward(grad_tokens) 把梯度灌回 Adapter/VAE。
+    #   - step 级同步：所有累积梯度在 optimizer.step() 前统一 all-reduce 一次。
+    #   所以读代码时容易以为“VAE/Adapter 没收到梯度”，实际上是先攒着，最后一把灌回去。
+    #   配合手动 all-reduce，效果等价于一次普通 DDP 训练，但避开了上面两个雷。
 
     # 仓库根目录（包含 Worldmodel/、infer/、train/ 等目录）。
     vln_uav_root = os.path.abspath(os.path.join(_PROJ_ROOT, "..", "..", ".."))

@@ -1,6 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+GRPO replay metadata 的统计与安全检查脚本。
+
+中文导读：
+处于 GRPO 数据管线的最后一道闸门，作用是“在训练正式开跑之前确认 replay metadata 健康”。
+
+数据链路里它的位置：
+    rollout cache  ->  reward_uavflow.py / build_replay_dataset.py
+                  ->  本脚本：扫描 jsonl，统计权重/优势/成功率分布
+                  ->  trainer 真正读 part_*.jsonl 训练
+
+它做的事情：
+- 把若干 part_*.jsonl 合并，逐行读取每条 row；
+- 汇总 group 数量、组大小、reward/advantage、成功率、位置/yaw 误差等关键指标；
+- 检查“成功样本却被赋负优势”等典型异常；
+- 把 summary 写到一个 json 里方便其它流水线消费；
+- 通过 `--fail_on_*` 控制：发现严重不一致时直接 raise SystemExit，让上层流水线快速失败。
+"""
+
 from __future__ import annotations
 
 import argparse

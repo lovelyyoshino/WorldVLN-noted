@@ -1,6 +1,19 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
-"""模型构建相关函数。"""
+"""模型构建相关函数。
+
+中文导读：
+    本模块从上游 SlowFast 项目移植而来，提供两个东西：
+        - ``MODEL_REGISTRY``：``Registry`` 实例，``vit.py`` / ``video_model_builder.py``
+          中的模型类用 ``@MODEL_REGISTRY.register()`` 装饰器注册到名字 -> 类的映射。
+        - ``build_model(cfg)``：根据 ``cfg.MODEL.MODEL_NAME`` 在注册表中查到类并实例化，
+          可选地把模型移到当前 GPU 并包装 ``DistributedDataParallel``。
+
+    在没有 ``fvcore`` 时使用本文件内置的最小 ``Registry`` 兼容实现，保证只需要
+    ``VisionTransformer`` 时也能成功 import。WorldVLN 训练流水线一般直接调用
+    ``Worldmodel/action_decoder/src/build_model.build_model(args, model_params)``，
+    并不会走这里的注册表路径，但 ``vit_base_patch16_224`` 等装饰器仍依赖此文件。
+"""
 
 import torch
 

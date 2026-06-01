@@ -1,12 +1,27 @@
 # Copyright (c) 2025 FoundationVision
 # SPDX-License-Identifier: MIT
 """
-`Worldmodel/runtime` 下保留的旧版/备用 InfinityStar 训练入口。
+`Worldmodel/runtime` 下保留的旧版/备用 InfinityStar 训练入口（runtime 镜像）。
 
 中文导读：
 这个文件和顶层 `train/train.py` 承担相同的核心职责：组装 T5、VideoVAE、Infinity
 世界模型、optimizer 和 trainer，然后跑分布式训练循环。当前版本额外保留了 GRPO
 相关 batch 字段和 hybrid stepping 逻辑，主要用于 StageB/rollout 数据混训实验。
+
+它和顶层 `train/train.py` 的关系：
+- 顶层 `train/train.py` 是“开源 backbone 训练”的主入口，更新更频繁、依赖更精简；
+- 本文件位于 `Worldmodel/runtime/`，作为 runtime 自带的镜像副本而存在；
+- 服务端（`infer/server.py`、`action_aware_grpo/grpo_server.py`）以及本目录下的
+  其他工具（`tools/run_infinity.py`、`tools/infinity_streaming_session.py` 等）
+  在共享部分代码路径，因此 runtime 自带一份训练入口便于在“服务环境”里直接复跑训练
+  而不必依赖外部 train 目录；
+- 如果需要修改 SFT/GRPO 训练协议，应该先在顶层 `train/train.py` 落地，再同步到这里，
+  避免两份入口长期分叉。
+
+阅读建议：
+1. 先看 `build_everything_from_args()`：tokenizer、model、optimizer、trainer 怎么组装；
+2. 再看 `main_train()`：epoch / iters_train 怎么决定，auto_resume 如何处理；
+3. 最后看 `train_one_epoch()`：每个 batch 包含哪些 GRPO 字段，hybrid_step_on_role 如何影响 step。
 """
 import gc
 import json
@@ -472,7 +487,14 @@ def train_one_epoch(
 
         with maybe_record_function('before_train'):
             # [取数据]
+            # 视频 SFT 字段（必有）：
+            # - images / raw_features_bcthw：RGB 帧或预先编码的 latent；
+            # - captions：每条样本对应的文本提示；
+            # - feature_cache_files4images / media：缓存路径与媒体类型元数据。
             images, captions, raw_features_bcthw, feature_cache_files4images, media = data['images'], data['captions'], data['raw_features_bcthw'], data['feature_cache_files4images'], data['media']
+            # GRPO/replay 字段（可选）：
+            # 这些字段只有在使用 GRPO 或 hybrid SFT+GRPO 数据集时才存在，否则为 None。
+            # 它们最终会被一起传给 trainer.train_step()，由训练器内部决定是否启用对应的损失项。
             grpo_rewards = data.get('grpo_rewards', None)
             grpo_old_logprobs = data.get('grpo_old_logprobs', None)
             grpo_adv_finals = data.get('grpo_adv_finals', None)
@@ -492,6 +514,8 @@ def train_one_epoch(
             grpo_clip_ids = data.get('grpo_clip_ids', None)
             grpo_trace_files = data.get('grpo_trace_files', None)
             traj_ids = data.get('traj_ids', None)
+            # hybrid_roles：每条样本是 "sft" anchor 还是 "grpo" 候选；
+            # 后面 `hybrid_step_on_role` 会用它决定 batch 是否真正触发 optimizer step。
             hybrid_roles = data.get('hybrid_roles', None)
 
             # # [准备文本特征]

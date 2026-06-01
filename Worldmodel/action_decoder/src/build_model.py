@@ -1,3 +1,23 @@
+"""动作解码器（action_decoder）模型构建入口。
+
+中文导读：
+    本模块是 ``train.py`` / ``train_two_stage.py`` 等训练脚本调用的统一入口，作用是
+    把配置字典 ``model_params`` 翻译成一个可训练的 ``VisionTransformer``（TimesFormer
+    主干）。它负责三件事：
+
+    1. 按 ``image_size / patch_size / depth / heads / num_frames / attention_type``
+       构造 TimesFormer；WorldVLN 的标准配置是 ``image_size=(192,640)``、
+       ``patch_size=16``、``embed_dim=384``、``num_frames=3``、
+       ``attention_type='divided_space_time'``。
+    2. 依据 ``args["checkpoint"]`` 决定是否从训练 checkpoint 续跑（恢复
+       ``epoch_init / best_val / model_state_dict``）。
+    3. 否则按 ``args["pretrained_ViT"]`` 从 ImageNet 预训练 ViT 加载权重；位置
+       embedding 会在 ``load_pretrained`` 内被插值适配到非方形输入。
+
+模块还提供一个轻量 ``PatchEmbed`` 包装，用法与 TimesFormer 内部 ``PatchEmbed``
+一致，方便外部脚本在不调整 batch 维的情况下直接重用 patch 化逻辑。
+"""
+
 import torch
 import numpy as np
 import os
@@ -37,7 +57,15 @@ default_cfgs = {
 
 
 def _conv_filter(state_dict, patch_size=16):
-    """把手动 patchify + linear proj 的 patch embedding 权重转换成卷积权重。"""
+    """把手动 patchify + linear proj 的 patch embedding 权重转换成卷积权重。
+
+    参数：
+        state_dict (dict): 上游 ViT 预训练权重字典。
+        patch_size (int): patch 边长，默认 16；如果权重里 patch 不一致会自动覆盖。
+    返回：
+        dict: 同样结构的权重字典，但 ``patch_embed.proj.weight`` 已 reshape
+        成 ``(D, 3, P, P)``，可直接 load 进 ``nn.Conv2d``。
+    """
     out_dict = {}
     for k, v in state_dict.items():
         if 'patch_embed.proj.weight' in k:
@@ -49,7 +77,13 @@ def _conv_filter(state_dict, patch_size=16):
 
 
 def count_parameters(model):
-    """统计需要训练的参数量，用于日志中快速确认模型规模。"""
+    """统计需要训练的参数量，用于日志中快速确认模型规模。
+
+    参数：
+        model (nn.Module): 任意 PyTorch 模型。
+    返回：
+        int: 所有 ``requires_grad=True`` 参数的标量元素数之和。
+    """
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
@@ -61,6 +95,17 @@ def build_model(args, model_params):
     `model_params` 控制图像尺寸、patch、深度、头数和时间帧数；`args` 决定是从训练
     检查点恢复，还是加载 ImageNet ViT 预训练权重作为初始化。该函数返回模型和
     被写入 `epoch_init`/`best_val` 的 args，供训练脚本继续使用。
+
+    参数：
+        args (dict): 训练配置字典，至少包含 ``checkpoint``、``checkpoint_path``、
+            ``pretrained_ViT``。本函数会原地写入 ``epoch_init`` 与 ``best_val``。
+        model_params (dict): 模型超参，关键字段包括：
+            ``image_size`` ((H,W) 例如 (192,640))、``patch_size``、``dim``、
+            ``depth``、``heads``、``num_classes``、``num_frames``、
+            ``attention_type``、``attn_dropout``、``ff_dropout``、``time_only``。
+    返回：
+        Tuple[nn.Module, dict]: ``(VisionTransformer 实例, 已更新的 args)``，
+        可用 GPU 时模型已位于 ``cuda``。
     """
     # 构建模型并加载可用权重。
     model = VisionTransformer(img_size=model_params["image_size"],

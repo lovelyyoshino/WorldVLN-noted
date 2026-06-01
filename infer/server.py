@@ -200,7 +200,8 @@ def _obs_points(pred_num_frames: int, step: int) -> List[int]:
     """
     生成闭环 segment 边界。
 
-    初学者公式：`points = [1, 1+step, 1+2*step, ..., num_frames]`。
+    闭环 segment 边界公式：
+    - 公式：points = [1, 1+step, 1+2*step, ..., num_frames]
     例如 `pred_num_frames=49, step=16` 时返回 `[1,17,33,49]`：
     第 1 帧是预热观测，之后每 16 帧为一个动作执行片段。
     服务端默认就绪条件是 `ready_default = n >= points[seg+1]`：
@@ -386,8 +387,8 @@ def _to_cm_deg(deltas_m_rad: torch.Tensor) -> torch.Tensor:
     单位是 `(m, rad)`；输出会转换成 `(cm, deg)`。
 
     单位换算公式：
-    - meters -> cm：乘以 100；
-    - rad -> deg：乘以 180/pi。
+    - 公式：meters -> cm: *100（前 3 维平移，索引 0:3）
+    - 公式：radians -> degrees: *180/pi（后 3 维角度，索引 3:6）
     """
     out = deltas_m_rad.clone()
     out[..., 0:3] = out[..., 0:3] * 100.0
@@ -937,20 +938,32 @@ def _stage2_patchify_to_z64_BCTHW(summed_codes_BCTHW: torch.Tensor) -> torch.Ten
     重点注释：
     `summed_codes` 是世界模型预测出的 latent segment。Stage-2 动作解码器训练时使用的是
     patchified `z_ext` 形态，因此这里只做张量布局转换，不改变“世界转移”的语义。
+
+    为什么可能有 16/64 两种通道：
+    - 未 patchify latent：`C=16`，空间网格较大，例如 `[1,16,T,32,32]`；
+    - patchified latent：`C=64`，把每个 `2x2` 空间块折进通道维，例如 `[1,64,T,16,16]`。
+
+    `pixel_unshuffle(2)` 的直觉：
+    它不会做卷积、插值或学习变换，只是重新排列元素：
+    `[C=16, H, W] -> [C=16*4, H/2, W/2]`。
+    所以这一步是“布局整理”，不是重新生成 latent。
     """
     if summed_codes_BCTHW.ndim != 5 or int(summed_codes_BCTHW.shape[0]) != 1:
         raise ValueError(f"期望 summed_codes 形状为 [1,C,T,H,W]，实际 {tuple(summed_codes_BCTHW.shape)}")
     c = int(summed_codes_BCTHW.shape[1])
     if c == 64:
+        # 已经是 Stage-2 VAE 训练时使用的 patchified 布局，直接规范成 contiguous。
         return summed_codes_BCTHW.contiguous()
     if c != 16:
         raise ValueError(f"Stage2 不支持 summed_codes 通道数 C={c}（需要 16 或 64）")
+    # PyTorch 的 pixel_unshuffle 只接受 4D `[N,C,H,W]`，所以先把时间维 T 合并到 batch。
     # [B,C,T,H,W] -> [B,T,C,H,W]
     x = summed_codes_BCTHW.permute(0, 2, 1, 3, 4).contiguous()
     b, t, c0, h, w = x.shape
     if int(h) % 2 != 0 or int(w) % 2 != 0:
         raise ValueError(f"空间尺寸为奇数，无法 pixel_unshuffle: H,W={(int(h), int(w))}")
     x2 = x.view(int(b) * int(t), int(c0), int(h), int(w))
+    # 每个 2x2 空间块进入通道维：16 * 2 * 2 = 64。
     x2 = torch.nn.functional.pixel_unshuffle(x2, 2)  # (B*T, C*4, H/2, W/2) => (B*T,64,*,*)
     x2 = x2.view(int(b), int(t), int(x2.shape[1]), int(x2.shape[2]), int(x2.shape[3]))
     out = x2.permute(0, 2, 1, 3, 4).contiguous()  # [B,64,T,H/2,W/2]
@@ -973,6 +986,12 @@ def _stage2_decode_tokens_tnd(*, vae: torch.nn.Module, adapter: torch.nn.Module,
     这里不要把 `vae.decode()` 理解成“生成给人看的 RGB 视频”。代码注册了 decoder
     最后一层 up_block hook，只截取中间特征，再通过 adapter 翻译成 TimesFormer patch tokens。
     动作头消费的是这些 token，而不是最终图像像素。
+    
+    形状流：
+    `z64_BCTHW [1,64,T_lat,H,W]`
+      -> VAE decoder 最后 up_block feature `hs [1,96,T_frames,H_feat,W_feat]`
+      -> Adapter 输出 `tok [1*T_frames,N,D]`
+      -> reshape 成 `tokens_tnd [T_frames,N,D]`。
     """
     if z64_BCTHW.ndim != 5 or int(z64_BCTHW.shape[0]) != 1 or int(z64_BCTHW.shape[1]) != 64:
         raise ValueError(f"期望 z_ext 形状为 (1,64,T_lat,H,W)，实际 {tuple(z64_BCTHW.shape)}")
@@ -991,6 +1010,8 @@ def _stage2_decode_tokens_tnd(*, vae: torch.nn.Module, adapter: torch.nn.Module,
 
     def hook(_module, _inp, out):
         """VAE decoder forward hook：截取 up_block feature 并转换成 TimesFormer tokens。"""
+        # out 是 decoder 某个 up_block 的中间特征，不是 RGB。训练 Stage2 时动作头正是看这类
+        # feature，因此在线推理也必须从同一个位置取特征，不能改成直接看最终像素。
         hs = out[0] if isinstance(out, (tuple, list)) else out  # 代码/形状说明：(B,96,t_slice,H,W)
         if not isinstance(hs, torch.Tensor) or hs.ndim != 5:
             raise RuntimeError("VAE decoder hook 输出不是 5D Tensor")
@@ -998,11 +1019,13 @@ def _stage2_decode_tokens_tnd(*, vae: torch.nn.Module, adapter: torch.nn.Module,
         if bh != 1:
             raise RuntimeError(f"VAE hook 中 batch 维度不符合预期: hs={tuple(hs.shape)}")
         t_slice = int(hs.shape[2])
+        # Adapter 把 VAE 的 5D 卷积特征压成 TimesFormer 可接收的 patch tokens。
         tok, _t2, _w2 = adapter(hs)  # 代码/形状说明：(B*t_slice, N, D)
         tok = tok.view(bh, t_slice, int(tok.shape[1]), int(tok.shape[2])).contiguous()  # 代码/形状说明：(1,t_slice,N,D)
         tokens_slices.append(tok[0])  # 代码/形状说明：(t_slice,N,D)
 
     # 在 decoder 最后一个 up_block 上注册 hook，用来截取中间特征。
+    # finally 中必须 remove，避免下一次请求重复注册 hook 导致 tokens 被重复收集。
     try:
         handle = vae.decoder.up_blocks[-1].register_forward_hook(hook)  # type: ignore[attr-defined]
     except Exception as e:
@@ -1046,14 +1069,27 @@ def _gather_window_tokens(tokens_tnd: torch.Tensor, starts: torch.Tensor, window
     新手提示：
     这个函数只做索引 gather，不做模型推理。真正的动作预测发生在
     `_stage2_predict_16_actions_for_segment_cm_deg()` 调用 TimesFormer 之后。
+
+    为什么返回 `(K*window_size,N,D)`：
+    TimesFormer 的 `forward_features_from_patch_tokens()` 需要把所有窗口当作一个 batch：
+    - K 是窗口数量；
+    - 每个窗口有 `window_size=4` 帧；
+    - 所以时间维先摊平成 `K*4`，调用时再通过 `B=K, T=4` 告诉模型如何还原窗口结构。
+
+    例子：
+    如果 `starts=[0,1,2]` 且 `window_size=4`，实际取到的窗口是
+    `[0,1,2,3]`、`[1,2,3,4]`、`[2,3,4,5]`。这些窗口互相重叠，所以后面同一帧的
+    多个 delta 预测需要平均。
     """
     if tokens_tnd.ndim != 3:
         raise ValueError(f"tokens_tnd 必须是 (T,N,D)，实际为 {tuple(tokens_tnd.shape)}")
     t, n, d = tokens_tnd.shape
     k = int(starts.shape[0])
+    # 为了用一次 gather 完成批量索引，先把每帧的 `(N,D)` 展平成一行。
     flat = tokens_tnd.view(int(t), int(n) * int(d))
     t_idx = torch.arange(int(window_size), device=starts.device, dtype=torch.long).view(1, int(window_size))
     idx = starts.view(k, 1) + t_idx  # 代码/形状说明：(K,window_size)
+    # idx2 的每一行对应要取出的一个时间帧；expand 到 `N*D` 后才能从 flat 中取整帧 token。
     idx2 = idx.view(k * int(window_size), 1).expand(k * int(window_size), int(n) * int(d))
     g = flat.gather(0, idx2).view(k * int(window_size), int(n), int(d))
     return g.contiguous()
@@ -1069,7 +1105,17 @@ def _stage2_deltas_to_actions_cm_deg(deltas_T6: torch.Tensor) -> List[List[float
 
     输出布局：
     每个可执行 step 返回 `[dx_cm,dy_cm,dz_cm, droll_deg,dyaw_deg,dpitch_deg]`。
-    关键公式：`meter -> cm` 乘以 `100`，`rad -> deg` 乘以 `180/pi`。
+    - 公式：meter -> cm: *100（平移维度 tx,ty,tz）
+    - 公式：rad -> deg: *180/pi（角度维度 dz,dy,dx）
+
+    为什么从第 1 行开始：
+    `deltas_T6[0]` 表示窗口/clip 起点，没有“从上一帧到当前帧”的可执行动作。
+    真正可发给客户端的是从 frame 0 到 frame 1、frame 1 到 frame 2 ... 的增量，
+    因此循环从 `i=1` 开始，返回长度是 `T-1`。
+
+    坐标轴换序：
+    训练内部角度布局是 `[dz,dy,dx]`，但 API 对外约定是 `[roll(x), yaw(z), pitch(y)]`；
+    训练内部平移布局是 `[tx,ty,tz]`，API 对外放在前三个位置 `[dx,dy,dz]`，单位改为 cm。
     """
     if deltas_T6.ndim != 2 or int(deltas_T6.shape[1]) != 6:
         raise ValueError(f"deltas 必须是 (T,6)，实际为 {tuple(deltas_T6.shape)}")
@@ -1079,6 +1125,7 @@ def _stage2_deltas_to_actions_cm_deg(deltas_T6: torch.Tensor) -> List[List[float
         dz, dy, dx = [float(x) for x in deltas_T6[i, 0:3]]
         tx, ty, tz = [float(x) for x in deltas_T6[i, 3:6]]
         # 单位转换给初学者看：meters -> cm 是乘 100；rad -> deg 是乘 180/pi。
+        # 顺序转换给调用方看：内部 [dz,dy,dx,tx,ty,tz] -> API [dx,dy,dz,roll,yaw,pitch]。
         out.append(
             [
                 tx * 100.0,
@@ -1108,6 +1155,14 @@ def _stage2_predict_16_actions_for_segment_cm_deg(
     4. 用 `window=4` 的 TimesFormer 滑窗推理，并对重叠帧做平均。
     5. 切出本 segment 对应的 16 个动作并转成 cm/deg。
 
+    关键公式（小白必看）：
+    - 公式：meters -> cm: *100，radians -> degrees: *180/pi
+      （把动作头内部使用的 (m, rad) 单位换算成 API 对外约定的 (cm, deg)，
+      在 `_stage2_deltas_to_actions_cm_deg()` 中完成换算）
+    - 公式：4 帧滑窗聚合 delta[t] = sum(predictions covering t) / count[t]，且 delta[0]=0
+      （每帧 t 的位姿增量来自所有覆盖该帧的窗口预测的平均值，
+      首帧没有“上一帧到当前帧”的转移，所以 delta[0] 强制为 0 占位）
+
     对齐规则：
     这与 `actionhead_ref_vit` 的“只在左侧 pad 3 帧”规则一致，避免用未来帧泄漏。
 
@@ -1115,6 +1170,30 @@ def _stage2_predict_16_actions_for_segment_cm_deg(
     `obs_len -> next_obs_len` 是本轮闭环要执行的 16 帧动作区间。函数会额外取左侧最多
     3 帧上下文，是因为 TimesFormer 的动作头用 4 帧滑窗预测相邻帧之间的动作增量。
     输出单位会转换成 API 对外约定的 `[dx_cm, dy_cm, dz_cm, droll_deg, dyaw_deg, dpitch_deg]`。
+
+    具体例子：
+    - seg0：`obs_len=1, next_obs_len=17`，需要输出 16 个动作；
+    - `clip_abs_start=2, clip_abs_end=17` 表示动作到达的目标帧是 2..17；
+    - `ctx_start_abs=max(1, clip_abs_start-3)=1`，所以送入动作头的 token 覆盖帧 1..17；
+    - TimesFormer 按 4 帧窗口看：`[1,2,3,4]`、`[2,3,4,5]` ...； 这表示动作头每次看连续 4 帧 token，然后预测这 4 帧里的 3 个相邻动作 delta。
+    - 每个窗口输出 3 个相邻帧 delta，重叠位置会有多个预测，后面用平均合成逐帧 delta；
+    - 最后只切出当前 segment 的 16 个动作，左侧上下文产生的辅助 delta 不会返回给客户端。
+
+    窗口数量 K = T_sub - window_size + 1 = 17 - 4 + 1 = 14，代码里不是循环调用 TimesFormer 14 次，而是把 14 个窗口打包成一个 batch
+    frame4 delta 来自：
+    [1,2,3,4] 的第 3 个输出
+    [2,3,4,5] 的第 2 个输出
+    [3,4,5,6] 的第 1 个输出
+
+    最后聚合成逐帧 delta：
+
+    frame1: 0，占位
+    frame2..frame17: 16 个动作
+
+    为什么要求 full-horizon：
+    下面的切片使用绝对帧号 `1..num_frames`。如果世界模型只预测 tail-window，本地 token
+    下标会和绝对帧号错位；当前 Stage2 latent2action 路径为了简单可靠，直接要求
+    `infer_num_frames == total_num_frames`。
     """
     if _s2_tsformer is None or _s2_adapter is None or _s2_vae is None:
         raise RuntimeError("Stage2 模型尚未初始化")
@@ -1130,8 +1209,12 @@ def _stage2_predict_16_actions_for_segment_cm_deg(
     next_obs_len = int(infer_res.next_obs_len)
     if int(next_obs_len - obs_len) != 16:
         raise ValueError(f"stage2 tsformer_latent 期望 16 帧 segment，实际 obs_len={obs_len} next_obs_len={next_obs_len}")
+    # 当前 segment 的动作是从 obs_len 这一帧开始，依次到达 obs_len+1 .. next_obs_len。
+    # 所以真正需要返回的目标帧范围是 `[clip_abs_start, clip_abs_end]`。
     clip_abs_start = int(obs_len) + 1
     clip_abs_end = int(next_obs_len)
+    # TimesFormer 4 帧窗口在 clip 起点处需要最多 3 帧左侧上下文。
+    # seg0 没有更早帧，所以从 1 开始；seg1 例如 obs_len=17，则从 15 开始。
     ctx_start_abs = max(1, int(clip_abs_start) - 3)  # == max(1, obs_len-2)
 
     # 把 summed_codes 转成 patchified `z_ext`，再经 VAE hook/Adapter 解码成 token。
@@ -1144,6 +1227,7 @@ def _stage2_predict_16_actions_for_segment_cm_deg(
         raise ValueError(f"tokens 时间长度不足: T={t_full}，但需要 clip_abs_end={clip_abs_end}")
 
     # 切出 `[ctx_start .. clip_end]` 闭区间；绝对帧号是 1-based，tensor 下标是 0-based。
+    # 例如 ctx_start_abs=15、clip_abs_end=33，则 python slice 是 `[14:33]`。
     s0 = int(ctx_start_abs) - 1
     e0 = int(clip_abs_end)  # 代码/形状说明：python slice end (exclusive) => abs_end-1 + 1
     tokens_sub = tokens_tnd[s0:e0].contiguous()
@@ -1154,7 +1238,8 @@ def _stage2_predict_16_actions_for_segment_cm_deg(
     device = next(iter(_s2_tsformer.parameters())).device  # type: ignore[union-attr]
     tokens_sub = tokens_sub.to(device, dtype=torch.float32, non_blocking=(device.type == "cuda"))
 
-    # 在 tokens_sub 上构造滑动窗口。
+    # 在 tokens_sub 上构造滑动窗口。stride=1 时，每相邻一帧都作为窗口起点；
+    # stride>1 会减少窗口数量，但也会减少重叠平均的覆盖密度。
     starts = torch.arange(0, int(t_sub) - int(_S2_WINDOW_SIZE) + 1, max(1, int(stride)), device=device, dtype=torch.long)
     if int(starts.numel()) <= 0:
         return []
@@ -1176,6 +1261,8 @@ def _stage2_predict_16_actions_for_segment_cm_deg(
             pred = _s2_tsformer.head(feat)  # type: ignore[union-attr]
 
     pred_f = pred.detach().float()  # (K,18)
+    # 每个 4 帧窗口只预测后 3 个相邻帧转移：
+    # window [t,t+1,t+2,t+3] -> delta(t+1), delta(t+2), delta(t+3)。
     window_deltas = pred_f.view(k, 3, 6)  # 代码/形状说明：(K,3,6) normalized or (rad,m)
     if isinstance(_s2_label_stats, dict):
         ma = _s2_label_stats["mean_angles"].view(1, 1, 3)
@@ -1187,9 +1274,16 @@ def _stage2_predict_16_actions_for_segment_cm_deg(
         window_deltas[:, :, 3:6] = window_deltas[:, :, 3:6] * stt + mt
 
     # 聚合成逐帧 delta `(t_sub,6)`，其中 `delta[0]=0`。
+    # 公式：delta[t] = sum(predictions covering t) / count[t]，且 delta[0]=0
+    #
+    # 重叠平均例子：
+    # frame 4 的 delta 可能来自窗口 [1,2,3,4] 的第 3 个输出，
+    # 也可能来自窗口 [2,3,4,5] 的第 2 个输出、窗口 [3,4,5,6] 的第 1 个输出。
+    # 这些预测都指向同一个”到达 frame 4 的动作”，所以先累加到 acc，再用 cnt 平均。
     acc = torch.zeros((t_sub, 6), device=device, dtype=torch.float32)
     cnt = torch.zeros((t_sub,), device=device, dtype=torch.int32)
 
+    # offs=[1,2,3]，因为窗口第 0 帧是起点，不产生动作；动作落在后 3 帧上。
     offs = torch.arange(1, int(_S2_WINDOW_SIZE), device=device, dtype=torch.long).view(1, -1)  # (1,3)
     t_idx = starts.view(-1, 1) + offs  # (K,3)
     mask = (t_idx >= 0) & (t_idx < int(t_sub))
@@ -1207,6 +1301,8 @@ def _stage2_predict_16_actions_for_segment_cm_deg(
     actions_all = _stage2_deltas_to_actions_cm_deg(deltas.detach().cpu())  # len=t_sub-1
 
     # 精确切出当前 clip 的 16 个动作。
+    # actions_all 是相对 tokens_sub 的 `T_sub-1` 个动作；start_idx 把绝对 obs_len
+    # 换成 tokens_sub 内部下标，跳过左侧上下文动作。
     start_idx = int(obs_len) - int(ctx_start_abs)
     end_idx = int(start_idx) + (int(clip_abs_end) - int(obs_len))
     out = actions_all[int(start_idx) : int(end_idx)]
@@ -1598,9 +1694,34 @@ def _infer_summed_codes_for_step(
     它复刻 `batch_closed_loop_streaming_infer_routes.py` 的控制流，但默认跳过 VAE decode。
 
     中文导读：
-    这是“先预测世界怎样变”的核心调用。输入是当前真实观测前缀和语言条件，输出是下一段
-    latent 世界转移。除非调试或 actionhead_ref_vit 需要，函数不会把 latent 解成视频；
-    默认只把 latent 传给动作解码器。
+    这是“先预测世界怎样变”的核心调用。它不直接输出动作，而是让 InfinityStar 先根据
+    `prompt + 已经确认的真实观测帧` 预测一段 latent 视频轨迹，也就是后面动作头要看的
+    `summed_codes`。
+
+    参数怎么理解：
+    - `step_i`：当前第几个 segment。`0` 表示从第一帧出发预测第一段，`1` 表示从第 17
+      帧附近继续预测下一段，依此类推。`step_i==0` 走首帧 i2v 条件；`step_i>0`
+      走真实前缀注入逻辑。
+    - `obs_len`：当前已经可以信任的真实 RGB 帧数量。注意它是“帧数”，不是 latent 下标。
+    - `infer_num_frames`：本次让世界模型预测的窗口长度。默认是整条 81/49 帧；开启
+      tail-window 后，后几段只看尾部窗口，减少长上下文压力。
+    - `injection`：决定真实历史怎么注入世界模型。`gt_obs` 只写真实观测 cache；
+      `official_leak`/`hybrid_leak_gtobs` 会额外把真实前缀编码成 `gt_ls_Bl` 做 leak 注入。
+
+    数据流顺序：
+    1. 准备本 step 的真实历史条件：首段用第一帧条件，后续段按 `injection` 选择
+       `gt_obs cache` 或 `gt_leak`。
+    2. 根据 `infer_num_frames` 构建动态分辨率 schedule，并生成和每个 scale 对齐的
+       `tau_list`。
+    3. 调官方 `gen_one_example(..., return_summed_code_only=True)`，得到 latent 级输出
+       `summed_codes`。
+    4. 如果需要调试视频或参考视频动作头，再把 `summed_codes` 解码成 BGR 视频；默认
+       Stage2 latent2action 不需要这一步。
+
+    关键公式：
+    - 公式：pt_obs = (obs_len - 1) // temporal_compress_rate + 1
+      （把"真实 RGB 前缀长度"映射到 VAE 压缩后的 latent 时间步。默认压缩率为 4。
+      例如 obs_len=17 -> pt_obs=(17-1)//4+1=5，表示 17 帧 RGB 对应 5 个 latent 时间步。）
     """
     cfg = _get_server_config()
     assert st.stream is not None
@@ -1610,10 +1731,14 @@ def _infer_summed_codes_for_step(
     st.stream.h_div_w_template = float(st.h_div_w_template)
     st.stream.correction_clear_pred()
 
+    # `gt_leak=-1` 表示本次不做 gt_leak 注入；只有首帧或指定 leak 模式时才会改成 >=0。
     gt_leak = -1
+    # `gt_ls_Bl` 是 InfinityStar 官方路径中的真实 latent 条件，只有 leak 模式会传入。
     gt_ls_Bl = None
 
     if int(step_i) == 0:
+        # 首段只依赖第一帧 i2v condition。这里故意不把第一帧再写入 gt_obs cache，
+        # 避免“首帧条件”和“真实观测 cache”重复注入导致语义偏移。
         _prepare_firstframe_condition_if_needed(st)
         gt_leak = int(cfg.infinity.gt_leak_first)
         gt_ls_Bl = st.gt_ls_Bl_first
@@ -1625,6 +1750,11 @@ def _infer_summed_codes_for_step(
             assert st.dyn_res is not None and st.h_sel is not None
             assert _infinity_self_correction is not None
             # 编码连续真实前缀 `[1..obs_len]`，并按 latent 时间自动计算 leak 深度。
+            #
+            # 小白容易混淆的点：
+            # - `prefix` 是 RGB 帧前缀，形状先是 `[T,3,H,W]`；
+            # - `prefix_obs` 转成 VAE/InfinityStar 要的 `[1,3,T,H,W]`；
+            # - `video_encode()` 输出的 `gt_ls_Bl_prefix` 是 latent/token 条件，不是像素。
             prefix = torch.stack(st.frames_cpu[:obs_len], dim=0)  # [T,3,H,W]
             prefix_obs = prefix.permute(1, 0, 2, 3).unsqueeze(0).contiguous().to(_DEVICE, non_blocking=True)  # [1,3,T,H,W]
             with torch.no_grad():
@@ -1639,12 +1769,15 @@ def _infer_summed_codes_for_step(
                 )
             if inj == "hybrid_leak_gtobs":
                 # Hybrid 模式：同时写入 gt_obs cache，帮助后段 segment 稳定。
+                # 这一步写入的是“真实前缀”，不是模型预测视频，因此后续 clear_pred_cache 不会删掉。
                 st.stream.compute_kv_cache_gt(prefix_obs)
 
             # 帧到 latent 的压缩索引：latent_index(frame f) = (f - 1)//temporal_compress_rate + 1；
             # 这里用真实前缀长度 obs_len 算出该前缀覆盖到第几个 latent。
             pt_obs = (int(obs_len) - 1) // int(getattr(_infinity_args, "temporal_compress_rate", 4)) + 1
             pt2sched = st.dyn_res[st.h_sel][_infinity_args.pn]["pt2scale_schedule"]
+            # `pt2sched[pt_obs]` 返回当前 latent 前缀在多 scale schedule 中覆盖了多少个 scale。
+            # leak_auto 就是应该把多少层/多少段真实 token 作为 gt_leak 条件喂给模型。
             leak_auto = len(pt2sched[int(pt_obs)])
             gt_leak = int(leak_auto)
             gt_ls_Bl = gt_ls_Bl_prefix
@@ -1652,6 +1785,8 @@ def _infer_summed_codes_for_step(
             # gt_obs 模式：把真实前缀写入 cache，不再额外做 leak 注入。
             _update_gt_obs_cache_to(st, obs_len)
 
+    # schedule 决定本次自回归会生成多少个 latent 时间步、每个 scale 的空间大小、
+    # 以及 RoPE/context_info 怎么切。它必须和 `infer_num_frames` 一致。
     sched = st.stream.build_schedule_for_num_frames(int(infer_num_frames))
     tau_list = [float(cfg.infinity.tau_image)] * int(sched.tower_split_index) + [float(cfg.infinity.tau_video)] * (
         len(sched.scale_schedule) - int(sched.tower_split_index)
@@ -1664,6 +1799,8 @@ def _infer_summed_codes_for_step(
             raise RuntimeError("尚未导入 InfinityStar gen_one_example")
         assert _infinity_args is not None
 
+        # prompt_infer 是实际喂给文本编码器的最终 prompt。这里会按配置追加视频时长标签，
+        # 避免训练/推理时 “同一句文本但期望帧数不同” 的语义不一致。
         prompt_infer = _prompt_with_duration(
             st.prompt_raw,
             num_frames=int(cfg.infinity.num_frames),
@@ -1674,6 +1811,8 @@ def _infer_summed_codes_for_step(
         with torch.no_grad():
             if _DEVICE == "cuda":
                 with torch.cuda.amp.autocast(enabled=True, dtype=next(iter(st.stream.infinity.parameters())).dtype):
+                    # return_summed_code_only=True 是关键：这里拿 latent，不拿最终 RGB。
+                    # 后续 Stage2 动作头会直接消费 latent，省掉一次昂贵的视频 decode。
                     summed_codes = infinity_gen_one_example(  # type: ignore[misc]
                         st.stream.infinity,
                         st.stream.vae,
@@ -1701,6 +1840,7 @@ def _infer_summed_codes_for_step(
                         return_summed_code_only=True,
                     )
             else:
+                # CPU 路径主要用于调试/离线导入；参数保持和 CUDA 路径一致，避免两边语义分叉。
                 summed_codes = infinity_gen_one_example(  # type: ignore[misc]
                     st.stream.infinity,
                     st.stream.vae,
@@ -1993,16 +2133,45 @@ def _infer_latents_for_actions_and_advance_cache(
     这个函数把闭环协议落到代码上：先预测当前 segment 的 latent，再根据是否已经收到
     `points[i+1]` 对应的真实帧决定能否推进 `gt_obs` cache。若本轮是 future emission
     （只拿到 segment 起点真实帧就提前输出动作），就不能把预测帧写成真实历史。
+
+    为什么动作头需要 5 个 latent：
+    Stage2 latent2action 的训练样本是“一个边界 latent + 后续 4 个新 latent”。它相当于
+    用 5 个 latent 表示 16 帧左右的运动片段，再由 TimesFormer 滑窗预测 16 个动作。
+    因此这里不能简单把 `summed_codes` 全部丢给动作头，而要切出对齐当前 segment 的
+    `latent5_input`。
+
+    segment/帧/latent 的对应关系：
+    - `points = [1, 17, 33, 49, ...]` 表示每段动作的 RGB 帧边界；
+    - 第 i 段动作覆盖 `points[i] -> points[i+1]` 之间的 16 个转移；
+    - latent 下标用 `latent_index(frame f) = (f - 1)//4 + 1` 从 RGB 帧号换算；
+    - `seg0` 直接从世界模型输出里切 `[end-4..end]` 五个 latent；
+    - `seg>0` 使用上一段保存的 `last_latent_1` 作为边界，再拼当前段的 4 个新 latent。
+
+    cache 推进规则：
+    - `advance_gt_obs_to_next=True` 只在真实帧已经到达 `points[i+1]` 时使用；
+    - 如果提前输出未来段动作，则 `advance_gt_obs_to_next=False`，避免把预测帧伪装成
+      真实历史写入 `gt_obs` cache。
+
+    具体例子：
+    - `points = [1, 17, 33, 49]` 时，seg0 覆盖 `frame 1 -> frame 17`，输出 16 个动作；
+    - 默认 VAE 时间压缩率为 4，所以 `frame 1/5/9/13/17` 对应 latent `1/2/3/4/5`；
+    - 因此 seg0 的动作头输入是 latent `[1,2,3,4,5]`；
+    - seg1 覆盖 `frame 17 -> frame 33`，输入应是 `[latent5, latent6, latent7, latent8, latent9]`；
+    - 这里的 `latent5` 只是一帧边界 latent，不是上一整段。保留它是为了让相邻段在
+      `frame 17` 这个公共边界上连续。
     """
     cfg = _get_server_config()
     points = cfg.infinity.points()
     if segment_index < 0 or segment_index >= len(points) - 1:
         raise ValueError(f"segment_index 非法: {segment_index}, points={points}")
 
+    # `obs_len` 是当前 segment 左边界帧号，`next_obs_len` 是右边界帧号。
+    # 例如 points=[1,17,33,49] 时，seg1 的 obs_len=17、next_obs_len=33。
     obs_len = int(points[segment_index])
     next_obs_len = int(points[segment_index + 1])
 
     # 每个 segment 可单独调整采样参数和历史注入策略。
+    # 这样前几段可以更探索，后几段可以更保守；也可从某段开始切到 tail-window。
     lock_seed = bool(cfg.infinity.lock_seed_across_steps)
     local_seed = int(seed) + (0 if lock_seed else int(segment_index))
     use_late = int(segment_index) >= int(cfg.infinity.late_step_start)
@@ -2016,8 +2185,11 @@ def _infer_latents_for_actions_and_advance_cache(
         and str(cfg.infinity.rolling_infer_mode) == "tail_window"
         and int(segment_index) >= int(cfg.infinity.tail_window_start_step)
     ):
+        # tail-window 模式只让世界模型预测尾部窗口。后面切 latent 时必须把“绝对帧号”
+        # 映射回这个局部窗口，所以 `_slice_abs_latents_from_summed_codes()` 会额外处理平移。
         infer_num_frames = int(cfg.infinity.tail_window_frames)
 
+    # 第一步：让世界模型预测当前段所在窗口的 latent。此时还没有动作，只有世界状态预测。
     summed_codes, pred_vid = _infer_summed_codes_for_step(
         st,
         step_i=int(segment_index),
@@ -2038,6 +2210,7 @@ def _infer_latents_for_actions_and_advance_cache(
     latent5_input: torch.Tensor
     if int(segment_index) == 0 or st.last_latent_1 is None:
         # seg0（或恢复失败）：提供完整 5-latent 窗口 `[end-4..end]`。
+        # 对 1->17 帧而言，end_lat 通常是 5，因此切出的就是 latent 1..5。
         abs_start_lat = max(1, int(abs_end_lat) - 4)
         latent5_input = _slice_abs_latents_from_summed_codes(
             summed_codes,
@@ -2047,6 +2220,7 @@ def _infer_latents_for_actions_and_advance_cache(
             total_num_frames=int(total_num_frames),
         )
         # 如果视频太短导致不足 5 个 latent，就重复最后一个补齐。
+        # 这只是容错；正常配置下 16 帧 segment 会有足够 latent。
         if int(latent5_input.shape[2]) < 5:
             rep = latent5_input[:, :, -1:].repeat(1, 1, 5 - int(latent5_input.shape[2]), 1, 1)
             latent5_input = torch.cat([latent5_input, rep], dim=2)
@@ -2057,6 +2231,8 @@ def _infer_latents_for_actions_and_advance_cache(
         prev_end_lat = (int(prev_obs_len) - 1) // 4 + 1
         abs_start_lat_new = int(prev_end_lat) + 1
         abs_end_lat_new = int(abs_end_lat)
+        # 只切“本段新增”的 4 个 latent；第 1 个边界 latent 来自上一段保存的 last_latent_1。
+        # 这样相邻 segment 的动作头输入在边界处连续，不会凭空断开。
         new4 = _slice_abs_latents_from_summed_codes(
             summed_codes,
             abs_lat_start=int(abs_start_lat_new),
@@ -2076,22 +2252,28 @@ def _infer_latents_for_actions_and_advance_cache(
             # 理论上不该发生；保留兜底以便服务不中断。
             last1 = new4[:, :, :1].clone()
         # 确保边界 latent 和新 latent 的空间尺寸一致。
+        # 如果触发这里，通常是 full-horizon/tail-window 或动态分辨率配置不一致。
         if last1.shape[-2:] != new4.shape[-2:]:
             raise ValueError(f"latent 空间尺寸不匹配: last1={tuple(last1.shape)} new4={tuple(new4.shape)}")
         latent5_input = torch.cat([last1.to(new4.dtype), new4], dim=2).contiguous()
 
     # 统一 latent5 的存放位置；TSformer 路径会在内部从 CPU 搬到 CUDA。
+    # 放 CPU 的好处是：可以保存调试文件，也避免长时间占用 GPU 显存。
     latent5_input = latent5_input.detach().to("cpu").contiguous()
 
     # 推进 cache：用新暴露的真实前缀 `[1..next_obs_len]` 覆盖 gt_obs cache。
     # 最后一段如果包含纯预测尾帧，调用方会关闭这里，避免把非真实帧写入 gt_obs cache。
     if bool(advance_gt_obs_to_next):
+        # 清一次 pred cache，防止刚刚生成的“想象未来”混进真实前缀编码。
         st.stream.correction_clear_pred()  # type: ignore[union-attr]
         _update_gt_obs_cache_to(st, int(next_obs_len))
+        # 再清一次，确保 `compute_kv_cache_gt()` 前后没有残留 pred 条目。
         st.stream.correction_clear_pred()  # type: ignore[union-attr]
+        # 导出当前这条轨迹的 GT cache 快照；下一次请求恢复同一 session 时继续使用。
         st.kv_cache = st.stream.infinity.export_kv_cache()  # type: ignore[union-attr]
 
     # 更新跨段记忆，并把调试 latent 存到磁盘。
+    # `last_latent_1` 永远保存当前 latent5 的最后一个时间步，作为下一段的边界。
     st.last_latent_1 = latent5_input[:, :, -1:].detach().to("cpu").contiguous()
     _save_latent_tensor(st, f"seg{int(segment_index):02d}_latent5_input.pt", latent5_input)
     if int(segment_index) == 0:
@@ -2281,7 +2463,9 @@ def _actionhead_ref_predict_actions_cm_deg(
 
     # 只为 `frames[1:]` 把逐帧 delta 转成 API 动作，单位 cm/deg。
     # 这里假设模型内部 delta 格式为 `[dz, dy, dx, tx, ty, tz]`，
-    # 角度单位 rad，平移单位 meter；换算公式是 meter*100 -> cm，rad*180/pi -> deg。
+    # 角度单位 rad，平移单位 meter。
+    # 公式：meter -> cm: *100（tx,ty,tz -> dx_cm,dy_cm,dz_cm）
+    # 公式：rad -> deg: *180/pi（dz,dy,dx -> droll_deg,dyaw_deg,dpitch_deg）
     out_actions: List[List[float]] = []
     for i in range(1, t):
         dz, dy, dx = [float(x) for x in deltas[i, 0:3]]
@@ -2444,16 +2628,46 @@ def _predict_delta_actions_impl(req) -> "PredictDeltaActionsResponse":
     3. 根据 `points=[1,17,33,49,...]` 判断下一个 segment 是否可输出动作。
     4. 调用世界模型得到 `summed_codes`，再通过动作头输出 6D 增量动作。
     5. 只有在真实帧已经到达 segment 末端时，才把真实观测写回 `gt_obs` cache。
+
+    这个函数是 HTTP API 和模型内部状态之间的“总调度器”，可以按下面四层理解：
+
+    第一层：session 管理
+    - 外部客户端只知道 `req.session_id`；
+    - 服务端可能把它映射到一个内部 run id，避免用户复用同名 session 时覆盖旧 cache；
+    - `TrajectoryState` 保存这条路线的 prompt、真实帧、Infinity streaming session、
+      KV cache、上一段 latent 边界和已输出到哪一段。
+
+    第二层：真实帧入库
+    - `images_base64` 先解码成 PIL RGB；
+    - 再按 Infinity 动态分辨率模板 resize/normalize 到 `[-1,1]`；
+    - 最后追加到 `st.frames_cpu`。这里保存的是“真实观测”，不是模型预测帧。
+
+    第三层：segment ready 判定
+    - 默认模式：只有真实帧数 `n >= points[seg+1]`，才输出第 `seg` 段动作；
+    - future 模式：如果 `allow_future_segments=True`，可以在 `n >= points[seg]`
+      时提前输出动作，但不能推进 `gt_obs` cache；
+    - 最后一段 future 特例由 `allow_future_last_segment` 控制。
+
+    第四层：动作头选择
+    - `tsformer_latent`：默认路径，直接把 latent 喂给 Stage2 latent2action；
+    - `actionhead_ref_vit`：先把 latent 解成 RGB 视频，再走参考视频动作头。
+
+    最重要的安全规则：
+    只有真实帧已经到达右边界时，才允许 `_infer_latents_for_actions_and_advance_cache()`
+    把 `gt_obs` cache 推进到 `points[seg+1]`。提前发射动作时，cache 仍停留在真实前缀，
+    不能把预测结果当作真实历史。
     """
     cfg = _get_server_config()
     if not cfg.infinity.ckpt:
         raise HTTPException(status_code=500, detail="必须提供 InfinityStar ckpt（在 config.json 或 INFINITY_CKPT 环境变量中设置）")
     _init_models(cfg=cfg)
 
+    # 外部 session_id 来自客户端；内部 session_id 可能加时间戳后缀，用来区分同名多次 run。
     external_session_id = (req.session_id or "").strip()
     if not external_session_id:
         raise HTTPException(status_code=400, detail="必须提供 session_id")
 
+    # `instruction` 和 `prompt` 是兼容字段；首次请求必须至少提供一个。
     raw_prompt = (req.instruction or "").strip() or (req.prompt or "").strip()
     allow_future_segments = bool(getattr(req, "allow_future_segments", False))
     # 自动“新 run”规则：避免复用旧内存状态造成轨迹串线。
@@ -2478,12 +2692,14 @@ def _predict_delta_actions_impl(req) -> "PredictDeltaActionsResponse":
                 del _TRAJ[external_session_id]
         except Exception:
             pass
+        # 建立 alias：客户端继续使用原 session_id，服务端内部使用新的 run id。
         _SESSION_ALIAS[external_session_id] = _make_run_session_id(external_session_id)
 
     session_id = _SESSION_ALIAS.get(external_session_id, external_session_id)
     if session_id not in _TRAJ and not raw_prompt:
         raise HTTPException(status_code=400, detail="session 的第一次调用必须提供 instruction/prompt")
 
+    # 获取/创建 TrajectoryState。后续所有状态变化都挂在 st 上，而不是直接挂在 request 上。
     st = _get_or_create_traj(session_id, raw_prompt, req.negative_prompt or "")
 
     # 解码并追加本次上传的图像帧。
@@ -2535,6 +2751,7 @@ def _predict_delta_actions_impl(req) -> "PredictDeltaActionsResponse":
                 pass
 
     # prefix_mode 下客户端每次发送完整前缀；这里只保留新增尾帧。
+    # 例：服务端已有 17 帧，本次客户端传 33 帧完整前缀，则这里只追加第 18..33 帧。
     if bool(getattr(req, "prefix_mode", False)):
         already = int(st.num_frames())
         if already > int(len(new_imgs)):
@@ -2578,6 +2795,7 @@ def _predict_delta_actions_impl(req) -> "PredictDeltaActionsResponse":
                 used_prompt=st.prompt_raw if req.debug else None,
             )
 
+    # 下一段永远是“上一段已输出 + 1”。服务端不会跳段输出，避免客户端动作序列错位。
     next_seg = int(st.last_emitted_segment) + 1
     if next_seg >= (len(points) - 1):
         return PredictDeltaActionsResponse(
@@ -2602,6 +2820,7 @@ def _predict_delta_actions_impl(req) -> "PredictDeltaActionsResponse":
     ready_last_future = bool(getattr(req, "allow_future_last_segment", False)) and is_last_seg and n >= int(points[seg])
     ready_future = bool(allow_future_segments) and n >= int(points[seg])
     if not (ready_default or ready_last_future or ready_future):
+        # 还没到发射条件：返回空动作，让客户端继续上传真实帧。
         return PredictDeltaActionsResponse(
             actions=[],
             segment_index=-1,
@@ -2616,6 +2835,7 @@ def _predict_delta_actions_impl(req) -> "PredictDeltaActionsResponse":
     prefix_latents_abs = (int(points[seg + 1]) - 1) // 4 + 1
 
     # 选择动作头模式。
+    # 默认走 latent 动作头，因为它不需要把世界模型 latent 解码成视频，延迟和显存更可控。
     mode = str(getattr(req, "action_head_mode", "tsformer_latent") or "tsformer_latent").strip().lower()
     if mode in ("", "default", "tsformer_latent"):
         env_mode = os.environ.get("ACTION_HEAD_MODE", "").strip().lower()
@@ -2628,6 +2848,10 @@ def _predict_delta_actions_impl(req) -> "PredictDeltaActionsResponse":
     try:
         # 只有真实帧确实到达 points[seg+1] 时才推进 GT cache。
         # 如果是提前输出 future tail，不能把非真实帧写入 GT cache。
+        #
+        # 读代码时重点看 `advance_gt`：
+        # - True：本段右边界已有真实帧，推理后可以把真实前缀写入 gt_obs；
+        # - False：本段是提前输出，推理后只能更新动作和 last_latent，不能污染真实 cache。
         advance_gt = bool(ready_default)
         base_seed = 0
         try:
@@ -2641,7 +2865,7 @@ def _predict_delta_actions_impl(req) -> "PredictDeltaActionsResponse":
             seed=int(base_seed),
             advance_gt_obs_to_next=advance_gt,
             need_pred_video=bool(use_actionhead_ref_vit),
-        ) #逐段推理结果设置
+        )  # 逐段推理结果：包含 latent5、summed_codes、可选预测视频和帧边界信息。
     except Exception as e:
         print("[Service] _infer_latents_for_actions_and_advance_cache 失败。")
         print(traceback.format_exc())

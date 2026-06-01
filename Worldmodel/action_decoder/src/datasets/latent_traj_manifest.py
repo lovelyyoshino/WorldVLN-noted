@@ -15,12 +15,19 @@ WorldVLN action-decoder 训练流程使用的 manifest 数据集。
 
 中文导读：
 Stage A 和 Stage B 都从这里读取同一类样本。每个样本由三部分组成：
-- `latent_path`：视频 VAE 编码后的 latent，通常是 Stage-2 VAE decode 需要的 `z_ext`；
-- `traj_json_path`：专家轨迹或动作增量标签；
-- `images_dir`：真实 RGB 帧目录，Stage A 用它构造 TimesFormer teacher tokens。
+- ``latent_path``：视频 VAE 编码后的 latent，通常是 Stage-2 VAE decode 需要的 ``z_ext``；
+- ``traj_json_path``：专家轨迹或动作增量标签；
+- ``images_dir``：真实 RGB 帧目录，Stage A 用它构造 TimesFormer teacher tokens。
 
 这层数据集不负责训练逻辑，只负责把文件系统中的多种格式统一成训练脚本可消费的
-`z_ext`、`traj`、`frames_rgb`。
+``z_ext``、``traj``、``frames_rgb``。
+
+标签布局 (T, 6) 约定：
+    每个样本最终输出的 ``traj`` 形状为 ``(T, 6)``，表示 T 帧（含初始帧）每一帧的
+    6D 增量动作 ``[dx, dy, dz, droll, dyaw, dpitch]``。
+    若输入文件存的是逐步 ``action6 (T-1, 6)``，本层会自动把它扩成 ``(T, 6)``：
+        公式：delta[0] = 0；对 t >= 1，delta[t] = action6[t-1]。
+    这样 Stage B 训练时第 i 行就表示"从 frame_{i-1} 到 frame_i 的动作增量"。
 """
 
 

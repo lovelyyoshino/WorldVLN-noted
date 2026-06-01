@@ -1,6 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+GRPO replay 训练前的最终归一化脚本。
+
+中文导读：
+这个脚本处于 GRPO 数据管线的“最后一公里”：
+
+    rollout cache  ->  reward_uavflow.py（每行带 r_act / r_task / r_ce 等原始字段）
+                  ->  本脚本（统一写入 grpo_weight / grpo_score / grpo_gate）
+                  ->  trainer 直接消费 jsonl
+
+它不会再去重新计算几何或任务奖励，而是依据 `--mode` 把已有的 reward 字段“翻译”
+成训练阶段实际使用的三元组：
+- `grpo_weight`：实际进入 loss 的样本权重；
+- `grpo_score`：用于排序、记录的标量分数；
+- `grpo_gate`：是否参与策略梯度的二值/软门控。
+
+四种模式的应用场景：
+- `precomputed_adv`：reward_uavflow.py 已经写入 `grpo_adv_final`，直接拿来当权重；
+- `raw_reward`：不做门控/排序，按原始 reward 训练，调试用最多；
+- `gate_mean`：组内均值以上才参与训练，简单的 hard gate；
+- `rank_gate`：保留旧版 rank+decay 训练协议，便于复现历史实验。
+"""
+
 from __future__ import annotations
 
 import argparse

@@ -1,6 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+合成候选轨迹生成器（bootstrap 用）。
+
+中文导读：
+和 `generate_candidate_trajectories_real.py` 不同，这个脚本不需要真实模拟器，也不调用
+世界模型。它只读取 GT pose 序列，按 `seed + candidate_id` 加扰动，伪造 K 条候选轨迹。
+
+它处于 GRPO 数据准备链的“可选 bootstrap”位置：
+    candidates jsonl
+        -> 本脚本（每条候选只是 GT + 噪声）
+        -> reward_uavflow.py（依然能跑出 r_act / r_task）
+        -> 训练流水线
+
+主要用途：
+- 在没有真实闭环 rollout 之前先跑通整条 GRPO 训练流水线；
+- 当真实模拟器不可用时，提供一个 deterministic 的回退候选源；
+- candidate_id 越大，注入的噪声越强，便于观察 reward 分布是否随之恶化。
+"""
+
 from __future__ import annotations
 
 import argparse

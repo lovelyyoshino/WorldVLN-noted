@@ -6,7 +6,10 @@
 
 本仓库提供 WorldVLN 的参考实现，包含用于闭环动作预测的自回归推理服务，以及两阶段训练流程：（1）监督式 backbone 与动作解码器训练；（2）基于 action-aware GRPO 的优化。
 
-如果想按中文路线阅读代码和理解架构，请参见 [docs/CODE_READING_GUIDE.zh-CN.md](./docs/CODE_READING_GUIDE.zh-CN.md)。
+如果想按中文路线阅读代码和理解架构：
+
+- 第一次看代码请先看 [docs/READING_ROADMAP.zh-CN.md](./docs/READING_ROADMAP.zh-CN.md)（小白版导览，三天上手路线 + 重点公式速查 + 调试索引）。
+- 想要函数级行号、张量速查、子系统细节，请看 [docs/CODE_READING_GUIDE.zh-CN.md](./docs/CODE_READING_GUIDE.zh-CN.md)（完整版，1600+ 行）。
 
 
 ## 安装

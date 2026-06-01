@@ -951,7 +951,11 @@ def _infer_summed_codes_for_step(
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], float, Optional[str]]:
     """
     为单个 closed-loop step 运行 InfinityStar 推理，并返回 summed_codes [1,16,pt,H,W]。
-    控制流与 batch_closed_loop_streaming_infer_routes.py 保持一致，但跳过 VAE decode。
+
+    这里的主输出仍是世界模型自回归生成的 latent，不是动作，也没有经过 TSformer。
+    `gen_one_example(..., return_summed_code_only=True)` 阶段不会把 latent 解码成 RGB；
+    只有 `need_pred_video=True` 或需要保存调试视频时，函数末尾才会额外调用
+    `summed_codes2images()` 解码出预测视频，供 reference-video action head 或排查使用。
     """
     cfg = _get_server_config()
     assert st.stream is not None
@@ -959,13 +963,13 @@ def _infer_summed_codes_for_step(
 
     # 确保 session 使用正确的 aspect template。
     st.stream.h_div_w_template = float(st.h_div_w_template)
-    st.stream.correction_clear_pred()
+    st.stream.correction_clear_pred()  # 清掉上一轮的 Pred cache。
 
     gt_leak = -1
     gt_ls_Bl = None
 
     if int(step_i) == 0:
-        _prepare_firstframe_condition_if_needed(st)
+        _prepare_firstframe_condition_if_needed(st)  # 准备首帧 i2v 条件。
         gt_leak = int(cfg.infinity.gt_leak_first)
         gt_ls_Bl = st.gt_ls_Bl_first
     else:
@@ -987,7 +991,7 @@ def _infer_summed_codes_for_step(
                     args=_infinity_args,
                     infer_mode=True,
                     dynamic_resolution_h_w=st.dyn_res,
-                )
+                )  # 把真实 RGB 前缀编成 gt_ls_Bl。
             if inj == "hybrid_leak_gtobs":
                 # Hybrid：同时写入 gt_obs cache，帮助稳定后段 segment。
                 st.stream.compute_kv_cache_gt(prefix_obs)
@@ -1081,21 +1085,59 @@ def _infer_summed_codes_for_step(
                     noise_list=None,
                     return_summed_code_only=True,
                     return_trace=True,
-                )
+                )  # 真正的 InfinityStar 自回归推理；这里还是“世界模型 latent”，还没有进入 TSformer/action head。
 
+        # 白话总览：下面这一大段不是在“预测动作”，而是在给 GRPO 记账。
+        #
+        # 可以把一次 rollout 想成模型在写一份答案：
+        # - `summed_codes`：模型写出来的答案，也就是它想象的未来 latent；
+        # - `idx_trace`：模型写答案时每一步具体选了哪个离散 token；
+        # - `sample_logprob`：模型写答案时顺手记下的“我当时有多确定”；
+        # - `trace_ce`：事后用 StageB 同款打分方式重新批改一遍，得到更对齐的 old_logprob。
+        #
+        # GRPO 后面要算 ratio = exp(new_logprob - old_logprob)。这里负责保存 old_logprob
+        # 和必要的 trace，让 StageB 能对同一批 sampled tokens 重算 new_logprob。
+        #
+        # `gen_one_example()` 的返回有两种形态：
+        # 1. 旧/简化路径：直接返回 Tensor，即 summed_codes；
+        # 2. return_trace=True 路径：返回 dict，里面同时带 summed_codes、采样 logprob、
+        #    采样到的离散 token trace（idx_trace）和 clip 对齐信息。
+        #
+        # 这里先默认把 out_gen 当 Tensor，下面如果发现是 dict 再拆字段。
+        # 不管是哪种形态，本函数对下游动作头真正需要的主产物都是 `summed_codes`：
+        # 世界模型预测出的 latent，形状通常是 [1,16,pt,H,W]。
         summed_codes = out_gen
         if isinstance(out_gen, dict):
             summed_codes = out_gen.get("summed_codes", None)
             try:
+                # 第一步记账：先拿采样时顺手记录的 old_logprob。
+                # `sample_logprob` 是 rollout 采样时旧策略给这次采样轨迹的 logprob。
+                # 它不是 reward，也不是 TSformer/action head 的概率；它只描述世界模型
+                # 在当时采样出这些 latent token 的概率。
+                #
+                # StageB 做 GRPO/PPO ratio 时需要：
+                #   ratio = exp(new_logprob - old_logprob)
+                # 这里保存的就是 old_logprob 候选值。后面如果启用 trace_ce，会用更严格的
+                # teacher-forcing CE 版本覆盖它。
                 slp = out_gen.get("sample_logprob", 0.0)
                 if isinstance(slp, torch.Tensor):
                     trace_sample_logprob = float(slp.detach().to("cpu").item())
                 else:
                     trace_sample_logprob = float(slp)
             except Exception:
+                # logprob 只影响 GRPO 训练；为了让 rollout 服务不中断，解析失败时先退到 0。
+                # 严格模式会在后面的 trace_ce 检查阶段再把不一致暴露出来。
                 trace_sample_logprob = 0.0
             # 如果有按 clip 对齐的 logprob，优先使用当前 segment 对应值。
             try:
+                # 49f/step=16 的常见配置里，scale schedule 可以理解成：
+                #   clip0: image / first-frame conditioning
+                #   clip1: seg00 对应的 video clip（2..17）
+                #   clip2: seg01 对应的 video clip（18..33）
+                #   clip3: seg02 对应的 video clip（34..49）
+                # 因此 closed-loop `step_i` 对应的 video clip id 是 `step_i + 1`。
+                # 如果 gen_one_example 已经按 clip 统计了 logprob，就用当前 segment 的那一项，
+                # 避免把整条 horizon 的 logprob 都当作本 segment 的 old_logprob。
                 clipid_target = int(step_i) + 1
                 byc = out_gen.get("sample_logprob_by_clip", None)
                 if isinstance(byc, list) and len(byc) > clipid_target:
@@ -1111,11 +1153,26 @@ def _infer_summed_codes_for_step(
             trace_sample_logprob_sampling = float(trace_sample_logprob)
             trace_sample_logprob_trace_ce = None
 
+            # 第二步记账：如果要求更严格，就不用采样时顺手记的分数，而是重算 old_logprob。
             # 可选：用 teacher-forcing 单次 forward 计算 old_logprob，兼容 StageB trace_ce。
             # 通过环境变量启用：
             # 中文标题：INFINITY_STAGEA_OLD_LOGPROB_MODE=trace_ce
+            #
+            # 为什么要重算一遍：
+            # - 上面的 sampling-time logprob 来自采样过程，可能混入 cfg/tau、重复采样、
+            #   clip 聚合等实现细节；
+            # - StageB 训练时如果 `GRPO_NEW_LOGPROB_MODE=trace_ce`，new_logprob 是用
+            #   teacher-forcing CE 对同一批 sampled tokens 重新打分；
+            # - old/new logprob 定义必须一致，否则 `exp(new-old)` 的 ratio 没有可比性。
+            #
+            # 所以 trace_ce 模式会读取 idx_trace，把 rollout 时采到的 token 当成 GT，
+            # 再用当前旧策略做一次确定性的 forward，得到和 StageB new_logprob 同定义的
+            # old_logprob。
             mode = (os.environ.get("INFINITY_STAGEA_OLD_LOGPROB_MODE", "") or "").strip().lower()
             if mode == "trace_ce":
+                    # strict=1 时，trace_ce 失败会让本次 rollout 失败并触发重试；
+                    # strict=0 时，失败会退回 sampling-time logprob。正式 GRPO 建议 strict=1，
+                    # 否则 StageA old_logprob 和 StageB new_logprob 可能不是同一种定义。
                     strict = (os.environ.get("INFINITY_STAGEA_OLD_LOGPROB_STRICT", "0") or "0").strip()
                     strict = int(strict) == 1
                     import math as _math
@@ -1130,6 +1187,11 @@ def _infer_summed_codes_for_step(
                         interpolate as _interp,
                     )
 
+                    # `idx_trace` 可以理解成“答案草稿的逐步选择记录”。
+                    # idx_trace 是 gen_one_example 在自回归采样过程中记录下来的离散 token。
+                    # 它不是 latent 浮点张量，而是每个 scale/repetition 采样出的 LFQ/BSQ bit label。
+                    # trace_ce 的目标就是：拿这些“当时真实采到的 token”作为 teacher-forcing
+                    # 标签，重新算旧策略对它们的 CE/logprob。
                     idx_trace = out_gen.get("idx_trace", None)
                     if not isinstance(idx_trace, list) or len(idx_trace) <= 0:
                         raise RuntimeError("trace_ce 需要 out_gen 中包含 idx_trace list")
@@ -1140,7 +1202,9 @@ def _infer_summed_codes_for_step(
                     device0 = next(iter(gpt.parameters())).device
                     model_dtype = next(iter(gpt.parameters())).dtype if _DEVICE == "cuda" else torch.float32
 
+                    # 重算分数时必须排除随机扰动。
                     # 在 policy scoring 期间关闭 cond-drop 随机性。
+                    # 否则同一条 sampled trace 可能因为随机丢条件而得到不稳定的 old_logprob。
                     orig_cdr = float(getattr(gpt, "cond_drop_rate", 0.0) or 0.0)
                     try:
                         gpt.cond_drop_rate = 0.0
@@ -1158,6 +1222,9 @@ def _infer_summed_codes_for_step(
                         clipid_target = int(step_i) + 1
 
                         # 使用 rollout args 中的 repetition，必须匹配 StageB scoring。
+                        # image/video_scale_repetition 表示同一个 scale 在采样循环中可能重复预测多次。
+                        # idx_trace 是按“实际采样步”记录的，所以需要把 scale id 映射到对应的
+                        # trace step id；下面的 cache_step_id[si] 就是这个映射。
                         img_rep_s = str(getattr(_infinity_args, "image_scale_repetition", "[1]")).strip()
                         vid_rep_s = str(getattr(_infinity_args, "video_scale_repetition", "[1]")).strip()
                         image_rep = _np.array(_json.loads(img_rep_s), dtype=_np.int64)
@@ -1177,6 +1244,10 @@ def _infer_summed_codes_for_step(
                             raise RuntimeError(f"trace_ce 需要 idx_trace 长度 >= {step_ptr0}，实际为 {len(idx_trace)}")
 
                         # 确定性选择 scale，与 StageB trace_ce 保持一致。
+                        # 完整 49f horizon 的所有 scale token 可能超过显存/序列长度上限。
+                        # `INFINITY_GRPO_TRACE_CE_TMAX` 是一个 token budget：超出时只选择
+                        # 目标 clip 及其必要左侧上下文 scale，既降低显存，又保持和 StageB
+                        # trace_ce 的选择规则一致。
                         tmax = int(float(os.environ.get("INFINITY_GRPO_TRACE_CE_TMAX", "20480")))
                         total_tokens = int(_np.array(scale_schedule).prod(-1).sum())
                         select_si_list = list(range(len(scale_schedule)))
@@ -1203,9 +1274,13 @@ def _infer_summed_codes_for_step(
                                     select_si_list.append(tgt)
                             select_si_list = sorted({int(x) for x in select_si_list if 0 <= int(x) < L})
                         # 保留用于精确 StageB replay / debugging。
+                        # StageB 会读取 trace 文件里的这个列表，按同样 scale 子集重算 new_logprob。
                         trace_ce_select_si_list = [int(x) for x in select_si_list]
 
                         # 将 context refs 重映射到选中的子集。
+                        # 原始 context_info 里的 ref_sids 是全量 scale id；一旦我们只取子集，
+                        # scale id 会被重新压紧成 0..len(select)-1。这里把“原始 ref id”
+                        # 转成“子集内 ref id”，否则 forward 的注意力依赖会指向不存在的 scale。
                         scale_pack_info = sched.context_info
                         real_si_2_new_si: Dict[int, int] = {int(r): int(i2) for i2, r in enumerate(select_si_list)}
                         new_scale_pack_info: Dict[int, Dict[str, Any]] = {}
@@ -1220,6 +1295,11 @@ def _infer_summed_codes_for_step(
                                 if nn is not None:
                                     new_scale_pack_info[int(new_q)]["ref_sids"].append(int(nn))
 
+                        # 模型内部可能使用 spatial patchify：
+                        #   VAE latent 语义上是 [C,T,H,W]；
+                        #   transformer token 训练时可能把 2x2 空间块折进通道维。
+                        # trace_ce 需要在“latent 状态累计”和“transformer token 输入”之间
+                        # 来回转换，所以这里先统一算出 VAE 侧真实空间尺度。
                         apply_patchify = bool(getattr(gpt, "apply_spatial_patchify", False))
                         if apply_patchify:
                             vae_scale_schedule = [(int(pt), int(2 * ph), int(2 * pw)) for (pt, ph, pw) in scale_schedule]
@@ -1227,7 +1307,13 @@ def _infer_summed_codes_for_step(
                             vae_scale_schedule = [(int(pt), int(ph), int(pw)) for (pt, ph, pw) in scale_schedule]
 
                         def _latent_to_raw_tokens(lat: torch.Tensor) -> torch.Tensor:
-                            """把当前尺度 latent 展平成 Infinity forward 需要的 token 序列。"""
+                            """
+                            把当前尺度 latent 展平成 Infinity forward 需要的 token 序列。
+
+                            `summed_code` 是累计的浮点 latent 状态；Infinity forward 需要的是
+                            按 scale 展平后的 token 序列 `(B,L,C)`。如果训练时启用了 patchify，
+                            这里必须先 pixel_unshuffle 到和训练 token 布局一致。
+                            """
                             if apply_patchify:
                                 _x = lat.permute(0, 2, 1, 3, 4)
                                 _x = torch.nn.functional.pixel_unshuffle(_x, 2)
@@ -1242,6 +1328,14 @@ def _infer_summed_codes_for_step(
                         else:
                             summed_code = torch.zeros((1, vae_embed_dim, *vae_scale_schedule[0]), device=device0, dtype=model_dtype)
 
+                        # 这几组列表可以理解成“重新批改答案”所需的材料包。
+                        # 下面这些列表共同构造一次 teacher-forcing forward：
+                        # - x_scales: 每个选中 scale 的输入 latent token；
+                        # - gt_scales: idx_trace 中对应 scale 的采样 token，作为 CE label；
+                        # - rope_scales: 每个 scale 的视觉 RoPE；
+                        # - dlabels: 每个 token 的 bit-label 维度，用于把 per-bit CE 还原成 logprob；
+                        # - muls: 每个 scale 的 token 数，用来切分 loss_tok；
+                        # - clipids: 每个 scale 属于哪个 video clip，后面只累计当前 segment 的 clip。
                         x_scales: List[torch.Tensor] = []
                         gt_scales: List[torch.Tensor] = []
                         rope_scales: List[torch.Tensor] = []
@@ -1256,6 +1350,10 @@ def _infer_summed_codes_for_step(
                                 this_lat = _F.interpolate(this_lat, size=vae_scale_schedule[int(si)], mode=vae.quantizer.z_interplote_down).contiguous()
 
                             if int(si) in real_si_2_new_si:
+                                # 对被选中的 scale：
+                                # 1. 用“采样到该 scale 之前”的 summed_code 作为模型输入；
+                                # 2. 用 idx_trace 里该 scale 实际采样出的 token 作为 teacher label；
+                                # 3. 记录它属于哪个 clip，最后只统计目标 clip 的 logprob。
                                 x_scales.append(_latent_to_raw_tokens(this_lat))
                                 rope_scales.append(
                                     _get_rope(
@@ -1288,6 +1386,14 @@ def _infer_summed_codes_for_step(
                                 gt_scales.append(forced.reshape(1, mul, d_label).contiguous())
 
                             # 用缓存 token 更新 latent 状态；这是近似过程，但必须匹配 StageB trace_ce。
+                            #
+                            # 关键点：teacher-forcing 不是重新采样，而是沿着 rollout 当时采到的
+                            # idx_trace 还原 latent 累计轨迹。这样第 si+1 个 scale 的输入状态，
+                            # 才和原 rollout 采样路径一致。
+                            #
+                            # 如果当前 scale 被 gt_leak 覆盖，则使用真实前缀编码 token；
+                            # 否则把 idx_trace 的 bit label 通过 LFQ/BSQ quantizer 转回 code，
+                            # 插值到目标尺度后累加进 summed_code。
                             target_pn = vae_scale_schedule[int(first_full)] if int(si) < scales_in_one_clip else vae_scale_schedule[-1]
                             forced_upd = idx_trace[int(cache_step_id[int(si)])]
                             if not isinstance(forced_upd, torch.Tensor):
@@ -1387,6 +1493,11 @@ def _infer_summed_codes_for_step(
                             for local_r in new_scale_pack_info[int(local_q)]["ref_sids"]:
                                 qref[local_q][int(local_r)] = True
 
+                        # 真正的 trace_ce 打分 forward：
+                        # - 输入 x_vis 是 rollout 路径上每个选中 scale 之前的 latent 状态；
+                        # - gt_BL=gt_scales 是 rollout 当时采样出的 token；
+                        # - 输出 loss_tok 是逐 token/per-bit 的 CE。
+                        # 这一步只做打分，不更新权重。
                         with torch.cuda.amp.autocast(enabled=(_DEVICE == "cuda"), dtype=model_dtype):
                             loss_tok, _, _ = gpt(
                                 text_cond_tuple,
@@ -1400,6 +1511,10 @@ def _infer_summed_codes_for_step(
                                 other_info_by_scale=None,
                             )
 
+                        # 只累计当前 segment 对应 clip 的 NLL。
+                        # loss_tok 是按选中 scale 拼接的一维 token loss；每个 scale 的 token 数是 mul。
+                        # 由于 bit label 每个视觉 token 有 d_label 个 bit，这里乘 d_label 还原总 NLL。
+                        # 最后取负号得到 logprob：log p(tokens) = -NLL。
                         nll_target = torch.zeros((1,), dtype=loss_tok.dtype, device=loss_tok.device)
                         tok_ptr = 0
                         for j, mul in enumerate(muls):
@@ -1421,11 +1536,17 @@ def _infer_summed_codes_for_step(
                         except Exception:
                             pass
             if trace_sample_logprob_trace_ce is not None:
+                # trace_ce 成功时，用它覆盖 sampling-time logprob，作为最终写给 GRPO 的 old_logprob。
                 trace_sample_logprob = float(trace_sample_logprob_trace_ce)
             try:
                 if st.latent_dir:
                     os.makedirs(st.latent_dir, exist_ok=True)
                     trace_path = os.path.join(st.latent_dir, f"seg{int(step_i):02d}_trace.pt")
+                    # 第三步记账：把这次采样的账本写到磁盘。
+                    # trace 文件是 StageB replay/scoring 的关键桥梁：
+                    # - StageA rollout 写入 idx_trace、old_logprob、scale 选择和采样配置；
+                    # - StageB 训练读取同一个 trace，按相同规则重算 new_logprob；
+                    # - 这样 GRPO 的 ratio 才是在“同一批 sampled tokens”上的新旧策略比值。
                     torch.save(
                         {
                             "segment_index": int(step_i),
@@ -1479,6 +1600,12 @@ def _infer_summed_codes_for_step(
         want_decode = bool(st.latent_dir) or bool(need_pred_video)
         if want_decode:
             try:
+                # 注意：这一步不是 GRPO 记账必须的，只是把 latent 额外翻成视频。
+                # 这里才是可选的 VAE decode：
+                # - `return_summed_code_only=True` 的主路径不 decode RGB，只拿 latent；
+                # - reference-video action head 需要 RGB 窗口时，need_pred_video=True；
+                # - 调试目录存在时也会 decode 保存视频，方便肉眼看世界模型预测质量。
+                # 输出是 uint8 BGR，后续写视频或转换给 actionhead 使用。
                 with torch.no_grad():
                     pred_vid = st.stream.infinity.summed_codes2images(st.stream.vae, summed_codes)  # 代码/形状说明：[1,T,H,W,3], uint8(BGR)
                 if st.latent_dir:

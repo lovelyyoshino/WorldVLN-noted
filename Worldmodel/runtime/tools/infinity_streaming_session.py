@@ -30,6 +30,15 @@ InfinityStar KV-cache 工作流的 streaming/session 封装。
   写入 GT cache，预测时新增的 cache 标成 Pred。
 - 每一轮 segment 推理结束后，`correction_clear_pred()` 会清理 Pred cache；下一轮再把真实
   新观测写回 `gt_obs`。因此模型的预测只服务当前动作，不会被永久当作历史事实。
+
+给小白的核心比喻：
+- `t0` 像任务说明书：一条路线开始时写一次，之后一直保留。
+- `gt_obs` 像行车记录仪：客户端真实看到什么，就把这些真实帧编码后写进去。
+- `Pred cache` 像草稿纸：模型为了预测下一段会临时写草稿；一段结束后必须擦掉。
+
+如果不区分这三类 cache，闭环推理会很容易出错：
+模型上一轮“猜”出来的未来会在下一轮继续被当成历史，误差会被不断放大。这个 session
+封装的主要价值，就是把“真实历史”和“预测草稿”分开管理。
 """
 
 from __future__ import annotations
@@ -48,7 +57,15 @@ from tools.run_infinity import encode_prompt
 
 @dataclass
 class StreamingSchedule:
-    """一次 chunk 推理对应的动态分辨率计划、目标尺寸和 scale 元信息。"""
+    """
+    一次 chunk 推理对应的动态分辨率计划、目标尺寸和 scale 元信息。
+
+    阅读提示：
+    - `scale_schedule` 告诉 InfinityStar 这一轮按哪些时间/空间尺度生成 token；
+    - `context_info` 告诉 attention/RoPE 每个 scale 的 token 范围；
+    - `tgt_h/tgt_w` 是 RGB 帧最终会被 resize 到的空间尺寸；
+    - `tower_split_index` 用来区分 image tower 和 video tower，外层会据此拼 `tau_list`。
+    """
 
     scale_schedule: List[Tuple[int, int, int]]
     context_info: Dict[int, Dict[str, Any]]
@@ -81,6 +98,11 @@ class InfinityStreamingSession:
 
     这样设计的核心目的是：
     允许模型短程预演世界变化，但下一轮必须重新依赖真实观测，不能让预测无限自我滚动。
+
+    和 `infer/server.py` 的关系：
+    - `server.py::_ensure_traj_infinity_session()` 为每条 `TrajectoryState` 创建一个本类实例；
+    - `server.py::_infer_summed_codes_for_step()` 会调用本类的 schedule/cache 能力；
+    - 服务端跨请求保存的是 `TrajectoryState.kv_cache`，而本类负责把它导入底层模型 block。
     """
 
     def __init__(
@@ -129,8 +151,15 @@ class InfinityStreamingSession:
 
         这个 `pt` 会进一步决定动态分辨率表该选哪一条 `scale_schedule`。
 
+        输出怎么看：
+        - 返回的 `scale_schedule` 决定世界模型本轮输出的 latent 时间长度；
+        - 返回的 `tgt_h/tgt_w` 会被服务端用来 resize 客户端上传的 RGB 帧；
+        - 如果 `num_frames` 变小（tail-window），这里得到的 schedule 也会变短。
+
         """
         args = self.args
+        # 动态分辨率表来自训练/推理配置。它按宽高比模板和 latent 时间步数组织，
+        # 例如“0.5625 宽高比 + 21 个 latent 时间步”对应一条具体 scale_schedule。
         dynamic_resolution_h_w, h_div_w_templates = get_dynamic_resolution_meta(args.dynamic_scale_schedule, args.video_frames)
         h_div_w_template_ = h_div_w_templates[np.argmin(np.abs(h_div_w_templates - self.h_div_w_template))]
 
@@ -138,6 +167,8 @@ class InfinityStreamingSession:
         pt = (num_frames - 1) // args.temporal_compress_rate + 1
         scale_schedule = dynamic_resolution_h_w[h_div_w_template_][args.pn]["pt2scale_schedule"][pt]
 
+        # 第一个完整空间尺度之后通常进入 video tower；外层用 tower_split_index 把 image/video
+        # 两段使用不同的 tau 温度，和官方 InfinityStar 推理脚本保持一致。
         first_full_spatial_size_scale_index = get_first_full_spatial_size_scale_index(scale_schedule)
         args.first_full_spatial_size_scale_index = first_full_spatial_size_scale_index
         args.tower_split_index = first_full_spatial_size_scale_index + 1
@@ -161,12 +192,22 @@ class InfinityStreamingSession:
         中文导读：
         每条新 session 先把语言指令编码进 cache。`t0` 被标记为 GT，后续清理预测 cache
         时不会删掉它，所以同一条轨迹可以持续复用同一份语言条件。
+
+        为什么要先写 `t0`：
+        后续 `infer_chunk(skip_text_forward=True)` 不会再重复跑文本前向。如果没有这一步，
+        模型虽然能看到视觉 cache，却看不到“要往哪里走”的语言条件。
+
+        CFG 的 batch 语义：
+        - `cfg_scale == 1.0` 时只有条件分支，`bs=1`；
+        - `cfg_scale != 1.0` 时同时有条件/无条件分支，`bs=2`；
+        - 真实观测 cache 也要 repeat 到同样 batch size，否则后续 attention batch 对不上。
         """
         args = self.args
         model_dtype = next(iter(self.infinity.parameters())).dtype
         self.bs = 2 if float(cfg_scale) != 1.0 else 1
 
-        # 1) 重置所有 block 的 cache。
+        # 1) 重置所有 block 的 cache。reset 只在新 session 或新 run 开始时调用；
+        # 普通 segment 推进不会调用它，否则历史真实观测会被清掉。
         for blk in self.infinity.unregistered_blocks:
             blk.attn.kv_caching(True, reset=True)
 
@@ -179,6 +220,7 @@ class InfinityStreamingSession:
         self._text_cond_tuple = (text_cond_tuple, neg_tuple)
 
         # 3) 按 GT 写入 text cache，避免被 clear_pred_cache 清掉。
+        # 这一行之后，底层 attention block 新写的 K/V 都会记录为 is_pred=False。
         self.infinity.set_cache_write_is_pred(False)
 
         # 复用模型 helper 构造 prefix tokens，然后用 scale_ind='t0' 前向传播一次。
@@ -206,6 +248,8 @@ class InfinityStreamingSession:
         last_stage = prefix_tokens.to(dtype=model_dtype)
         with torch.amp.autocast("cuda", dtype=model_dtype):
             for b in block_chunks:
+                # scale_ind='t0' 是文本 cache 的稳定 key。后续视觉 token 可以引用它，
+                # 但 `clear_pred_cache()` 不会删除它。
                 last_stage = b(
                     x=last_stage,
                     cond_BD=None,
@@ -220,6 +264,7 @@ class InfinityStreamingSession:
                     ref_text_scale_inds=[],
                 )
 
+        # reset 结束后恢复默认写 Pred。之后推理产生的新 cache 默认都当作临时预测。
         self.infinity.set_cache_write_is_pred(True)
 
     @torch.no_grad()
@@ -252,13 +297,19 @@ class InfinityStreamingSession:
         后续 `infer_chunk()` 预测未来 chunk 时，会把 `t0` 文本 cache 和 `gt_obs` 真实观测 cache
         一起作为上下文；预测结束后只清理 Pred cache，不清理这里写入的 GT cache。
 
+        何时会被调用：
+        - 默认闭环：某个 segment 的右边界真实帧已经到达后，服务端调用它推进真实历史；
+        - hybrid leak 模式：真实前缀既作为 leak 条件，也写入 `gt_obs` cache；
+        - future emission：提前输出动作时不会调用它，因为那些未来帧还不是真实观测。
+
         """
         assert obs_video_bcthw.ndim == 5 and obs_video_bcthw.shape[1] == 3, "obs_video_bcthw 期望形状为 [B,3,T,H,W]"
         device = next(iter(self.infinity.parameters())).device
         dtype = next(iter(self.infinity.parameters())).dtype
 
         obs_video_bcthw = obs_video_bcthw.to(device=device, dtype=torch.float32)
-        # VAE 需要输入 float，范围 [-1,1]。
+        # VAE 需要输入 float，范围 [-1,1]。这里不做随机增强，也不做训练时的 teacher forcing；
+        # 它只把真实 RGB 前缀变成世界模型可读的 latent token。
         features, _, _ = self.vae.encode_for_raw_features(obs_video_bcthw, scale_schedule=None, slice=True)  # [B,d,t,h,w]
 
         # VAE 输出的 latent 时间长度同样满足 t_latent = (T_obs-1)//4 + 1（默认压缩率 4）。
@@ -287,6 +338,7 @@ class InfinityStreamingSession:
         )
 
         # 写入 GT cache。
+        # 从这里开始到写完 block 前向，所有新 K/V 都会被标记为真实观测。
         self.infinity.set_cache_write_is_pred(False)
         # repeat 到和 bs 一致；CFG 使用 bs=2。
         last_stage = self.infinity.embeds_codes2input(features.to(dtype=dtype), repeat=self.bs)
@@ -306,6 +358,7 @@ class InfinityStreamingSession:
                     last_repetition_step=True,
                     ref_text_scale_inds=[],
                 )
+        # 写完真实观测后立刻恢复 Pred 默认值，避免后续生成 cache 被误标成 GT。
         self.infinity.set_cache_write_is_pred(True)
 
     @torch.no_grad()
@@ -337,12 +390,18 @@ class InfinityStreamingSession:
         但这些新增 cache 全部会被标成 Pred，意味着它们只是“当前一轮的临时想象结果”，
         等 segment 结束后就会被清掉。
 
+        和 `compute_kv_cache_gt()` 的区别：
+        - `compute_kv_cache_gt()` 写入真实历史，cache key 是 `gt_obs`，is_pred=False；
+        - `infer_chunk()` 生成未来 latent，is_pred=True；
+        - `correction_clear_pred()` 只清掉第二类，不清掉第一类。
+
         """
         assert self._text_cond_tuple is not None, "请先调用 reset() 写入文本条件 cache"
         text_cond_tuple, neg_tuple = self._text_cond_tuple
         if negative_prompt and neg_tuple is None:
             neg_tuple = encode_prompt(self.args.text_encoder_ckpt, self.text_tokenizer, self.text_encoder, negative_prompt, enable_positive_prompt=False, low_vram_mode=False)
 
+        # 本次预测窗口的 schedule。`num_frames` 可以是完整视频长度，也可以是 tail-window 长度。
         sched = self.build_schedule_for_num_frames(num_frames)
 
         # 确保列表长度和 schedule 一致。
@@ -351,7 +410,8 @@ class InfinityStreamingSession:
         if not isinstance(tau_list, list):
             tau_list = [tau_list] * len(sched.scale_schedule)
 
-        # 后续写入都标为 pred。
+        # 后续写入都标为 pred。也就是说，本轮 autoregressive_infer 产生的 KV cache
+        # 都是临时预测上下文，不能长期留在闭环历史里。
         self.infinity.set_cache_write_is_pred(True)
 
         # 只有 gt_obs cache 已写入时才引用它。
@@ -367,6 +427,10 @@ class InfinityStreamingSession:
 
         model_dtype = next(iter(self.infinity.parameters())).dtype
         with torch.amp.autocast("cuda", dtype=model_dtype):
+            # 关键参数：
+            # - kv_cache_reset=False：保留 reset()/compute_kv_cache_gt() 写入的 GT cache；
+            # - skip_text_forward=True：不重复写 t0，因为 reset() 已经写过；
+            # - extra_ref_text_scale_inds：如果有 gt_obs，就让生成 token attend 真实观测 cache。
             return self.infinity.autoregressive_infer(
                 vae=self.vae,
                 scale_schedule=sched.scale_schedule,

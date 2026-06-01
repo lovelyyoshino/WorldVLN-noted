@@ -1,6 +1,17 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
-"""ResNe(X)t 分类头辅助模块。"""
+"""ResNe(X)t / X3D 视频分类头辅助模块。
+
+中文导读：
+    上游 SlowFast/X3D 项目使用 ``ResNetBasicHead`` 与 ``X3DHead`` 做视频分类（softmax
+    over Kinetics 类别）。WorldVLN 中并未使用这两个 head，而是直接用
+    ``VisionTransformer.head = nn.Linear(D, num_classes=18)`` 做 6D delta 动作回归
+    （``num_classes = 6 维 * 3 帧 = 18``，损失为 MSE/L1，无 softmax）。
+
+    保留这两个类是为了让 ``timesformer.models`` 包可以兼容上游 SlowFast 的
+    ``video_model_builder``，方便复用 ImageNet/Kinetics 预训练权重；它们不是
+    动作解码器训练时的实际计算路径。
+"""
 
 import torch
 import torch.nn as nn

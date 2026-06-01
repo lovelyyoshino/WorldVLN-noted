@@ -1,6 +1,17 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
-"""自定义算子和小型网络模块。"""
+"""自定义算子和小型网络模块。
+
+中文导读：
+    本文件包含 SlowFast/X3D 用到的小工具：
+        - ``Swish`` / ``SwishEfficient``：Swish 激活函数及其节省显存的 autograd 实现。
+          公式：Swish(x) = x * sigmoid(x)。
+        - ``SE``：Squeeze-and-Excitation 通道注意力模块（用于 X3D 路径），由 AvgPool +
+          两层 1x1x1 conv + sigmoid 组成，把通道权重乘回输入。
+
+    WorldVLN 动作解码器主路径仅使用 ``vit.py`` 中的 ``Block`` 与 ``Attention``，并不会
+    调用 ``Swish`` 或 ``SE``；保留它们是为了让上游 ``video_model_builder`` 能正常 import。
+"""
 
 import torch
 import torch.nn as nn

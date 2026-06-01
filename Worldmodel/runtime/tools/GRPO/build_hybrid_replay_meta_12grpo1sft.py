@@ -1,4 +1,28 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+12 GRPO + 1 SFT 混合 replay 元数据构建器。
+
+中文导读：
+这是 GRPO 数据准备链的“最后整理”阶段，把 reward_uavflow.py 输出的 part_*.jsonl
+重新整理成训练阶段直接消费的混合 replay：
+
+    rollout cache
+        -> reward_uavflow.py（输出 part_*.jsonl，每条 row 带 grpo_clip_id / candidate_id）
+        -> 本脚本：按 base task 重组，每个任务凑齐 K * num_clips 条 GRPO 候选，
+            可选追加 1 条 SFT anchor，然后再分片成 num_parts 个 part_*.jsonl
+        -> trainer 直接读取整理后的 part_*.jsonl
+
+每个 group 的常见布局：
+- `num_clips=3`、`k=4` -> 12 条 GRPO 候选；
+- 默认 `add_sft_anchor=1` 时，再加 1 条 `hybrid_role="sft"` 的 anchor row；
+- 这样每个 group 大小固定为 13，下游训练循环不需要处理可变长度。
+
+`pad_to_equal_groups=1` 是为了适配多卡训练：让每个 shard 的 group 数量一致，
+避免按最短 shard 截断时丢失独有任务。
+"""
+
 import argparse
 import json
 import os

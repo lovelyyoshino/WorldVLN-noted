@@ -165,8 +165,9 @@ def load_flat_sharded_state(checkpoint_dir: Path, device: str | torch.device = "
             shard_state = load_safetensors_file(str(shard_path), device=target_device)
             merged_state.update(shard_state)
 
-        # 代码/形状说明：`save_torch_state_dict` may deduplicate shared tensors and store alias
-        # 中文说明：information inside index metadata as: {"alias_key": "canonical_key"}.
+        # 说明：`save_torch_state_dict` 在多个 key 共享同一份 tensor 内存时，
+        # 可能只存储一份并把别名写进 index metadata，形式为 {"alias_key": "canonical_key"}。
+        # 这里把这些别名补回 merged_state，保证后续按原始 key 查询时不会缺失。
         for alias_key, canonical_key in index_data.get("metadata", {}).items():
             if (
                 isinstance(alias_key, str)

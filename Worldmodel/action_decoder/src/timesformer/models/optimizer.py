@@ -1,6 +1,15 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
-"""TimeSformer 优化器构建工具。"""
+"""TimeSformer 优化器构建工具。
+
+中文导读：
+    本模块提供 SlowFast 风格的 SGD/Adam/AdamW 构造与学习率注入工具。
+    它会自动把参数按名字是否含 ``"bn"`` 拆成两组，并对 BatchNorm 参数使用
+    单独的 weight decay（默认 0），避免 BN affine 参数被 L2 拉向零。
+
+    WorldVLN 动作解码器主训练脚本通常直接用 ``torch.optim.AdamW``，并不调用本文件；
+    但当复用上游 ``video_model_builder`` 路径时（例如做对照实验），仍会走这里。
+"""
 
 import torch
 

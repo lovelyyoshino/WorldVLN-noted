@@ -205,10 +205,14 @@ def _apply_action_to_pose_with_frame(
           `body_apply_order` 决定先转再移、先移再转，还是用中点积分。
 
         机体系动作转世界系的核心公式：
-        核心积分公式：`x += dx*cos(theta) - dy*sin(theta)`，
-        公式/形状说明：`y += dx*sin(theta) + dy*cos(theta)`。
-        `yaw_first` 先用 `yaw+dyaw` 当 theta；`trans_first` 用旧 yaw 当 theta；
-        `midpoint` 用 `yaw + 0.5*dyaw` 当 theta，近似一边转向一边平移。
+        - 公式：x += dx*cos(theta) - dy*sin(theta)
+        - 公式：y += dx*sin(theta) + dy*cos(theta)
+        其中 theta 由 yaw 决定，单位 radians（代码内部用 math.radians(yaw) 换算）。
+
+        三种 body_apply_order（决定 theta 取转向前/后/中的哪一刻 yaw）：
+        - `yaw_first`：先 `yaw += dyaw` 再平移，theta 用转向后的新 yaw（先转再走）；
+        - `trans_first`：用旧 yaw 当 theta 平移，再 `yaw += dyaw`（先走再转）；
+        - `midpoint`：theta 用 `yaw + 0.5*dyaw`（边转边走的近似中点积分）。
 
         注意：`dz` 直接沿世界 Z 轴累加；当 pitch/roll 很小或被忽略时，这个近似通常够用。
 
@@ -640,7 +644,23 @@ def run_one_task_unrealcv(
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
     def _post_frames(frames: List[Image.Image], *, include_instruction: bool) -> Dict:
-        """发送本轮新增真实帧；首轮附带 instruction 并重置同名 session。"""
+        """
+        发送本轮新增真实帧；首轮附带 instruction 并重置同名 session。
+
+        HTTP 调用契约（服务端 `/v1/predict_delta_actions` 期望的字段）：
+        - `session_id`：同一条轨迹必须保持一致，服务端用它定位 TrajectoryState；
+        - `images_base64`：本轮新增的真实观测帧（base64 data URL），首轮通常 1 帧、
+          后续每轮 `step` 帧；服务端按 `points` 边界增量缓存这些帧；
+        - `prefix_mode=False`：表示走增量协议，服务端不会把已有帧再次解码；
+        - `allow_future_*`：在帧数仅到达 `points[seg]` 时允许提前输出 segment 动作；
+        - `action_head_*`：传给服务端选择的动作头模式 / 滑窗参数；
+        - `instruction`/`reset_session`：仅首轮需要，强制服务端按新轨迹建立内部 session。
+
+        返回的 JSON 字段：
+        - `actions`: 本轮动作列表，长度由动作头模式决定（默认 16 个）；
+        - `segment_index`: 本轮发射的 segment（-1 表示尚未 ready）；
+        - `num_received_frames` / `done` / `prefix_latents`：闭环进度指示。
+        """
         payload: Dict[str, Any] = {
             "session_id": session_id,
             "images_base64": [_pil_to_data_url(im, codec=str(image_codec), quality=int(jpeg_quality)) for im in frames],
@@ -911,7 +931,11 @@ def _obs_points(pred_num_frames: int, step: int) -> List[int]:
     """
     和服务端一致的 segment 边界逻辑。
 
-    初学者公式：`points = [1, 1+step, 1+2*step, ..., num_frames]`。
+    闭环 segment 边界公式：
+    - 公式：points = [1, 1+step, 1+2*step, ..., num_frames]
+    例如 `pred_num_frames=49, step=16` 时返回 `[1,17,33,49]`：
+    第 1 帧是预热观测，之后每 16 帧（一个 step）作为一个新 segment 的右边界。
+
     服务端默认用 `ready_default = n >= points[seg+1]` 判断某个 segment 是否可输出动作：
     已收到帧数 `n` 到达该段右边界时，该段才算 ready。
     """
