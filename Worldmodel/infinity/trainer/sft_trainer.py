@@ -1,5 +1,34 @@
 # Copyright (c) 2025 FoundationVision
 # SPDX-License-Identifier: MIT
+"""
+InfinityStar / WorldVLN 的基础 SFT 训练器。
+
+这里的 SFT 是 Supervised Fine-Tuning（监督微调），不要和后面的 GRPO/RL 混在一起：
+
+- SFT 学的是“给定文本条件 + 已知视觉 token，预测下一个视频 latent/code token”；
+- 监督信号来自真实视频经过 VAE/LFQ/BSQ 编码后的 token，不来自动作 reward；
+- 训练方式是 teacher-forcing：训练时真实视频 token 已经给定，模型在每个位置预测对应 GT token；
+- 这个文件只负责基础世界模型训练。带 GRPO trace replay / old_logprob / advantage 的版本在
+  `Worldmodel/runtime/infinity/trainer/sft_trainer.py`。
+
+白话理解：
+SFT 不是让模型“直接学动作”，而是先让 Infinity 世界模型学会根据指令和历史画面生成合理的未来
+latent 世界。后续 Stage-2 动作头才会把这些 latent 翻译成动作；GRPO 再用 reward 微调这些 latent
+采样分布，使“想象出来的未来”更有利于完成任务。
+
+本文件核心链路：
+
+```text
+RGB 帧 / 已缓存 VAE raw_features
+  -> VAE.encode_for_raw_features() 或直接读取缓存 latent
+  -> video_encode() 打包成 transformer 输入 x_BLC 和监督目标 gt_BLC
+  -> Infinity.forward() 得到每个视觉 token 的 CE loss / bit accuracy
+  -> 按 dynamic scale 重新加权 loss
+  -> AmpOptimizer.backward_clip_step() 反传并更新世界模型
+  -> 可选 EMA / metric / checkpoint
+```
+"""
+
 from pprint import pformat
 from typing import Optional, Tuple, Union
 import os
@@ -33,7 +62,15 @@ import queue
 import threading
 
 def save_token():
-    """后台线程：异步把新提取的 VAE token 保存到磁盘缓存。"""
+    """
+    后台线程：异步把新提取的 VAE token 保存到磁盘缓存。
+
+    为什么需要这个线程：
+    - SFT 训练每个样本都要先把 RGB 视频编码成 VAE latent/raw_features；
+    - 这一步比较贵，重复训练时没必要每次都重新 encode；
+    - 主训练线程只负责把待保存的 tensor 放进 `save_token_queue`，真正的磁盘写入交给后台线程，
+      避免 I/O 阻塞 GPU 训练。
+    """
     while True:
         try:
             raw_features, feature_cache_files4images = save_token_queue.get()
@@ -54,7 +91,16 @@ saver = threading.Thread(target=save_token, daemon=True)
 saver.start()
 
 class InfinityTrainer(object):
-    """Infinity 模型的 SFT 训练器，负责前向、损失重加权、反向和保存恢复。"""
+    """
+    Infinity 模型的 SFT 训练器，负责前向、损失重加权、反向和保存恢复。
+
+    这里的“训练器”不是模型结构本身，而是把下面几件事串起来：
+    - VAE：把真实 RGB 视频变成世界模型要预测的离散/连续视觉 token；
+    - video_encode：按 dynamic scale schedule 打包 token、RoPE、mask 和 GT；
+    - GPT/Infinity：在 teacher-forcing 条件下预测每个视觉 token；
+    - AmpOptimizer：做 mixed precision、梯度裁剪、梯度累积和 optimizer.step；
+    - Metric/checkpoint：记录多尺度 loss/acc，并保存训练状态。
+    """
     def __init__(
         self,
         device,
@@ -71,7 +117,16 @@ class InfinityTrainer(object):
         use_fsdp_model_ema=False,
         other_args=None,
     ):
-        """保存训练依赖对象，并初始化损失函数与多尺度元信息。"""
+        """
+        保存训练依赖对象，并初始化损失函数与多尺度元信息。
+
+        参数角色：
+        - `vae_local`：本地 VAE，用来把 RGB 编码成 raw_features；SFT loss 不直接监督 RGB 像素。
+        - `gpt_wo_ddp` / `gpt`：同一个 Infinity 世界模型，前者是裸模型/compile 后模型，后者可能包了 DDP/FSDP。
+        - `gpt_opt`：封装 optimizer、GradScaler、梯度裁剪和 step 逻辑。
+        - `dynamic_scale_schedule`：决定同一段视频会被拆成哪些时间/空间尺度去训练。
+        - `reweight_loss_by_scale`：控制不同尺度的 loss 如何加权，避免某些尺度因为 token 数不同而主导训练。
+        """
         super(InfinityTrainer, self).__init__()
 
         self.zero = zero
@@ -81,6 +136,8 @@ class InfinityTrainer(object):
         self.gpt, self.vae_local = gpt, vae_local
         self.dynamic_scale_schedule = other_args.dynamic_scale_schedule
         self.steps_per_frame = other_args.steps_per_frame
+        # dynamic_resolution_h_w 里保存了每个视频时长/宽高比/pn 对应的 scale schedule。
+        # 后面 train_step 会用它把 VAE token 打包成不同尺度的 transformer 序列。
         self.dynamic_resolution_h_w, self.h_div_w_templates = get_dynamic_resolution_meta(other_args.dynamic_scale_schedule, other_args.video_frames)
         self.gpt_opt: AmpOptimizer = gpt_opt
         self.gpt_wo_ddp: Union[Infinity, torch._dynamo.eval_frame.OptimizedModule] = gpt_wo_ddp  # 中文说明：可能已经经过 torch.compile 包装
@@ -91,9 +148,12 @@ class InfinityTrainer(object):
         self.batch_size, self.seq_len = 0, 0
         self.reweight_loss_by_scale = reweight_loss_by_scale
         print(f'self.reweight_loss_by_scale: {self.reweight_loss_by_scale}（0 表示按 token 数加权，非 0 表示按尺度体积差重加权）')
+        # `video_encode` 是 schedule 相关的打包函数。它不是 VAE encode 本身，而是把 VAE raw_features
+        # 整理成 Infinity.forward() 需要的 x_BLC、gt_BLC、RoPE cache 和 scale 元信息。
         video_encode, _, _, _ = get_encode_decode_func(other_args.dynamic_scale_schedule)
         self.video_encode = video_encode
 
+        # 每个 rank 上的模型都要有自己的随机数生成器，避免分布式采样/训练时共享错误状态。
         gpt_uncompiled = self.gpt_wo_ddp._orig_mod if hasattr(self.gpt_wo_ddp, '_orig_mod') else self.gpt_wo_ddp
         del gpt_uncompiled.rng
         gpt_uncompiled.rng = torch.Generator(device=device)
@@ -101,6 +161,7 @@ class InfinityTrainer(object):
 
         self.label_smooth = label_smooth
 
+        # 训练时可以 label smoothing；验证时固定不用 smoothing，保证指标可解释。
         self.train_loss = nn.CrossEntropyLoss(label_smoothing=label_smooth, reduction='none')
         self.val_loss = nn.CrossEntropyLoss(label_smoothing=0.0, reduction='none')
         self.loss_weight = {0:{}, 1:{}}
@@ -115,7 +176,33 @@ class InfinityTrainer(object):
         raw_features_bcthw: FTen, feature_cache_files4images: list, media: str,
         inp_B3HW: FTen, text_cond_tuple: Union[ITen, FTen], args: arg_util.Args,
     ) -> Tuple[torch.Tensor, Optional[float]]:
-        """执行一次训练 step，并返回梯度范数与 AMP 缩放信息。"""
+        """
+        执行一次 SFT 训练 step，并返回梯度范数与 AMP 缩放信息。
+
+        SFT 在这里具体做什么：
+        1. 准备视觉 token：
+           - 如果 batch 给的是 RGB 图像/视频，先用 VAE 编码成 `raw_features`；
+           - 如果 batch 已经给了 `raw_features_bcthw`，直接使用缓存 token，省掉 VAE encode。
+        2. 调 `video_encode()`：
+           - 把每个样本的 VAE raw_features 按 dynamic scale schedule 打包；
+           - 生成 transformer 输入 `x_BLC` 和监督目标 `gt_BLC`；
+           - 准备视觉 RoPE、scale packing 信息和可选 mask。
+        3. 调 Infinity/GPT 前向：
+           - teacher-forcing 方式预测每个视觉 token；
+           - 返回每个 token 的 loss 和 bit/token accuracy。
+        4. 按尺度聚合 loss：
+           - 每个样本可能包含多个时间/空间尺度；
+           - 这里把扁平 token loss 切回各个 scale，再按 token 数或体积重加权。
+        5. 反向更新：
+           - `AmpOptimizer.backward_clip_step()` 负责 backward、grad clip、梯度累积和 optimizer.step。
+        6. 记录指标：
+           - 把不同视频时长/scale 的 accuracy 聚合，并跨 GPU all_reduce 后写入 wandb/日志。
+
+        重要区别：
+        - 这里没有动作标签、没有 reward、没有 old/new logprob；
+        - 它训练的是世界模型的“视频 latent 预测能力”；
+        - GRPO 训练会在 runtime 版本里复用类似的 forward/packing 能力，但 loss 已经换成 PPO/GRPO。
+        """
         device = args.device
         B = len(inp_B3HW) + len(raw_features_bcthw)
 
@@ -123,13 +210,16 @@ class InfinityTrainer(object):
             is_image_batch = 1
         else:
             is_image_batch = 0
-        # 前向阶段：先把图像编码成 VAE latent，再做 packed transformer 前向。
+        # 前向阶段分成两层：
+        # 1) VAE 层：RGB -> raw_features，或直接使用缓存 raw_features；
+        # 2) Infinity 层：raw_features -> packed token 序列 -> teacher-forcing CE。
         with self.gpt_opt.amp_ctx:
             with torch.amp.autocast('cuda', enabled=False):
                 raw_features_list = []
                 if len(inp_B3HW):
                     with torch.no_grad():
                         for inp_ind, inp in enumerate(inp_B3HW):
+                            # VAE 只负责生成监督 token/latent，不在这个 SFT step 里被训练。
                             raw_features_, _, _ = self.vae_local.encode_for_raw_features(inp.unsqueeze(0), scale_schedule=None, slice=args.use_slice)
                             raw_features_list.append(raw_features_)
                             if args.use_vae_token_cache and args.save_vae_token_cache and (not osp.exists(feature_cache_files4images[inp_ind])):
@@ -139,8 +229,15 @@ class InfinityTrainer(object):
                     raw_features_bcthw = [item.unsqueeze(0) for item in raw_features_bcthw]
                     raw_features_list = raw_features_list + raw_features_bcthw
 
+            # full_pts_this_batch 是每个样本的 latent 时间长度 pt。
+            # 后面日志会按 pt 还原成视频时长，例如 duration=(pt-1)/temporal_compress_rate。
             full_pts_this_batch = [item.shape[-3] for item in raw_features_list]
             kv_compact, lens, cu_seqlens_k, max_seqlen_k = text_cond_tuple
+            # video_encode 的输出是 Infinity.forward 的完整输入包：
+            # - x_BLC：视觉 token 输入序列；
+            # - gt_BLC：要预测的目标 token；
+            # - x_BLC_mask：可变长/packing 时的有效 token mask；
+            # - visual_rope_cache / scale 元信息：告诉模型每段 token 属于哪个时间/空间尺度。
             x_BLC, x_BLC_mask, gt_BLC, pred_all_bit_indices, visual_rope_cache, sequece_packing_scales, super_scale_lengths, super_querysid_super_refsid, other_info_by_scale = self.video_encode(
                 vae=self.vae_local,
                 inp_B3HW=None,
@@ -154,6 +251,8 @@ class InfinityTrainer(object):
                 tokens_remain=args.train_max_token_len,
             )
 
+            # 这里是 SFT 的核心前向：在真实文本条件和真实视觉 token 上做 teacher-forcing。
+            # 返回的 loss/acc_bit 已经是“每个视觉 token 一个值”的扁平序列，后面要按 scale 切回去。
             loss, acc_bit, valid_sequence_ratio = self.gpt(
                 text_cond_tuple,
                 x_BLC,
@@ -166,8 +265,10 @@ class InfinityTrainer(object):
                 other_info_by_scale=other_info_by_scale,
             ) # 中文说明：loss & acc_bit: [seq_len]
 
-            # 多尺度损失重加权：更小的 patch 数量可按体积比放大权重。
-            # 代码/形状说明：import pdb; pdb.set_trace()
+            # 多尺度损失重加权：
+            # dynamic schedule 会把同一视频拆成多个 scale，例如低分辨率粗略 token 和高分辨率细节 token。
+            # 如果直接对所有 token 平均，token 数多的 scale 会自然占更大权重；
+            # `reweight_loss_by_scale` 允许按 scale 体积差重新平衡训练信号。
             acc_pt2scale_acc = {}
             acc_pt2scale_acc_counter = {}
             for full_pt, scale_schedule in self.dynamic_resolution_h_w[self.h_div_w_templates[0]][args.pn]['pt2scale_schedule'].items():
@@ -183,6 +284,8 @@ class InfinityTrainer(object):
                     mul_pt_ph_pw = pt * ph * pw
                     start, end = ptr, ptr+mul_pt_ph_pw
                     ptr = end
+                    # loss 是按所有样本、所有 scale 串起来的一维序列。
+                    # 这里用当前 scale 的 token 数把它切出 `[start:end]`，得到这个 scale 的平均 loss/acc。
                     if x_BLC_mask is None:
                         loss_this_scale = loss[start:end].mean()
                         acc_this_scale = acc_bit[start:end].mean()
@@ -196,8 +299,11 @@ class InfinityTrainer(object):
                     acc_pt2scale_acc[full_pt][real_si].append(acc_this_scale)
                     acc_pt2scale_acc_counter[full_pt][real_si] += 1
                     if self.reweight_loss_by_scale == 0:
+                        # 默认按 token 数加权：scale token 越多，占总 loss 越大。
                         weight = 1 * mul_pt_ph_pw
                     else:
+                        # 非 0 时按最大尺度体积 / 当前尺度体积做平衡，但用 max_reweight_value 截断，
+                        # 防止极小 scale 被放大得过强。
                         reweight_value = min(args.max_reweight_value, np.power(volume_times, 1/(1+self.reweight_loss_by_scale)))
                         weight = reweight_value * mul_pt_ph_pw
                     flatten_weight_list.append(weight)
@@ -206,6 +312,8 @@ class InfinityTrainer(object):
                     global_scale_ind += 1
             flatten_weight_list = torch.tensor(flatten_weight_list, dtype=loss.dtype, device=loss.device)
             flatten_weight_list = flatten_weight_list / flatten_weight_list.sum()
+            # final_loss 是本 step 真正反传的 SFT loss：
+            # 公式就是所有 scale loss 的加权和，而不是简单 mean。
             final_loss = (torch.stack(flatten_L_list) * flatten_weight_list).sum()
             final_acc_bit = (torch.stack(flatten_acc_bit_list) * flatten_weight_list).sum()
 

@@ -1,5 +1,41 @@
 # Copyright (c) 2025 FoundationVision
 # SPDX-License-Identifier: MIT
+"""
+Runtime 版 InfinityTrainer：同时服务 SFT 和 Action-aware GRPO。
+
+先把概念分清：
+
+- SFT（Supervised Fine-Tuning / 监督微调）：
+  给定文本条件和真实视频 VAE token，用 teacher-forcing 训练世界模型预测真实视频 token。
+  它的监督信号是“真实视频 token”，不是动作标签，也不是 reward。
+
+- GRPO / RL：
+  先由 StageA rollout 采样出一批 token/latent 轨迹，reward_uavflow.py 给轨迹打分；
+  StageB 再回放这些采样 token，计算当前模型的 new_logprob，并和 rollout 时的 old_logprob
+  做 PPO/GRPO ratio，使用 grpo_adv_final 作为权重更新世界模型。
+
+这个 runtime 文件和 `Worldmodel/infinity/trainer/sft_trainer.py` 的区别：
+
+- 基础版主要是 Stage-1 SFT 世界模型训练；
+- runtime 版额外接收 `grpo_*` 字段、trace 文件、old/ref logprob，能在同一个 `train_step()`
+  里切换 SFT loss 或 GRPO/PPO loss；
+- 即使走 GRPO，代码仍需要 SFT 的 video_encode / teacher-forcing forward 能力：
+  它们负责把 video latent/token 打包、重算 logprob、提供 CE 诊断和可选 aux SFT 稳定项。
+
+WorldVLN 是否“需要 SFT”：
+
+- 如果只是加载已经训练好的 checkpoint 做推理，不需要再运行 SFT 训练；
+- 如果要训练/微调世界模型，SFT 是基础阶段，负责让 InfinityStar 先学会生成合理未来 latent；
+- 如果要做 GRPO，SFT 仍然是底座：GRPO 不是从零学世界模型，而是在 SFT 世界模型基础上用 reward
+  调整采样分布，让高奖励 latent/token 更容易被采到。
+
+换句话说：
+
+- SFT 解决“世界模型会不会生成像真实视频的 latent”；
+- Stage-2 / TSformer 动作头解决“这些 latent 对应什么动作”；
+- GRPO 解决“在能生成的基础上，哪些生成结果更符合导航/动作 reward，应该被提高概率”。
+"""
+
 from pprint import pformat
 from typing import Any, Dict, List, Optional, Tuple, Union
 from contextlib import nullcontext
@@ -39,7 +75,13 @@ import queue
 import threading
 
 def save_token():
-    """后台线程：异步把新提取的 VAE token 保存到磁盘缓存。"""
+    """
+    后台线程：异步把新提取的 VAE token 保存到磁盘缓存。
+
+    SFT/GRPO 的 batch 都可能先拿到 RGB，再编码成 VAE raw_features。这个编码开销大，
+    所以训练时会把 raw_features 缓存到磁盘。主训练线程只把待保存项放入队列，
+    后台线程负责实际写盘，避免 GPU 等 I/O。
+    """
     while True:
         try:
             raw_features, feature_cache_files4images = save_token_queue.get()
@@ -78,7 +120,24 @@ def _obs_points(pred_num_frames: int, step: int):
     return pts
 
 class InfinityTrainer(object):
-    """Infinity 的统一训练器，兼容 SFT、GRPO 与 teacher-forcing 调试导出。"""
+    """
+    Infinity 的统一训练器，兼容 SFT、GRPO 与 teacher-forcing 调试导出。
+
+    可以把它看成三层：
+
+    1. 公共世界模型前向层：
+       RGB/cache latent -> VAE raw_features -> video_encode() -> Infinity.forward()。
+       SFT 和 GRPO 都需要这层，因为二者都要把视频 token 打包成模型可消费的序列。
+
+    2. SFT loss 层：
+       直接使用 Infinity.forward() 返回的 token CE loss，按 scale 加权后反传。
+       这是普通监督微调路径。
+
+    3. GRPO/RL loss 层：
+       使用 StageA 写入的 `grpo_old_logprob`、`grpo_adv_final`、`grpo_trace_files`，
+       重新计算 `new_logprob`，构造 PPO/GRPO 目标。
+       这条路径更新的仍然是 Infinity 世界模型，不是动作头。
+    """
     def __init__(
         self,
         device,
@@ -95,7 +154,17 @@ class InfinityTrainer(object):
         use_fsdp_model_ema=False,
         other_args=None,
     ):
-        """保存训练依赖对象，并初始化损失、EMA、GRPO 统计与调试工具。"""
+        """
+        保存训练依赖对象，并初始化损失、EMA、GRPO 统计与调试工具。
+
+        关键成员：
+        - `vae_local`：把 RGB 转成世界模型训练/回放用的 raw_features；
+        - `video_encode`：把 raw_features 打包成 `x_BLC/gt_BLC/RoPE/scale_info`；
+        - `gpt` / `gpt_wo_ddp`：真正被训练的 InfinityStar 世界模型；
+        - `get_visual_rope_embeds/get_scale_pack_info`：GRPO trace replay / trace CE 复现 StageA
+          采样路径时需要的 schedule 辅助函数；
+        - `_stable_metric_*`：GRPO 指标更噪，所以这里维护一些 EMA/step 级统计，便于看趋势。
+        """
         super(InfinityTrainer, self).__init__()
 
         self.zero = zero
@@ -117,7 +186,9 @@ class InfinityTrainer(object):
         print(f'self.reweight_loss_by_scale: {self.reweight_loss_by_scale}')
         video_encode, _, get_visual_rope_embeds, get_scale_pack_info = get_encode_decode_func(other_args.dynamic_scale_schedule)
         self.video_encode = video_encode
-        # 这两个函数给 GRPO trace-replay 复现老轨迹时使用。
+        # 这两个函数给 GRPO trace-replay / trace-ce 复现 StageA 采样路径时使用。
+        # 因为 PPO ratio 必须在“同一批 sampled tokens”上比较 new/old logprob，
+        # StageB 不能随便重新打包 schedule，而要尽量复现 StageA 的尺度和 RoPE 语义。
         self.get_visual_rope_embeds = get_visual_rope_embeds
         self.get_scale_pack_info = get_scale_pack_info
 
@@ -538,6 +609,36 @@ class InfinityTrainer(object):
         对小白最重要的区别：
         - SFT：核心是 teacher-forcing 下的视觉 token 监督；
         - GRPO：核心是“拿 rollout 时记录的旧 logprob 和 reward/advantage，重新计算新策略 logprob，再做 PPO/GRPO 目标”。
+
+        读 `grpo_*` 参数时可以这样记：
+        - `grpo_old_logprobs`：StageA 采样时，旧模型对“实际采到的 token”的概率；
+        - `grpo_trace_files`：StageA 采样路径记录，里面保存了每一步采到的 token、scale、CFG、tau 等；
+        - `grpo_adv_finals`：reward_uavflow.py 汇总后的最终训练权重，越大越鼓励模型以后更容易采到这条轨迹；
+        - `grpo_reward_* / grpo_succ* / grpo_task_*`：reward 的拆分项，主要用于日志和兜底重建权重。
+
+        这个函数可以按 7 段读：
+
+        1. 公共输入准备：
+           把 RGB 或已缓存 `raw_features_bcthw` 整理成 `raw_features_list`。
+
+        2. 公共 token packing：
+           调 `video_encode()` 得到 `x_BLC`、`gt_BLC`、mask、RoPE 和 scale packing 信息。
+
+        3. 公共 teacher-forcing 前向：
+           调 `self.gpt(...)` 得到每个 token 的 CE loss/acc。SFT 会直接反传它；
+           GRPO 严格模式下它主要作为 metric/aux，真正梯度来自后面的 replay logprob。
+
+        4. GRPO metadata 解析：
+           把 batch 里的 `grpo_old_logprob`、`grpo_adv_final`、reward 分项、trace 文件转成 tensor。
+
+        5. GRPO new_logprob 计算：
+           `trace_replay` 逐样本回放 KV-cache 采样路径；`trace_ce` 用 teacher-forcing 单次前向近似重算。
+
+        6. loss 组合：
+           SFT 用 scale-weighted CE；GRPO 用 PPO/GRPO policy objective，可加 KL 和 aux SFT。
+
+        7. 反向与记录：
+           `AmpOptimizer.backward_clip_step()` 负责 backward/clip/step，再记录 SFT 和 GRPO 指标。
         """
         device = args.device
         B = len(inp_B3HW) + len(raw_features_bcthw)
@@ -546,13 +647,15 @@ class InfinityTrainer(object):
             is_image_batch = 1
         else:
             is_image_batch = 0
-        # 前向阶段：先把图像编码成 VAE latent，再做 packed transformer 前向。
+        # 公共前向准备：先把图像编码成 VAE raw_features，再做 packed transformer 前向。
+        # SFT 和 GRPO 都需要这一步，因为二者都基于“文本条件 + 视频 token 序列”训练世界模型。
         with self.gpt_opt.amp_ctx:
             with torch.amp.autocast('cuda', enabled=False):
                 raw_features_list = []
                 if len(inp_B3HW):
                     with torch.no_grad():
                         for inp_ind, inp in enumerate(inp_B3HW):
+                            # VAE 在这里是 token/latent 提供者，不是本 step 的优化对象。
                             raw_features_, _, _ = self.vae_local.encode_for_raw_features(inp.unsqueeze(0), scale_schedule=None, slice=args.use_slice)
                             raw_features_list.append(raw_features_)
                             if args.use_vae_token_cache and args.save_vae_token_cache and (not osp.exists(feature_cache_files4images[inp_ind])):
@@ -564,6 +667,14 @@ class InfinityTrainer(object):
 
             full_pts_this_batch = [item.shape[-3] for item in raw_features_list]
             kv_compact, lens, cu_seqlens_k, max_seqlen_k = text_cond_tuple
+            # video_encode 是 SFT/GRPO 共用的数据打包入口：
+            # - x_BLC：模型输入视觉 token；
+            # - gt_BLC：teacher-forcing 目标 token；
+            # - sequece_packing_scales / other_info_by_scale：后面把扁平 loss 切回各尺度用。
+            #
+            # 这里是理解 SFT 作用的关键：
+            # 世界模型训练时并不是直接看 RGB，也不是直接预测动作，而是预测 VAE/BSQ token。
+            # SFT 就是在这里把真实视频 token 当答案，让 Infinity 学会“下一个 latent/token 应该是什么”。
             x_BLC, x_BLC_mask, gt_BLC, pred_all_bit_indices, visual_rope_cache, sequece_packing_scales, super_scale_lengths, super_querysid_super_refsid, other_info_by_scale = self.video_encode(
                 vae=self.vae_local,
                 inp_B3HW=None,
@@ -581,6 +692,7 @@ class InfinityTrainer(object):
             # 如果 replay 图和 packed CE 图同时保留，显存会非常大，因此这里先做模式切分。
             trainer_type = str(getattr(args, "trainer_type", "sft") or "sft").strip().lower()
             # hybrid 模式允许数据集按 batch 指定当前应走 SFT 还是 GRPO。
+            # 例如 12 条 GRPO clip + 1 条 SFT anchor 的混训数据，可以在 batch 级别切换 role。
             if isinstance(hybrid_roles, list) and len(hybrid_roles) > 0:
                 uniq = {str(x or "").strip().lower() for x in hybrid_roles}
                 uniq.discard("")
@@ -625,7 +737,7 @@ class InfinityTrainer(object):
                 )  # 中文说明：loss & acc_bit: [seq_len]
 
             # 多尺度损失重加权：按尺度体积比调节不同 level 的贡献。
-            # 代码/形状说明：import pdb; pdb.set_trace()
+            # SFT 时它决定最终 CE loss 怎么平均；GRPO 时它决定每个样本/scale 的 PPO 目标怎么广播和聚合。
             acc_pt2scale_acc = {}
             acc_pt2scale_acc_counter = {}
             for full_pt, scale_schedule in self.dynamic_resolution_h_w[self.h_div_w_templates[0]][args.pn]['pt2scale_schedule'].items():
@@ -655,12 +767,26 @@ class InfinityTrainer(object):
             pg_by_sample: Optional[torch.Tensor] = None
             aux_sft_by_sample: Optional[torch.Tensor] = None
             if use_grpo:
+                # -------------------------
+                # GRPO metadata 入口
+                # -------------------------
+                # StageA/reward_uavflow.py 已经把每条 replay row 的 reward、advantage、old logprob
+                # 和 trace 文件写进 batch。这里把它们转成 tensor，供后面 PPO 目标使用。
+                #
+                # 通俗地说，StageA 做的是“试着生成很多条未来 latent，并给每条打分”；
+                # StageB 到这里拿到的是每条样本的训练账本：
+                # - oldlp_t：当时旧模型多大概率会生成这条；
+                # - weight_t：这条轨迹值不值得鼓励；
+                # - trace：这条轨迹具体采了哪些 token。
                 n_s = len(raw_features_list)
                 if isinstance(grpo_rewards, list) and len(grpo_rewards) == n_s:
                     reward_t = torch.tensor(grpo_rewards, dtype=loss.dtype, device=loss.device)
                 if isinstance(grpo_old_logprobs, list) and len(grpo_old_logprobs) == len(raw_features_list):
                     oldlp_t = torch.tensor(grpo_old_logprobs, dtype=loss.dtype, device=loss.device)
                 if bool(int(getattr(args, "grpo_require_old_logprob", 1))):
+                    # strict GRPO 必须有 old logprob 和 trace。
+                    # 没有 old logprob，就无法算 ratio = exp(new-old)；
+                    # 没有 trace，就无法保证 new logprob 是在同一批 sampled tokens 上重算的。
                     if oldlp_t is None:
                         raise RuntimeError(
                             "GRPO strict mode 需要每个样本都有 grpo_old_logprob；当前列表缺失或长度不匹配。"
@@ -674,6 +800,8 @@ class InfinityTrainer(object):
                 # 首选直接消费 StageA 预先算好的 final advantage。
                 # 兼容路径则在当前 batch 内按 reward 字段重建权重。
                 if isinstance(grpo_adv_finals, list) and len(grpo_adv_finals) == n_s:
+                    # `grpo_adv_final` 通常来自 reward_uavflow.py：
+                    # 它已经做过非负裁剪、整轨迹 gate 和安全检查，是训练最优先使用的权重。
                     w_np = np.asarray([float(x) for x in grpo_adv_finals], dtype=np.float64)
                     adv_clip = float(getattr(args, "grpo_adv_clip", 0.0))
                     if adv_clip and adv_clip > 0:
@@ -692,6 +820,8 @@ class InfinityTrainer(object):
                         if isinstance(grpo_reward_ces, list) and len(grpo_reward_ces) == n_s
                         else np.zeros((n_s,), dtype=np.float64)
                     )
+                    # reward 分项主要用于日志、兜底权重重建和诊断：
+                    # r_act 约束动作轨迹像专家，r_task 看任务进展，r_ce/reference 限制偏离旧策略。
                     reward_act_t = torch.tensor(r_act_np, dtype=loss.dtype, device=loss.device)
                     reward_task_t = torch.tensor(r_task_np, dtype=loss.dtype, device=loss.device)
                     if isinstance(grpo_reward_task_raws, list) and len(grpo_reward_task_raws) == n_s:
@@ -746,6 +876,7 @@ class InfinityTrainer(object):
                     lam_act = float(getattr(args, "grpo_lambda_act", 1.0))
                     lam_task = float(getattr(args, "grpo_lambda_task", 1.0))
                     lam_ce = float(getattr(args, "grpo_lambda_ce", 0.0))
+                    # 组合 reward 只是兜底/诊断分数；如果前面已有 grpo_adv_final，训练权重仍优先用 weight_t。
                     r_np = lam_act * r_act_np + lam_task * r_task_np + lam_ce * r_ce_np
                     if reward_t is None:
                         reward_t = torch.tensor(r_np, dtype=loss.dtype, device=loss.device)
@@ -850,6 +981,19 @@ class InfinityTrainer(object):
                 newlp_t: Optional[torch.Tensor] = None
                 new_mode = str(getattr(args, "grpo_new_logprob_mode", "trace_replay") or "trace_replay").strip().lower()
                 if oldlp_t is not None and weight_t is not None and new_mode in ("trace_replay", "trace_ce"):
+                    # -------------------------
+                    # GRPO new_logprob 计算
+                    # -------------------------
+                    # old_logprob 是 StageA rollout 时的策略概率；
+                    # new_logprob 是当前正在训练的模型对同一批 token 重新打分。
+                    # 二者差值决定 PPO ratio。这里支持两种打分模式：
+                    # - trace_replay：严格复现采样路径和 KV cache，最准确但显存最重；
+                    # - trace_ce：用 teacher-forcing 单次前向重算选中 token 的 CE/logprob，更省显存。
+                    #
+                    # 为什么不能直接拿上面 SFT 的 CE loss 当 new_logprob？
+                    # 因为 PPO 比较的是“同一条采样轨迹”在旧模型和新模型下的概率。
+                    # 普通 SFT forward 看的是真实视频 token；GRPO 要重算的是 StageA 采出来的 token。
+                    # 如果两批 token 不一致，ratio = exp(new-old) 就没有训练意义。
                     if not (isinstance(grpo_trace_files, list) and len(grpo_trace_files) == n_s):
                         raise RuntimeError("trace_replay 需要与 batch 对齐的 grpo_trace_files")
                     # 从 packed 的 text_cond_tuple 中切出单样本版本，供逐样本 replay 使用。
@@ -903,6 +1047,8 @@ class InfinityTrainer(object):
                             idx_trace = tr.get("idx_trace", None)
                             if idx_trace is None:
                                 raise RuntimeError(f"trace_replay 在 {tf0} 中缺少 idx_trace")
+                            # idx_trace 是 StageA 采样时真正选中的 token。
+                            # PPO/GRPO 不能在另一批 token 上算 new logprob，否则 ratio 没有意义。
                             clipid_target = tr.get("clipid_target", None)
                             try:
                                 clipid_target_i = int(clipid_target) if clipid_target is not None else None
@@ -1023,6 +1169,7 @@ class InfinityTrainer(object):
                             else:
                                 # `trace_ce` 走 teacher-forcing 单次前向，不回放 KV cache，
                                 # 属于更传统的 PPO / RLHF 新 logprob 计算方式。
+                                # 它牺牲部分“采样过程完全复现”的严格性，换来更低显存和更稳定吞吐。
                                 import math as _math
                                 import json as _json
                                 import torch.nn.functional as _F
@@ -1084,6 +1231,13 @@ class InfinityTrainer(object):
                                     return _x
 
                                 # 按尺度拼装输入 / 标签 / rope，并用 idx_trace 更新 latent 状态。
+                                # 这一段看起来复杂，是因为 `trace_ce` 要“手工还原一次 StageA 的生成现场”：
+                                # 1. 从初始噪声/零 latent 开始；
+                                # 2. 每个 scale 读取 StageA 真实采到的 idx_trace；
+                                # 3. 把 idx_trace 反查成 codes，加回 summed_code；
+                                # 4. 用更新后的 summed_code 作为后续 scale 的条件；
+                                # 5. 最后只对目标 clip 的 token 求 logprob。
+                                # 这样虽然没有回放 KV-cache，但至少保证当前模型打分的是“采样轨迹本身”。
                                 B1 = 1
                                 # latent 运算尽量沿用模型 dtype；真正前向时会再转成 fp32。
                                 lat_dtype = model_dtype
@@ -1141,6 +1295,8 @@ class InfinityTrainer(object):
 
                                 # 把原始 context_info 里的 ref_sids 重映射到“当前选中的尺度子集”；
                                 # 没有被选中的引用尺度会在这里被丢掉。
+                                # 选择子集的原因是省显存：长视频所有 scale 全部 teacher-forcing 会非常重。
+                                # 但如果丢掉引用关系，attention 依赖会错位，所以这里必须同步重映射 ref_sids。
                                 real_si_2_new_si: Dict[int, int] = {int(r): int(i2) for i2, r in enumerate(select_si_list)}
                                 new_scale_pack_info: Dict[int, Dict[str, Any]] = {}
                                 for new_q, real_q in enumerate(select_si_list):
@@ -1204,6 +1360,9 @@ class InfinityTrainer(object):
 
                                     # 用该尺度缓存 token 更新 latent 状态，保持后续条件一致。
                                     # codes 累加使用的目标空间尺寸。
+                                    # 这就是世界模型 latent 的“逐尺度求和”逻辑：
+                                    # 当前 scale 预测/采样出的 code 不是单独存在，而是上采样到目标分辨率后
+                                    # 加到 `summed_code` 里；下一 scale 再基于这个累计 latent 继续预测。
                                     if _si < scales_in_one_clip:
                                         target_pn = vae_scale_schedule[int(first_full)]
                                     else:
@@ -1374,6 +1533,10 @@ class InfinityTrainer(object):
                     eps = float(getattr(args, "grpo_ratio_eps", 0.2))
                     ratio_clip = torch.clamp(ratio, 1.0 - eps, 1.0 + eps)
                     wt32 = weight_t.to(torch.float32)
+                    # PPO clipped objective 的作用：
+                    # - advantage/weight 高的样本，希望当前策略提高它的概率；
+                    # - 但 ratio 不能涨太猛，所以和 clipped ratio 取保守值；
+                    # - 如果未来允许负 advantage，则负样本会用 max 形式做对称处理。
                     unclipped = ratio * wt32
                     clipped = ratio_clip * wt32
                     obj = torch.where(wt32 >= 0, torch.minimum(unclipped, clipped), torch.maximum(unclipped, clipped))
@@ -1433,6 +1596,8 @@ class InfinityTrainer(object):
                         adv = weight_t[sample_ind]
                         if pg_by_sample is not None:
                             # Trace-replay 的逐样本 PPO 目标，广播到所有尺度用于加权。
+                            # 这里不是每个 scale 重新算一遍 PPO，而是把该样本的策略梯度目标
+                            # 放进 scale 聚合框架，保持和 SFT 的 loss 汇总/日志路径一致。
                             pg_obj = pg_by_sample[sample_ind]
                         elif oldlp_t is not None:
                             # 兼容旧逻辑：把逐尺度负 CE 当作 logp_new 估计。
@@ -1461,7 +1626,10 @@ class InfinityTrainer(object):
             flatten_weight_list = flatten_weight_list / flatten_weight_list.sum()
             sft_loss = (torch.stack(flatten_L_list) * flatten_weight_list).sum()
             if use_grpo and len(flatten_pg_obj_list) == len(flatten_L_list) and len(flatten_pg_obj_list) > 0:
-                # 中文说明：Non-strict fallback path (e.g. no old_logprob): keep legacy behavior.
+                # 这里进入“最终 loss 选择”：
+                # - 严格 GRPO：`pg_by_sample` 已经是逐样本 PPO loss，最终只反传它；
+                # - 兼容/兜底 GRPO：没有严格 new/old logprob 时，用 reward 加权 CE 近似；
+                # - 普通 SFT：完全不走这个分支，只反传 `sft_loss`。
                 rl_loss = (torch.stack(flatten_pg_obj_list) * flatten_weight_list).sum()
                 # 可选混合缩放：当 GRPO 与更强的 SFT anchor 混训时，压低 RL 更新幅度。
                 rl_coef = float(getattr(args, "grpo_hybrid_rl_coef", 1.0) or 1.0)
@@ -1471,10 +1639,15 @@ class InfinityTrainer(object):
                 # 若严格 PPO 目标存在（pg_by_sample != None），辅助项已经在 trace_ce 分支里合入，
                 # 不能再通过 sft_loss 强制触发完整 packed backward。
                 if pg_by_sample is not None:
+                    # 严格 GRPO：最终 loss 就是 PPO/GRPO 目标。
+                    # 此时 SFT CE forward 主要用于 metric/aux，不再额外反传完整 sft_loss。
                     final_loss = rl_loss
                 else:
+                    # 兼容旧逻辑：没有严格 replay 目标时，可以把 aux SFT CE 混进 RL loss，
+                    # 用来防止模型在 reward 信号下快速偏离基础视频建模能力。
                     final_loss = rl_loss + aux * sft_loss
             else:
+                # 普通 SFT 路径：没有 GRPO 权重，最终 loss 就是 teacher-forcing CE。
                 final_loss = sft_loss
             final_acc_bit = (torch.stack(flatten_acc_bit_list) * flatten_weight_list).sum()
 
@@ -1561,6 +1734,12 @@ class InfinityTrainer(object):
             weight_max = None
             success_negative_ratio = None
             if use_grpo and weight_t is not None:
+                # GRPO 日志统计只做观测，不参与梯度。
+                # 这些指标回答的是“reward/advantage 数据质量怎么样”：
+                # - rew/r_act/r_task：这批 rollout 的奖励均值；
+                # - adv/weight：最终用于训练的鼓励强度；
+                # - pos/w_zero/w_neg/N_eff：有效样本有多少，避免一批里大多数权重为 0；
+                # - succ/task_cost/pos_err/yaw_err：导航任务层面的诊断。
                 def _sum_and_count(tensor):
                     """把一个指标张量安全地转换成“总和 + 样本数”。"""
                     if tensor is None:
@@ -1587,6 +1766,8 @@ class InfinityTrainer(object):
                 zero_sum = torch.sum((finite_mask & (weight_t == 0)).to(torch.float32))
                 neg_sum = torch.sum((finite_mask & (weight_t < 0)).to(torch.float32))
                 finite_cnt = torch.sum(finite_mask.to(torch.float32))
+                # `weight_t` 是 GRPO 真正乘到 policy objective 上的 advantage。
+                # 如果 pos_ratio/N_eff 很低，说明这一批可学习的“好轨迹”太少，RL 更新会很弱。
                 finite_weight_t = torch.masked_select(weight_t.detach().to(torch.float32), finite_mask)
                 weight_min_t = torch.tensor(float("inf"), dtype=torch.float32, device=loss.device)
                 weight_max_t = torch.tensor(float("-inf"), dtype=torch.float32, device=loss.device)
@@ -1631,6 +1812,8 @@ class InfinityTrainer(object):
                         succ_traj_hit_sum, succ_traj_hit_cnt,
                     ]
                 )
+                # 多卡训练时每张卡只看到局部 batch；这里把 reward/advantage 统计合并成全局均值。
+                # 注意这只是日志聚合，不会改变前面已经计算好的本地 loss。
                 tdist.all_reduce(reward_stats, op=tdist.ReduceOp.SUM)
                 tdist.all_reduce(weight_min_t, op=tdist.ReduceOp.MIN)
                 tdist.all_reduce(weight_max_t, op=tdist.ReduceOp.MAX)
@@ -1680,9 +1863,13 @@ class InfinityTrainer(object):
                 'yaw_err_deg': task_yaw_err_mean,
                 'adv': adv_mean,
             }
+            # GRPO reward 抖动通常比 SFT CE 大得多，所以额外维护 EMA/optimizer-step 级平滑值。
+            # 看训练曲线时优先看 *_ema / *_optstep_ema，少被单个 rollout batch 的噪声误导。
             self._update_stable_metric_trackers(stable_metric_inputs, stepping=stepping)
             stable_metrics = self._collect_stable_metrics()
 
+            # MetricLogger 是控制台/本地日志；wandb_log_dict 是远端可视化。
+            # SFT 路径主要看 L/Acc/seq_usage；GRPO 路径还要同时看 reward、advantage 和 success 指标。
             metric_lg.update(
                 L=train_loss,
                 Acc=train_acc*base,
@@ -1756,6 +1943,9 @@ class InfinityTrainer(object):
                 wandb_log_dict['GRPO/task_final_yaw_err_mean_deg'] = task_yaw_err_mean
             if use_grpo and ('weight_t' in locals()) and (weight_t is not None):
                 with torch.no_grad():
+                    # N_eff 这里定义为正 advantage 样本数。
+                    # 它不是严格统计学 effective sample size，而是一个直观诊断：
+                    # 当前 batch 里到底有多少条轨迹会推动模型“更容易采到它”。
                     neff = torch.sum(torch.isfinite(weight_t) & (weight_t > 0)).float()
                     wandb_log_dict['GRPO/N_eff'] = float(neff.item())
             for stable_key, stable_value in stable_metrics.items():
@@ -1799,13 +1989,20 @@ class InfinityTrainer(object):
         }
 
     def state_dict(self):
-        """打包训练器状态，包括配置、VAE、模型和优化器。"""
+        """
+        打包训练器状态，包括配置、VAE、模型和优化器。
+
+        不管当前是在 SFT 还是 GRPO 训练，checkpoint 保存的核心都是同一个 `gpt` 世界模型。
+        GRPO 没有在这里额外保存一个“强化学习模型”；它只是用 PPO/GRPO loss 改写世界模型参数。
+        """
         m = self.vae_local
         if hasattr(m, '_orig_mod'):
             m = m._orig_mod
         state = {'config': self.get_config(), 'vae_local': m.state_dict()}
 
         if self.zero:   # 中文说明：待修复；zero 路径需要单独处理 state_dict 加载细节。
+            # FSDP/ZeRO 下参数被切分在多张卡上，保存前需要进入 FULL_STATE_DICT 上下文，
+            # 由 PyTorch 负责把分片参数/优化器状态还原成可落盘的完整 checkpoint。
             state['gpt_fsdp'] = None
             with FSDP.state_dict_type(self.gpt, StateDictType.FULL_STATE_DICT, fullstate_save_policy, fulloptstate_save_policy):
                 state['gpt_fsdp'] = self.gpt.state_dict()
@@ -1826,7 +2023,14 @@ class InfinityTrainer(object):
         return state
 
     def load_state_dict(self, state, strict=True, skip_vae=False):
-        """从 checkpoint 恢复模型、优化器和训练进度状态。"""
+        """
+        从 checkpoint 恢复模型、优化器和训练进度状态。
+
+        这也是理解 SFT/GRPO 关系的地方：
+        - 加载 SFT checkpoint 后继续训练，可以走普通 SFT；
+        - 加载同一个 SFT checkpoint 后切到 `trainer_type=grpo`，就是在 SFT 底座上做 RL 微调；
+        - 推理时只需要加载训练好的世界模型权重，不需要运行本 trainer。
+        """
         if self.zero:
             with FSDP.state_dict_type(self.gpt, StateDictType.FULL_STATE_DICT, fullstate_save_policy, fulloptstate_save_policy):
                 gpt_state = state['gpt_fsdp']

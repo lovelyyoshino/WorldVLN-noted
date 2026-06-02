@@ -271,6 +271,542 @@ dataset 模式主要是“回放已有真实帧并记录动作/位姿”；unrea
    runtime trainer 在 hybrid batch 中区分 SFT 与 GRPO replay。读 `train_step()` 时重点看
    `use_grpo`、old logprob、ratio clip、advantage 和冻结/解冻策略。
 
+### 2.3.6 `reward_uavflow.py`：白话理解 GRPO 奖励怎么来
+
+先不要把 `reward_uavflow.py` 想成一个模型。它更像一个“打分老师”：
+
+```text
+前面 rollout 已经让模型实际跑了一遍路线
+  -> 得到这条候选路线走成什么样
+  -> reward_uavflow.py 拿它和专家路线比较
+  -> 给每个候选片段打分
+  -> 把分数写进 replay jsonl
+  -> 训练时用这些分数告诉世界模型：以后更应该采哪种 latent/token
+```
+
+它在整条 GRPO 链路里的位置是：
+
+```text
+build_rollout_tasks.py
+  准备任务：这次要从哪里出发、看什么指令、专家轨迹在哪里
+
+generate_candidate_rollouts.py
+  给同一个任务复制出 K 个候选：同一题让模型尝试 K 次
+
+generate_candidate_trajectories_real.py / grpo_server.py
+  真正跑闭环：模型预测动作，环境执行动作，最后保存 trajectory.json
+
+reward_uavflow.py
+  看每条 trajectory.json 跑得怎么样，给每个候选片段打分
+
+sft_trainer.py
+  用这些分数做 GRPO/PPO 风格训练
+```
+
+最常见输入是：
+
+1. `--replay_jsonl`
+   候选清单。每一行告诉脚本：这是哪个任务、哪个候选、对应哪个 `traj_id`、专家轨迹 `gt_pose_json` 在哪里。
+
+2. `--trajectory_json_dir`
+   rollout 结果目录。每个 `traj_id/trajectory.json` 里保存模型实际走出来的轨迹、old logprob、trace 文件。
+
+3. `gt_pose_json`
+   专家路线。脚本会把专家路线和模型路线放到同一个相对坐标系下比较。
+
+一句话：`reward_uavflow.py` 做的事就是“拿候选路线和专家路线比，然后把好坏写成训练可用的 reward/advantage”。
+
+#### 2.3.6.1 为什么 49 帧对应 48 个 pose/action
+
+这里最关键的直觉是：**帧是状态点，动作是两个状态点之间的边**。
+
+如果只有 2 帧：
+
+```text
+frame0 --action0--> frame1
+```
+
+只有 1 个动作，因为只发生了一次“从 frame0 移动到 frame1”。
+
+如果有 3 帧：
+
+```text
+frame0 --action0--> frame1 --action1--> frame2
+```
+
+有 2 个动作。
+
+所以一般规律是：
+
+```text
+T 帧画面 = T 个状态点
+相邻状态之间的动作数量 = T - 1
+
+49 帧 = frame0 ... frame48
+动作是：
+  frame0 -> frame1
+  frame1 -> frame2
+  ...
+  frame47 -> frame48
+一共 48 个动作
+```
+
+这也是为什么 `relative_poses.poses` 通常是 48 个：它记录的不是“49 个画面”，而是“从起点开始每一步走到了哪里”。
+第 0 帧只是起点，不需要一个“到达第 0 帧”的动作。
+
+#### 2.3.6.2 为什么是 49、17、16 这些固定数字
+
+当前 GRPO 这套流程默认把一条 rollout 看成：
+
+```text
+1 帧起点观测 + 16 步动作 + 16 步动作 + 16 步动作
+= 1 + 48
+= 49 帧时间线
+```
+
+换成时间线就是：
+
+```text
+完整路线：frame0 ... frame48
+
+第 1 段：frame0  -> frame16，16 个动作
+第 2 段：frame16 -> frame32，16 个动作
+第 3 段：frame32 -> frame48，16 个动作
+```
+
+注意每段看起来有 17 帧，是因为它要包含“起点帧 + 16 个动作后的 16 个新帧”：
+
+```text
+frame0..frame16  有 17 个状态点，但只有 16 条边
+frame16..frame32 有 17 个状态点，但只有 16 条边
+frame32..frame48 有 17 个状态点，但只有 16 条边
+```
+
+这就是代码里常见的对应关系：
+
+```text
+clip_len=16      表示每个 replay 样本训练 16 个动作
+num_clips=3      表示一条 rollout 拆成 3 段
+49 frames        表示 1 个起点 + 3*16 个动作后的状态点
+points=[1,17,33,49]  是服务端用的 1-based 帧边界
+```
+
+文档里有时写 `frame0..frame48`，代码服务端里常用 `1..49`。这是同一件事的两种编号方式：
+
+```text
+0-based: frame0, frame16, frame32, frame48
+1-based: frame1, frame17, frame33, frame49
+```
+
+#### 2.3.6.3 为什么默认设计成 48 pose，而不是 16、32、64
+
+先说结论：**不是不能改成更多或更少的 16 倍数**。`48 pose` 是当前实验里选的默认 rollout horizon，
+不是物理定律，也不是 reward 脚本自己决定的唯一合法长度。
+
+如果保持 `step=16`，理论上可以有这些形态：
+
+```text
+16 pose -> 17 帧 -> 1 个 clip
+32 pose -> 33 帧 -> 2 个 clip
+48 pose -> 49 帧 -> 3 个 clip
+64 pose -> 65 帧 -> 4 个 clip
+```
+
+当前选 `48 pose = 3*16`，主要是一个工程折中：
+
+1. `16 pose` 太短。
+   它只看 1 个闭环片段，适合检查局部动作像不像专家，但很多导航任务的“有没有朝目标前进”不一定看得出来。
+
+2. `32 pose` 可以用，但任务反馈还是偏短。
+   两段已经能看到一点闭环效果，不过对成功/失败的区分通常没有 3 段稳定。
+
+3. `48 pose` 大约是 3 秒 horizon。
+   默认 `fps=16` 时，`16 pose` 约等于 1 秒，`48 pose` 约等于 3 秒。3 秒足够让 task reward 看出进展，
+   但还没有长到 rollout 成本和误差累积失控。
+
+4. `64 pose` 或更长会更贵、更噪。
+   rollout 要跑更久，`trajectory.json`、trace、old logprob segment 都会变多；后段动作受前面误差影响更大，
+   reward 也更容易变成“前面错一步，后面全都被污染”。
+
+5. 3 段刚好适合当前 GRPO 组内比较。
+   一条任务有 K 个候选，每个候选拆成 3 个 clip。这样每个 clip 都能在同任务同位置上比较“哪个候选更好”，
+   数据量、显存、trace 回放成本都还能控制。
+
+所以 `48 pose` 可以理解成：
+
+```text
+足够长：能看到任务进展
+足够短：rollout、trace replay、reward 噪声还能接受
+刚好对齐：3 个 16-action 闭环片段
+```
+
+如果你要改成 16/32/64，不是只改 `reward_uavflow.py` 的 `--num_clips`。至少要一起检查：
+
+```text
+服务端/配置：num_frames = 1 + pose_count
+闭环步长：step = 16
+reward 切片：clip_len=16, num_clips=pose_count/16
+训练视频长度：TRAIN_VIDEO_FRAMES = 1 + pose_count
+rollout trace：sample_logprob_segments 数量要等于 num_clips
+replay meta：每条 rollout 展开的 clip row 数量要同步变化
+动作头/latent 切片：points 和 last_latent_1 拼接逻辑要仍然对齐
+```
+
+#### 2.3.6.4 这些数字是不是对应 InfinityStar 的工作方式
+
+是的，但不是只对应 InfinityStar。更准确地说，`49/17/16/48 pose` 是几层模块共同约定出来的时间协议：
+
+1. 在线闭环协议需要每轮输出 16 个动作。
+   客户端执行完这 16 个动作后，会拿到 16 个新画面，再回传给服务端。
+
+2. Stage-2 动作头按 16-action segment 工作。
+   它每次看一段 latent/video token，最后输出当前段的逐帧动作。
+
+3. InfinityStar/VAE 的视频时间轴有 4 倍压缩。
+   代码里常见公式是：
+
+```text
+latent_time = (frames - 1) // 4 + 1
+```
+
+所以：
+
+```text
+17 帧 -> (17-1)//4 + 1 = 5 个 latent 时间步
+49 帧 -> (49-1)//4 + 1 = 13 个 latent 时间步
+```
+
+这就是为什么要用 `4n+1` 这种帧数。17 是 `4*4+1`，49 是 `4*12+1`。
+它们刚好能在 VAE/InfinityStar 的 latent 时间轴上对齐，不会出现半个 latent step。
+
+4. streaming cache 需要段与段之间有公共边界。
+   例如：
+
+```text
+第 1 段 frame1..frame17 -> latent1..latent5
+第 2 段 frame17..frame33 -> latent5 + latent6..latent9
+第 3 段 frame33..frame49 -> latent9 + latent10..latent13
+```
+
+`latent5` 和 `latent9` 是段与段之间的连接点。服务端保存 `last_latent_1`，下一段再把它拼回来，
+就是为了让第 1 段和第 2 段、第 2 段和第 3 段在时间线上连续。
+
+所以这些数字不是 reward 脚本随便固定的。它们同时对齐：
+
+```text
+客户端闭环节奏：1 帧起步，然后每轮 16 帧
+InfinityStar/VAE：4 倍时间压缩，需要 4n+1 帧
+动作头：一段输出 16 个动作
+GRPO replay：一条 49 帧 rollout 拆成 3 个 16-action 样本
+```
+
+理论上可以改这些数字，但不能只改一个地方。你需要同时改 `num_frames`、`step`、world model schedule、
+动作头训练/推理窗口、reward 切片、replay 构建和客户端闭环节奏。否则最常见的问题就是：
+latent 切片对不上、动作数量不对、old logprob segment 数量不对，或者训练样本和 rollout trace 对不上。
+
+#### 2.3.6.5 `clip` 模式到底怎么拆 49 帧
+
+`reward_uavflow.py` 默认读 `output_mode="clip"`，也就是把一条完整 rollout 拆成 3 个 replay 样本：
+
+```text
+模型整条路线 pred_all：48 个动作/相对 pose
+专家整条路线 gt_use_all：48 个动作/相对 pose
+
+clip 1: pred_all[0:16]   对 gt_use_all[0:16]
+clip 2: pred_all[16:32]  对 gt_use_all[16:32]
+clip 3: pred_all[32:48]  对 gt_use_all[32:48]
+```
+
+每个 clip 会写入自己的 replay row：
+
+```text
+traj_id        = 原 traj_id + "_c1/_c2/_c3"
+grpo_clip_id  = 1 / 2 / 3
+grpo_group_id = 原任务 group + "_clip1/_clip2/_clip3"
+begin_frame_id / end_frame_id = 当前段的帧边界
+```
+
+这里的 `grpo_group_id` 很重要。GRPO 不是只看一个候选自己的绝对分，而是比较“同一个任务、同一个 clip 下的 K 个候选谁更好”。
+所以 clip1 只和 clip1 的其他候选比，clip2 只和 clip2 的其他候选比。
+
+#### 2.3.6.6 三类 reward 用白话怎么理解
+
+`reward_uavflow.py` 最后会给每个 clip 算三类分数。
+
+第一类是 `action reward`：
+
+```text
+问题：这 16 步走出来的形状，像不像专家的 16 步？
+看法：每一步的位置/yaw/姿态和专家差多少
+代码字段：grpo_reward_act、grpo_act_mse_scalar、grpo_mse
+```
+
+如果模型每一步都走得接近专家，这项就高；如果方向、位置、yaw 偏得很厉害，这项就低。
+
+第二类是 `task reward`：
+
+```text
+问题：这一段结束时，离目标近不近？
+看法：只看当前 clip 的终点位置误差和 yaw 误差
+代码字段：grpo_reward_task、grpo_reward_task_raw、grpo_task_final_pos_err_m
+```
+
+这项不是逐帧看动作，而是看“这一段最后有没有更接近目标”。所以它会保留 dense 分数和 success bonus：
+离目标越近，dense 分越高；过了成功阈值，再给一点成功加分。
+
+第三类是 `CE/reference reward`：
+
+```text
+问题：这个采样轨迹是不是太不像旧策略/参考策略会采出来的东西？
+看法：用 rollout 时保存的 old logprob / NLL 做约束
+代码字段：grpo_old_logprob、grpo_reward_ce_adv、grpo_ref_logprob
+```
+
+这项不是在判断动作好不好，而是在防止 GRPO 更新太激进，把世界模型原来学到的视频/latent 先验破坏掉。
+
+最终组合可以先记成一句话：
+
+```text
+最终分 = 动作像不像专家 + 终点有没有接近目标 + 不要偏离旧策略太远
+```
+
+代码里的字段是：
+
+```text
+grpo_reward =
+  lambda_act  * grpo_reward_act
++ lambda_task * grpo_reward_task
++ lambda_ce   * grpo_reward_ce_adv
+```
+
+#### 2.3.6.7 训练端真正用哪个字段
+
+这点也容易误解：`grpo_reward` 是组合分数，但训练端最优先用的是 `grpo_adv_final`。
+
+`reward_uavflow.py` 最后会做一道保守处理：
+
+```text
+如果组合分数 grpo_reward 是负的，就不要鼓励它
+如果整条轨迹最终也很差，就降低这段的训练权重
+最后得到非负的 grpo_adv_final
+```
+
+训练时大致是：
+
+```text
+old_logprob = rollout 当时保存的 grpo_old_logprob
+new_logprob = 当前模型回放 trace_files 后重新算出来的 logprob
+ratio       = exp(new_logprob - old_logprob)
+weight      = grpo_adv_final
+```
+
+白话说就是：
+
+```text
+如果某个候选片段走得好，grpo_adv_final 就高；
+训练时就提高当前模型再次采出类似 token/latent 的概率。
+```
+
+所以读这个文件时，按这个顺序看最清楚：
+
+1. 先看 `clip` 模式怎么把 49 帧拆成 3 段。
+2. 再看每段怎么和专家轨迹比较。
+3. 再看同组候选怎么互相比。
+4. 最后看 `grpo_adv_final` 怎么交给 `sft_trainer.py`。
+
+### 2.3.7 强化学习步骤在哪里：你是怎么完成 GRPO 训练的
+
+这套强化学习不是“一条命令直接训练”。它分成两大阶段：
+
+```text
+StageA collect：先让旧策略出去跑，收集候选轨迹和 reward
+StageB train  ：再拿这些 replay 数据，回放 old trace，更新当前策略
+```
+
+入口脚本在这里：
+
+```text
+采样/打分入口：
+  action_aware_grpo/scripts/run_stagea_collect.sh
+  -> Worldmodel/runtime/scripts/GRPO_stageA_collect.sh
+
+训练入口：
+  action_aware_grpo/scripts/run_stageb_partialfreeze.sh
+  -> Worldmodel/runtime/scripts/GRPO_stageB_partialfreeze_train.sh
+  -> Worldmodel/runtime/scripts/GRPO_stageB_train.sh
+```
+
+#### 2.3.7.1 StageA collect：强化学习数据怎么来
+
+StageA 的目标不是更新模型，而是生成训练材料。白话说就是：让当前策略多试几次，把每次试出来的路线打分保存。
+
+`GRPO_stageA_collect.sh` 做了这些事：
+
+1. 任务归一化。
+   调 `build_rollout_tasks.py`，把原始 UAV-Flow JSON 变成 `rollout_tasks.jsonl`。
+   这里统一字段，例如 `video_path`、`caption`、`gt_pose_json`、`grpo_group_id`。
+
+2. 给每个任务生成 K 个候选。
+   调 `generate_candidate_rollouts.py`，输出 `rollout_candidates.jsonl`。
+   默认 `K_CAND=8`，意思是同一道题让策略采样 8 次，这样 GRPO 才有“同组候选谁更好”的比较对象。
+
+3. 跑真实闭环 rollout。
+   调 `generate_candidate_trajectories_real.py`，它会启动/导入 `action_aware_grpo/grpo_server.py`，
+   通过 remote simulator 做：
+
+```text
+reset 拿首帧
+  -> 服务端预测 16 个动作
+  -> simulator 执行动作并返回 16 个新帧
+  -> 再预测下一段
+  -> 直到得到 49 帧 / 48 pose 的 trajectory.json
+```
+
+每个 `traj_id/trajectory.json` 里最重要的是：
+
+```text
+relative_poses.poses       模型实际走出来的 48 个 pose/action
+sample_logprob_segments    rollout 当时旧策略的 old logprob
+trace_files                StageB 重算 new logprob 时要回放的 token trace
+```
+
+4. 计算奖励。
+   调 `reward_uavflow.py --output_mode clip --clip_len 16 --num_clips 3`。
+   它把每条 48-pose 轨迹切成 3 个 16-action replay row，并写入：
+
+```text
+grpo_reward_act
+grpo_reward_task
+grpo_reward_ce_adv
+grpo_reward
+grpo_adv_final
+grpo_old_logprob
+grpo_trace_files
+```
+
+5. 构建 replay dataset。
+   调 `build_replay_dataset.py --mode precomputed_adv`，优先使用 `reward_uavflow.py` 已经算好的
+   `grpo_adv_final`，输出 `rollout_replay.jsonl`。
+
+6. 分片和检查。
+   StageA 会把 replay 切成：
+
+```text
+Worldmodel/outputs/GRPO_data_fast/replay_meta_${RUN_ID}/part_00.jsonl
+Worldmodel/outputs/GRPO_data_fast/replay_meta_${RUN_ID}/part_01.jsonl
+...
+```
+
+然后调 `summarize_replay_meta.py` 做安全检查，例如不允许成功样本被错误赋负权重。
+
+所以 StageA 完成后的核心产物是：
+
+```text
+Worldmodel/outputs/rlcache/${RUN_ID}/trajectories/
+Worldmodel/outputs/rlcache/${RUN_ID}/rollout_tasks_rewarded.jsonl
+Worldmodel/outputs/rlcache/${RUN_ID}/rollout_replay.jsonl
+Worldmodel/outputs/GRPO_data_fast/replay_meta_${RUN_ID}/part_*.jsonl
+```
+
+#### 2.3.7.2 StageB train：强化学习真正怎么更新模型
+
+StageB 才是“训练模型”的阶段。推荐入口是：
+
+```bash
+bash action_aware_grpo/scripts/run_stageb_partialfreeze.sh RUN_ID=你的StageA_RUN_ID
+```
+
+这个 wrapper 会设置一组更保守的训练参数，再调用 `GRPO_stageB_train.sh`。重点默认值包括：
+
+```text
+TRAINER_TYPE=grpo
+GRPO_NEW_LOGPROB_MODE=trace_ce
+GRPO_KL_BETA=0.1
+GRPO_RATIO_EPS=0.15
+GRPO_AUX_SFT_COEF=0.02
+FREEZE_CHUNK_PREFIX=4
+TRAIN_VIDEO_FRAMES=49
+VIDEO_BATCH_SIZE=1
+```
+
+其中 `FREEZE_CHUNK_PREFIX=4` 表示前面的 transformer chunk 冻住，只训练后面的部分。这就是
+`partialfreeze` 名字的来源：不是全量大幅更新世界模型，而是部分解冻，让 RL 更新更稳。
+
+`GRPO_stageB_train.sh` 会找到 StageA 产出的：
+
+```text
+REPLAY_META_DIR=Worldmodel/outputs/GRPO_data_fast/replay_meta_${RUN_ID}
+```
+
+然后用 `torchrun` 启动：
+
+```text
+Worldmodel/runtime/train.py
+  --trainer_type grpo
+  --video_data_path ${REPLAY_META_DIR}
+  --video_frames 49
+  --grpo_adv_clip ...
+  --grpo_ratio_eps ...
+  --grpo_kl_beta ...
+  --grpo_new_logprob_mode ...
+  --freeze_chunk_prefix ...
+```
+
+进入 Python 后，强化学习主链是：
+
+```text
+Worldmodel/runtime/train.py::train_one_epoch()
+  从 batch 里取 grpo_rewards / grpo_old_logprobs / grpo_adv_finals / grpo_trace_files
+  -> 传给 trainer.train_step()
+
+Worldmodel/runtime/infinity/trainer/sft_trainer.py::train_step()
+  判断 trainer_type == "grpo"
+  -> oldlp_t = grpo_old_logprob
+  -> weight_t = grpo_adv_final
+  -> 用 grpo_trace_files 回放采样 token，算当前模型的 new_logprob
+  -> ratio = exp(new_logprob - old_logprob)
+  -> PPO clip 后得到 policy-gradient loss
+  -> 加可选 KL / aux SFT 稳定项
+  -> backward_clip_step() 更新未冻结的 InfinityStar 参数
+```
+
+最核心公式可以白话理解成：
+
+```text
+如果这条旧 rollout 的 grpo_adv_final 高：
+  当前模型就应该更愿意再次采出这段 token/latent。
+
+如果当前模型给这段 token 的 new_logprob 比 old_logprob 高太多：
+  ratio clip / KL 会限制它，避免策略一步跳太远。
+```
+
+代码里对应的关键位置是 `sft_trainer.py` 的 PPO/GRPO 主目标：
+
+```text
+ratio = exp(new_logprob - old_logprob)
+ratio_clip = clamp(ratio, 1-eps, 1+eps)
+objective = min_or_max(ratio * advantage, ratio_clip * advantage)
+loss = -objective + beta * approx_kl + optional_aux_sft
+```
+
+训练结果会写到：
+
+```text
+Worldmodel/outputs/checkpoints_partialfreeze/train_run_${RUN_ID}/ckpts/
+Worldmodel/outputs/train_logs/train_run_${RUN_ID}/run/
+Worldmodel/outputs/token_cache/train_run_${RUN_ID}/token_cache/
+```
+
+如果你要一句话描述“我是怎么完成强化学习训练的”，可以写成：
+
+```text
+先用 StageA 让当前世界模型在 simulator 中对每个任务采样 K 条候选闭环轨迹，
+把 49 帧 rollout 切成 3 个 16-action clip，根据动作几何、任务进度和 reference/CE 约束计算 reward/advantage；
+再用 StageB 读取 replay meta，回放 rollout trace 计算 new_logprob，
+和 old_logprob 形成 PPO/GRPO ratio，用 grpo_adv_final 作为权重，
+在 partial-freeze 设置下微调 InfinityStar，使高奖励 latent/token 更容易被当前策略采到。
+```
+
 ## 3. 在线闭环推理
 
 核心文件：`infer/server.py`
